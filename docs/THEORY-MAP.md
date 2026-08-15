@@ -7,46 +7,53 @@
 
 | 论文符号 / 术语 | 章节 | 代码（crate::path） | 测试 | 备注 |
 |---|---|---|---|---|
-| `Γ∞`（统一上下文类型） | Def 32 | 待填 | | |
-| `γ ∈ Γ`（上下文状态） | Def 32 | 待填 | | |
-| `𝔈Γ` / `𝔈iter_Γ`（效应函数/迭代器） | Def 8/51 | 待填 | | |
-| `effectΓ(𝑒)` / `ctx.effect` | Def 12, Alg 1 | 待填 | | |
-| `Σ` / `Σiso` / `Σinter`（共效应上下文） | Def 22/28/30 | 待填 | | |
-| `get` / `set` | Def 23, Alg 2 | 待填 | | |
-| `isolate` / `intercept` | Def 29/31 | 待填 | | |
-| `notify`（分类通知） | Def 26, Alg 3 | 待填 | | |
-| 组件 `(d, p, e)` | Def 43 | 待填 | | |
-| fiber `⟨d, p, e, π, σ, τ, θ⟩` | Def 44 | 待填 | | |
-| `dom(𝐹𝛾)`（registry） | Def 45 | 待填 | | |
-| `𝜏`（retirement）/ `𝜋`（parent） | Def 44 | 待填 | | |
-| `𝜔`（committed view） | Def 44/46 | 待填 | | |
-| `target_n(γ)` / 静止判定 | Def 46 | 待填 | | |
-| `ΘΓ`（生命周期状态） | Def 49 | 待填 | | |
-| `recover` / accumulator `g` | Def 6, Alg 1 | 待填 | | |
-| `relied_n(γ)`（撤离 guard） | Def 50 | 待填 | | |
-| `O-Insert` / `O-Retire` / `O-Remove` | Def 47, §4.2 | 待填 | | |
-| `L-*` 生命周期规则 | §4.2–4.3 | 待填 | | |
-| `use`（组件实例化） | Alg 4 | 待填 | | |
-| `refresh` / `reload` / `unload` | Alg 5 | 待填 | | |
-| 配置 Entry | Def 74 | 待填 | | |
+| `k: K`（键符号） | Def 22 | `cordis_core::symbol::Symbol`（全局驻留） | 单元 | 完成（PR #2） |
+| `𝒱 k`（值类型族） | Def 24 | `cordis_core::key::Key`（`type Value` + `const SYMBOL`） | 单元 | 完成（PR #2）；符号冲突在访问点报 `TypeMismatch` |
+| `𝔇Σ` / `𝔓Γ`（键集合） | Def 25/43 | `cordis_core::keyset::KeySet` | 单元 | 完成（PR #2） |
+| `Σ`（依赖表） | Def 22 | `cordis_core::store::Store` | 单元 | 完成（PR #2）；`get`/`set`/撤销带 Def 23 前置条件 |
+| 满足谓词 `σ⊧d` | Def 24 | `Store::satisfies` / `InterpState::satisfied` | 单元 | 完成（PR #2） |
+| `Γ∞`（统一上下文类型） | Def 32 | 待填 | | PR #3–4 |
+| `𝔈Γ` / `𝔈iter_Γ`（效应函数/迭代器） | Def 8/51 | 待填 | | PR #3 |
+| `effectΓ(𝑒)` / `ctx.effect` | Def 12, Alg 1 | 待填 | | PR #3 |
+| `get` / `set`（共效应操作） | Def 23, Alg 2 | 待填（表操作已在 `Store`） | | 效应包装 PR #4 |
+| `isolate` / `intercept` | Def 29/31 | 待填 | | PR #4 |
+| `notify`（分类通知） | Def 26, Alg 3 | 待填 | | PR #4 |
+| 组件 `(d, p, e)` | Def 43 | `interp::Component`（参考实现） | 单元 | 生产版 PR #3 |
+| fiber `⟨d, p, e, π, σ, τ, θ⟩` | Def 44 | `interp::Fiber`（参考实现） | 单元 | 生产版 PR #5 |
+| `n: 𝔑`（fiber 名） | Def 44/45 | `cordis_core::fiber::FiberId` | 单元 | 完成（PR #2） |
+| `dom(𝐹𝛾)`（registry） | Def 45 | `interp::InterpState`（BTreeMap） | 单元 | 参考实现 |
+| `target_n(γ)` / 静止判定 | Def 46 | `InterpState::target` / `is_quiet` | 单元 | 参考实现 |
+| `ΘΓ`（生命周期状态） | Def 49 | `interp::Lifecycle`（两状态版） | 单元 | 参考实现；扩展版 PR #5 |
+| `σγ` / `provider_k(γ)` | Def 45 式 (40) | `InterpState::provided` / `provider_of` | 单元 | 参考实现 |
+| 支持集 / Lemma 70 | Def 67–70 | `InterpState::support_set` | 单元 | 参考实现 |
+| `O-Insert` / `O-Retire` / `O-Remove` | §4.2 | `InterpState::insert` / `retire` / `remove` | 单元 | 参考实现 |
+| `L-Reload` / `L-Unload` | §4.2 | `InterpState::reload` / `unload` | 单元 | 参考实现 |
+| `recover` / accumulator `g` | Def 6, Alg 1 | 待填 | | PR #3 |
+| `relied_n(γ)`（撤离 guard） | Def 50 | 待填 | | PR #5 |
+| `use`（组件实例化） | Alg 4 | 待填 | | PR #5 |
+| `refresh` / `reload` / `unload` | Alg 5 | 待填 | | PR #5 |
+| 配置 Entry | Def 74 | 待填 | | PR #8 |
 
 ## 定理覆盖
 
 | 定理 / 结论 | 测试位置 | 状态 |
 |---|---|---|
-| Thm 7 / Thm 16：LIFO 恢复、声音不变量 | | 未开始 |
-| Cor 21：独立效应乱序撤销 | | 未开始 |
-| Thm 63：依赖者先停、teardown 可读依赖 | | 未开始 |
-| Thm 64：单转换不跨两次解析 | | 未开始 |
-| Thm 66：Progress、guard 不死锁 | | 未开始 |
-| Thm 73 / Cor 62：Confluence、离场无残留 | | 未开始 |
-| Def 26：通知分类正确性 | | 未开始 |
+| Thm 7 / Thm 16：LIFO 恢复、声音不变量 | | 未开始（PR #3） |
+| Cor 21：独立效应乱序撤销 | | 未开始（PR #3） |
+| Thm 63：依赖者先停、teardown 可读依赖 | | 未开始（PR #5–6） |
+| Thm 64：单转换不跨两次解析 | | 未开始（PR #5–6） |
+| Thm 66：Progress、guard 不死锁 | `interp::tests::drive_*`（参考解释器自检） | 参考实现已验（PR #2）；真实引擎 PR #6 |
+| Thm 73 / Cor 62：Confluence、离场无残留 | `interp::tests::confluence_all_interleavings`（穷举交错） | 参考实现已验（PR #2）；真实引擎 PR #6 |
+| Def 26：通知分类正确性 | | 未开始（PR #4） |
 
 ## 已知偏差
 
 > 每 PR 合入时追加；里程碑走查逐条处置：**修正 / ADR 保留 / 公开差异声明**。
 
 | 日期 / PR | 偏差描述 | 论文依据 | 处置 | 状态 |
+|---|---|---|---|---|
+| 2026-08-15 / PR #2 | 参考解释器把抽象效应函数 `e` 规范化建模为「激活恰好安装 `provide` 全键、停用清空」 | Def 43/69（论文在 Def 69 假设下使用相同模型） | 公开差异声明（oracle 选择，性质保持） | 记录 |
+| 2026-08-15 / PR #2 | `step_lifecycle` 固定按 fiber id 升序取首个可启用规则；论文的规则不规定调度 | §4.2（规则对任何序列成立） | 公开差异声明（oracle 确定性需要） | 记录 |
 
 ## 里程碑走查记录
 
