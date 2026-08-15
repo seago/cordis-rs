@@ -5,12 +5,16 @@
 //! fiber 生命周期状态机（§4）。**零依赖 wasmtime**（PLAN §3 原则 2）。
 //!
 //! - [`symbol`] / [`key`] / [`keyset`] / [`store`]：Def 22–25 的键与依赖表；
+//! - [`effect`]：Def 8/51 的可逆效应与 Algorithm 1 的 execute 引擎（PR #3）；
+//! - [`context`]：Def 32 的 `Γ∞` 最小版（store + 累加器，PR #3）；
 //! - [`interp`]：§4.2 基础演算的参考解释器（oracle，PR #2）。
 //!
 //! 论文符号 ↔ 代码映射见 `docs/THEORY-MAP.md`。
 
 #![deny(missing_docs)]
 
+pub mod context;
+pub mod effect;
 pub mod fiber;
 pub mod interp;
 pub mod key;
@@ -18,6 +22,8 @@ pub mod keyset;
 pub mod store;
 pub mod symbol;
 
+pub use context::Context;
+pub use effect::{Disposer, EffectIter, Step, execute, once};
 pub use fiber::FiberId;
 pub use key::Key;
 pub use keyset::KeySet;
