@@ -18,21 +18,20 @@
 | `get` / `set`（共效应操作） | Def 23, Alg 2 | `Context::get` / `set`（`Store` 表操作，realm 键控） | 单元 | 完成（PR #4：可逆 + 双侧 notify） |
 | `isolate` | Def 28/29 | `Context::isolate`（派生实现，Def 27） | 单元 | 完成（PR #4） |
 | `intercept` | Def 30/31 | `Context::intercept` / `intercept_of`（`InterceptMeta` 右偏合并） | 单元 | 完成（PR #4） |
-| `notify`（分类通知） | Def 26, Alg 3 | `notify::classify` + `Context::notify`（反应器机制） | 单元 | 完成（PR #4 分类部分）；fiber 反应器 PR #5 |
-| 组件 `(d, p, e)` | Def 43 | `interp::Component`（参考实现） | 单元 | 生产版 PR #5 |
-| fiber `⟨d, p, e, π, σ, τ, θ⟩` | Def 44 | `interp::Fiber`（参考实现） | 单元 | 生产版 PR #5 |
-| `n: 𝔑`（fiber 名） | Def 44/45 | `cordis_core::fiber::FiberId` | —（经 `interp` 间接覆盖） | 完成（PR #2） |
-| `dom(𝐹𝛾)`（registry） | Def 45 | `interp::InterpState`（BTreeMap） | 单元 | 参考实现 |
-| `target_n(γ)` / 静止判定 | Def 46 | `InterpState::target` / `is_quiet` | 单元 | 参考实现 |
-| `ΘΓ`（生命周期状态） | Def 49 | `interp::Lifecycle`（两状态版） | 单元 | 参考实现；扩展版 PR #5 |
-| `σγ` / `provider_k(γ)` | Def 45 式 (40) | `InterpState::provided` / `provider_of` | 单元 | 参考实现 |
-| 支持集 / Lemma 70 | Def 67–70 | `InterpState::support_set` | 单元 | 参考实现 |
-| `O-Insert` / `O-Retire` / `O-Remove` | §4.2 | `InterpState::insert` / `retire` / `remove` | 单元 | 参考实现 |
-| `L-Reload` / `L-Unload` | §4.2 | `InterpState::reload` / `unload` | 单元 | 参考实现 |
-| `recover` / accumulator `g` | Def 6, Alg 1 | `effect::execute`（LIFO 折叠）/ `Context::dispose_all` / `StepGuard` | 单元 | 完成（PR #3） |
-| `relied_n(γ)`（撤离 guard） | Def 50 | 待填 | | PR #5 |
-| `use`（组件实例化） | Alg 4 | 待填 | | PR #5 |
-| `refresh` / `reload` / `unload` | Alg 5 | 待填 | | PR #5 |
+| `notify`（分类通知） | Def 26, Alg 3 | `notify::classify` + `Context::notify` → `Runtime::notify_fibers`（fiber 反应器内置） | 单元 | 完成（PR #4 分类 + PR #5 fiber 反应器） |
+| 组件 `(d, p, e)` | Def 43 | `cordis_core::component::Component` | 单元 | 完成（PR #5） |
+| fiber `⟨d, p, e, π, σ, τ, θ⟩` | Def 44 | `cordis_core::fiber::Fiber`（`σ` 由绑定 provider + ctx 累加器隐含） | 单元 | 完成（PR #5） |
+| `n: 𝔑`（fiber 名） | Def 44/45 | `cordis_core::fiber::FiberId` | 单元 | 完成（PR #2/#5） |
+| `dom(𝐹𝛾)`（registry） | Def 45 | `runtime::Runtime::fibers`（`Runtime::fiber`/`len`） | 单元 | 生产版完成（PR #5）；oracle 版仍为 `interp` |
+| `target_n(γ)` / 静止判定 | Def 46 | `Runtime::compute_target` / `is_quiet` / `Fiber::target` | 单元 | 完成（PR #5）；oracle 版仍为 `interp` |
+| `ΘΓ`（生命周期状态） | Def 49 | `fiber::FiberState`（四状态，同步适配） | 单元 | 完成（PR #5） |
+| `σγ` / `provider_k(γ)` | Def 45 式 (40) | `Runtime::provider_of` / `provided_of`（绑定携带 provider，仅 Active 计入） | 单元 | 完成（PR #5） |
+| `O-Insert` / `O-Retire` / `O-Remove` | §4.2 | `Context::use_component`（`Runtime::register`）/ `Fiber::retire` / `Runtime::remove_fiber` | 单元 | 生产版完成（PR #5） |
+| `L-Reload` / `L-Unload` | §4.2 | `Runtime::reload` / `unload`（含 L-Leave 标记） | 单元 | 生产版完成（PR #5，同步版） |
+| `recover` / accumulator `g` | Def 6, Alg 1 | `effect::execute`（LIFO 折叠）/ `Context::dispose_all` / `StepGuard` / `Fiber::dispose` | 单元 | 完成（PR #3/#5） |
+| `relied_n(γ)`（撤离 guard） | Def 50 | 同步级联天然保证（依赖者先撤，Thm 63 测试）；显式 guard 随 async 化实现 | 单元 | 部分完成（PR #5 语义等价；显式化 PR #6） |
+| `use`（组件实例化） | Alg 4 | `Context::use_component`（`Runtime::register`，Def 47 注册回调效应） | 单元 | 完成（PR #5） |
+| `refresh` / `reload` / `unload` | Alg 5 | `Runtime::{refresh, reload, unload}`（惯性状态机） | 单元 | 完成（PR #5，同步版） |
 | 配置 Entry | Def 74 | 待填 | | PR #8 |
 
 ## 定理覆盖
@@ -41,8 +40,8 @@
 |---|---|---|
 | Thm 7 / Thm 16：LIFO 恢复、声音不变量 | `effect::tests` / `context::tests`（`execute_runs_inverses_in_lifo`、`thm16_*`、`accumulator_reverts_all_effects_lifo`、**`nested_effect_reverts_in_application_order`**） | 完成（PR #3；嵌套顺序审查后修复） |
 | Cor 21：独立效应乱序撤销 | | 未开始（PR #3 后续，§3.3.2 就绪后） |
-| Thm 63：依赖者先停、teardown 可读依赖 | | 未开始（PR #5–6） |
-| Thm 64：单转换不跨两次解析 | | 未开始（PR #5–6） |
+| Thm 63：依赖者先停、teardown 可读依赖 | `runtime::tests::withdrawal_cascade_disposes_dependents_first`（teardown 检查逆） | 真实引擎已验（PR #5）；property 化 PR #6 |
+| Thm 64：单转换不跨两次解析 | `runtime::tests::target_change_mid_reload_chains_unload`（guard 步界中断 + 惯性链） | 真实引擎已验（PR #5） |
 | Thm 66：Progress、guard 不死锁 | `interp::tests::drive_*`（参考解释器自检） | 参考实现已验（PR #2）；真实引擎 PR #6 |
 | Thm 73 / Cor 62：Confluence、离场无残留 | `interp::tests::confluence_all_interleavings`（穷举交错） | 参考实现已验（PR #2）；真实引擎 PR #6 |
 | Def 26：通知分类正确性 | `notify::tests::classification_matrix`（8 组合分类矩阵） | 完成（PR #4） |
@@ -73,6 +72,10 @@
 | 2026-08-15 / PR #4 审查 | **PR #5 async 化必改项（m3）**：`set` 前置检查与绑定之间的 TOCTOU 窗口（同步单线程下不可达）；async 化后 `expect` 须改为可传播错误——已在代码注释标注 | Def 23, Alg 2 | 记录（PR #5 必改项） | 记录 |
 | 2026-08-15 / PR #4 审查 | 反应器注册表只增不减（m5）：fiber 卸载路径需要移除句柄；PR #5 提供 `ReactorId` 或改注册表——已文档化 | Alg 5 第 26 行 | 记录（PR #5 设计点） | 记录 |
 | 2026-08-15 / PR #4 审查 | `Reactor` 类型别名补导出（nit2） | — | 修正 | 已修复 |
+| 2026-08-15 / PR #5 | 同步核心的 `Reloading`/`Unloading` 状态只携带 `ω`：`i`（剩余迭代器）活在转换调用栈上，`g`（累加器）由 ctx 累加器承载（Table 2 的 `fiber.dispose`）；async 化时 `i` 移入状态 | Def 49 | 公开差异声明（同步适配） | 记录 |
+| 2026-08-15 / PR #5 | 根上下文（fiber = None）`set` 的绑定不参与 `σγ`（Def 45 仅 Active fiber 的 `σ` 并集）——编排器级的全局提供需经组件/fiber 完成 | Def 45 | 公开差异声明（与论文一致，补充说明） | 记录 |
+| 2026-08-15 / PR #5 | `relied_n` guard（Def 50）：同步级联天然实现「依赖者先撤、提供者绑定保持到依赖者停用」（Thm 63 测试验证）；显式 guard 随 async 化实现 | Def 50 | 公开差异声明（同步语义等价） | 记录 |
+| 2026-08-15 / PR #5 | 执行期检查 Def 43/48 纪律（组件 `set` 越界写入未声明供给 → panic）——论文中为组件义务，实现升级为运行时检查（panic = bug） | Def 43/48 | 实现说明（强化检查） | 记录 |
 
 ## 里程碑走查记录
 

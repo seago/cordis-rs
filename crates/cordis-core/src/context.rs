@@ -2,8 +2,8 @@
 //!
 //! 每个上下文承载三个符号键控槽位（§5.1.2）：
 //!
-//! - `@@store`（[`Runtime`] 共享的 [`Store`]）：`σ: (r: R) ⇀ 𝒱 r`（Def 28），
-//!   按 realm 键控；
+//! - `@@store`（[`crate::runtime::Runtime`] 共享的 [`Store`]）：`σ: (r: R) ⇀ 𝒱 r`
+//!   （Def 28），按 realm 键控；
 //! - `@@isolate`（本上下文的 `ρ`）：键 → realm 的重定向表（Def 28），
 //!   未隔离的键解析到自身（`ρ(k) = k`）；
 //! - `@@intercept`（本上下文的 `ι`）：键 → 拦截元数据的表（Def 30）。
@@ -11,7 +11,10 @@
 //! 操作（Algorithm 2、Def 29/31）：[`Context::get`] / [`Context::set`] /
 //! [`Context::isolate`] / [`Context::intercept`]。`set` 是 [`Context::effect`]
 //! 上的可逆效应（Def 23 注：`set` 类型即 `𝔈*_Σ`），绑定与撤销两侧都触发
-//! [`Context::notify`]。
+//! [`Context::notify`]；绑定携带安装者（fiber 归属，Def 45）。
+//!
+//! 组件实例化经 [`Context::use_component`]（Algorithm 4，注册回调为父上下文
+//! 的可逆效应——父卸载级联退役子，Def 47）。
 //!
 //! **撤销顺序（审查 M-A 修复）**：每步逆在**产出时**即推入累加器（应用序
 //! LIFO，与论文 "prepending each new inverse therefore yields LIFO recovery"
@@ -22,9 +25,12 @@ use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::component::Component;
 use crate::effect::{Disposer, EffectIter, Step, StepGuard, execute, once};
+use crate::fiber::{Fiber, FiberId};
 use crate::key::Key;
 use crate::keyset::KeySet;
+use crate::runtime::{RegistryError, Runtime};
 use crate::store::{Store, StoreError};
 use crate::symbol::Symbol;
 
@@ -50,41 +56,8 @@ pub trait InterceptMeta: Any + 'static {
     fn clone_box(&self) -> Box<dyn InterceptMeta>;
 }
 
-/// 通知反应器（Algorithm 3 的筛选/refresh 由反应器承担；PR #5 接入 fiber）。
-pub type Reactor = Rc<dyn Fn(&Context, &[Symbol])>;
-
-/// 运行时（PR #4 最小版）：共享共效应表 `σ` 与通知反应器。
-/// PR #5 补充 fiber registry（`Fγ`）。
-#[derive(Default)]
-pub struct Runtime {
-    store: RefCell<Store>,
-    reactors: RefCell<Vec<Reactor>>,
-}
-
-impl Runtime {
-    /// 空运行时。
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 注册通知反应器（Algorithm 3 的 fiber 遍历由反应器承担；PR #5 接入
-    /// registry 后注册 fiber 反应器）。反应器在每次 binding 变更（绑定或
-    /// 撤销）后以受影响键集合被调用。
-    ///
-    /// **限制（审查 m5）**：当前只增不减（无移除句柄）——PR #5 接入
-    /// fiber 反应器时提供 `ReactorId` 或改注册表，以支持 fiber 卸载路径
-    /// （Algorithm 5 第 26 行）移除对应反应器。
-    pub fn on_notify(&self, reactor: impl Fn(&Context, &[Symbol]) + 'static) {
-        self.reactors.borrow_mut().push(Rc::new(reactor));
-    }
-
-    /// 在共享运行时上创建根上下文。
-    pub fn context(self: &Rc<Self>) -> Rc<Context> {
-        Rc::new(Context::new_with(self))
-    }
-}
-
-/// 上下文（`Γ∞` 投影：`ρ` + `ι` + 累加器；`σ` 共享自 [`Runtime`]）。
+/// 上下文（`Γ∞` 投影：`ρ` + `ι` + 累加器 + fiber 归属；`σ` 共享自
+/// [`Runtime`]）。
 pub struct Context {
     runtime: Rc<Runtime>,
     /// `ρ`：键 → realm 的重定向表（Def 28）；未在表中的键解析到自身。
@@ -93,6 +66,9 @@ pub struct Context {
     intercept: RefCell<HashMap<Symbol, Box<dyn InterceptMeta>>>,
     /// 本上下文累加器（Algorithm 1 第 17 行的 `ctx.dispose`；Def 6 的 `recover`）。
     dispose: RefCell<Vec<Disposer>>,
+    /// 归属 fiber（None = root/编排器；fiber.ctx 即 Algorithm 4 第 8 行的
+    /// 派生上下文）。绑定据此记录提供者（Def 45）。
+    pub(crate) fiber: Option<FiberId>,
 }
 
 impl Context {
@@ -101,22 +77,28 @@ impl Context {
         Rc::new(Self::new_with(&Rc::new(Runtime::new())))
     }
 
-    fn new_with(runtime: &Rc<Runtime>) -> Self {
+    pub(crate) fn new_with(runtime: &Rc<Runtime>) -> Self {
         Self {
             runtime: Rc::clone(runtime),
             realms: RefCell::new(HashMap::new()),
             intercept: RefCell::new(HashMap::new()),
             dispose: RefCell::new(Vec::new()),
+            fiber: None,
         }
     }
 
-    /// 运行时引用（共享 `σ`；PR #5 起亦可访问 registry）。
+    /// 归属 fiber（None = root）。
+    pub fn fiber(&self) -> Option<FiberId> {
+        self.fiber
+    }
+
+    /// 运行时引用（共享 `σ` 与 registry `Fγ`）。
     pub fn runtime(&self) -> &Rc<Runtime> {
         &self.runtime
     }
 
     /// `ρ(k)`：解析键的 realm；未隔离的键解析到自身（Def 28：`R ⊇ K`）。
-    fn resolve_realm(&self, key: Symbol) -> Symbol {
+    pub(crate) fn resolve_realm(&self, key: Symbol) -> Symbol {
         self.realms.borrow().get(&key).copied().unwrap_or(key)
     }
 
@@ -155,7 +137,10 @@ impl Context {
     ///
     /// 前置条件 `ρ(k) ∉ dom(σ)`（Def 23 沿 `ρ` 转译）：违反则返回 `Err`，
     /// **不产生状态变更**。绑定与撤销两侧均触发 [`Context::notify`]
-    /// （Algorithm 2 第 8/11 行）。
+    /// （Algorithm 2 第 8/11 行）。绑定携带安装者（`self.fiber`，Def 45）。
+    ///
+    /// **供给纪律（Def 43/48，执行期检查）**：组件（`self.fiber = Some(n)`）
+    /// 只能写入其声明的供给 `p_n`——越界写入 panic（bug）。
     ///
     /// 返回的 disposer 撤销本绑定；同时已在累加器与 notify 中登记。
     ///
@@ -165,8 +150,20 @@ impl Context {
     pub fn set<K: Key>(self: &Rc<Self>, value: K::Value) -> Result<Disposer, StoreError> {
         let key = Symbol::intern(K::SYMBOL);
         let realm = self.resolve_realm(key);
+        // Def 43/48 纪律：组件只写自己声明的供给。
+        if let Some(fid) = self.fiber {
+            let allowed = self
+                .runtime
+                .fibers
+                .borrow()
+                .get(&fid)
+                .is_some_and(|f| f.provide.contains(key));
+            if !allowed {
+                panic!("组件 {fid:?} 越界写入未声明的键 {key}（Def 43/48 纪律）");
+            }
+        }
         // 前置检查（快速失败）：单线程 + 无重入路径下，检查与绑定之间无
-        // TOCTOU 窗口，expect 安全（审查 m3）。**PR #5 async 化必改项**：
+        // TOCTOU 窗口，expect 安全（审查 m3）。**PR #6 async 化必改项**：
         // await 可插入其他任务，绑定失败须改为可传播错误而非 panic。
         if self.runtime.store.borrow().contains(realm) {
             return Err(StoreError::AlreadyBound(key));
@@ -177,7 +174,7 @@ impl Context {
                 ctx.runtime
                     .store
                     .borrow_mut()
-                    .bind::<K>(realm, value)
+                    .bind::<K>(realm, value, ctx.fiber)
                     .expect("前置条件已检查（ρ(k) ∉ dom(σ)）");
                 ctx.notify(&[key]);
                 let ctx = Rc::clone(&ctx);
@@ -194,8 +191,9 @@ impl Context {
     }
 
     /// `isolate(k, r)`（Def 29）：**派生实现**（Def 27）——返回新上下文，
-    /// 把 `k` 的 realm 覆写为 `r`，继承其余 `ρ` 与 `ι`；不写共享表、无需逆。
-    /// 同一键在不同 realm 下解析到独立绑定（多租户/沙箱/测试隔离）。
+    /// 把 `k` 的 realm 覆写为 `r`，继承其余 `ρ`、`ι` 与 fiber 归属；
+    /// 不写共享表、无需逆。同一键在不同 realm 下解析到独立绑定
+    /// （多租户/沙箱/测试隔离）。
     pub fn isolate(self: &Rc<Self>, key: Symbol, realm: Symbol) -> Rc<Context> {
         let mut realms = self.realms.borrow().clone();
         realms.insert(key, realm);
@@ -204,11 +202,13 @@ impl Context {
             realms: RefCell::new(realms),
             intercept: RefCell::new(clone_intercept(&self.intercept)),
             dispose: RefCell::new(Vec::new()),
+            fiber: self.fiber,
         })
     }
 
     /// `intercept(k, ν)`（Def 31）：**派生实现**——返回新上下文，把 `k` 的
-    /// 拦截元数据与 `ν` 右偏合并（`ι(k) ⊕k ν`，`ν` 优先），继承其余 `ι` 与 `ρ`。
+    /// 拦截元数据与 `ν` 右偏合并（`ι(k) ⊕k ν`，`ν` 优先），继承其余 `ι`、`ρ`
+    /// 与 fiber 归属。
     ///
     /// 同一键的多次拦截必须使用同一元数据类型 `M`（类型冲突 panic，
     /// panic = bug 策略，见 [`crate::effect`] 模块文档）。
@@ -229,6 +229,19 @@ impl Context {
             realms: RefCell::new(self.realms.borrow().clone()),
             intercept: RefCell::new(table),
             dispose: RefCell::new(Vec::new()),
+            fiber: self.fiber,
+        })
+    }
+
+    /// 派生一个归属给定 fiber 的上下文（Algorithm 4 第 8 行的 `fiber.ctx`）：
+    /// 继承 `ρ`、`ι`，空累加器。
+    pub(crate) fn derive_for_fiber(self: &Rc<Self>, id: FiberId) -> Rc<Context> {
+        Rc::new(Context {
+            runtime: Rc::clone(&self.runtime),
+            realms: RefCell::new(self.realms.borrow().clone()),
+            intercept: RefCell::new(clone_intercept(&self.intercept)),
+            dispose: RefCell::new(Vec::new()),
+            fiber: Some(id),
         })
     }
 
@@ -247,23 +260,30 @@ impl Context {
         spec.iter().all(|k| store.contains(self.resolve_realm(k)))
     }
 
-    /// `notify(ctx, keys)`（Algorithm 3 骨架）：把 binding 变更传播给反应器。
+    /// `notify(ctx, keys)`（Algorithm 3）：把 binding 变更传播给反应器
+    /// （fiber 反应器已内置——按 `fiber.inject` 与 realm 匹配筛选并驱动
+    /// refresh；用户反应器按注册顺序随后调用）。
     ///
-    /// 反应器负责按 `fiber.inject` 与 realm 匹配筛选并驱动 refresh
-    /// （PR #5 接入 fiber 反应器；当前无反应器时为空操作）。
-    ///
-    /// **重入纪律（审查 M1）**：本方法以**快照迭代**调用反应器（先克隆
-    /// 反应器列表再遍历，`Rc` 克隆廉价）——反应器内调用 [`Runtime::on_notify`]
-    /// 注册新反应器不会 `RefCell` panic，且新反应器**本轮不触发**。
-    /// 但反应器内**同步触发新的共效应变更**（如 [`Context::set`]）会递归
-    /// 广播 notify——PR #5 的 fiber 反应器以 refresh 的异步惯性（inertia）
-    /// 切断同步递归；在此之前反应器应避免在通知处理中同步 set，或以守卫
-    /// 标志显式切断（见 `nested_notify_terminates_with_guarded_reactor` 测试）。
+    /// **重入纪律（审查 M1）**：以**快照迭代**调用反应器——反应器内注册
+    /// 新反应器安全（本轮不触发）；但反应器内**同步触发新的共效应变更**
+    /// （如 [`Context::set`]）会递归广播 notify——fiber 反应器经 refresh
+    /// 惯性（inertia）切断同步递归；用户反应器应避免同步 set，或以守卫
+    /// 显式切断（见 `nested_notify_terminates_with_guarded_reactor` 测试）。
     pub fn notify(&self, keys: &[Symbol]) {
-        let reactors: Vec<Reactor> = self.runtime.reactors.borrow().iter().cloned().collect();
-        for reactor in reactors {
-            reactor(self, keys);
-        }
+        self.runtime.notify(self, keys);
+    }
+
+    /// Algorithm 4 的 `use(ctx, component, config)`（Rust 关键字规避命名）：
+    /// 在 `self` 下实例化组件（O-Insert 前提：供给不相交）。
+    ///
+    /// 注册回调为 `self` 上的可逆效应（Def 47）：应用 = 启动子生命周期；
+    /// 逆 = O-Retire——`self` 上下文卸载（如父组件卸载）时级联退役子。
+    pub fn use_component(
+        self: &Rc<Self>,
+        component: Rc<dyn Component>,
+        config: Box<dyn Any>,
+    ) -> Result<Rc<Fiber>, RegistryError> {
+        self.runtime.register(self, component, config)
     }
 
     /// `ctx.effect(callback)`（Algorithm 1 第 9–18 行的同步核心）。
@@ -483,7 +503,7 @@ mod tests {
                         self.ctx
                             .store_cell()
                             .borrow_mut()
-                            .bind::<KeyK1>(Symbol::intern("k1"), 1)
+                            .bind::<KeyK1>(Symbol::intern("k1"), 1, None)
                             .unwrap();
                         let (ctx, log) = (Rc::clone(&self.ctx), Rc::clone(&self.log));
                         Step::Yielded(Box::new(move || {
@@ -504,7 +524,7 @@ mod tests {
                             Box::new(once(Box::new(move || {
                                 ctx.store_cell()
                                     .borrow_mut()
-                                    .bind::<KeyK2>(Symbol::intern("k2"), 2)
+                                    .bind::<KeyK2>(Symbol::intern("k2"), 2, None)
                                     .unwrap();
                                 let (ctx, log) = (Rc::clone(&ctx), Rc::clone(&log));
                                 Box::new(move || {
@@ -520,7 +540,7 @@ mod tests {
                         self.ctx
                             .store_cell()
                             .borrow_mut()
-                            .bind::<KeyK3>(Symbol::intern("k3"), 3)
+                            .bind::<KeyK3>(Symbol::intern("k3"), 3, None)
                             .unwrap();
                         let (ctx, log) = (Rc::clone(&self.ctx), Rc::clone(&self.log));
                         Step::Finished(Box::new(move || {

@@ -56,7 +56,7 @@ mod tests {
         let mut store = Store::new();
         for (name, v) in bindings {
             let sym = Symbol::intern(name);
-            store.bind::<K1I>(sym, *v).unwrap();
+            store.bind::<K1I>(sym, *v, None).unwrap();
         }
         store
     }

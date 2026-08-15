@@ -5,6 +5,7 @@ use std::any::Any;
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::fiber::FiberId;
 use crate::key::Key;
 use crate::keyset::KeySet;
 use crate::symbol::Symbol;
@@ -40,6 +41,10 @@ impl std::error::Error for StoreError {}
 /// `realm ∉ dom(σ)`、`unbind` 要求 `realm ∈ dom(σ)`；违反则报错且
 /// **不产生状态变更**。
 ///
+/// 绑定携带**提供者**（安装该绑定的 fiber，Def 45 的 `σ_n` 归属）：
+/// `σγ`（有效共效应上下文）只计入 Active fiber 提供的绑定（Def 45
+/// 式 (40)），见 [`crate::runtime::Runtime`]。
+///
 /// 底层用 `BTreeMap`：迭代序进程内确定（`Symbol` 的 `Ord` 为进程内分配序，
 /// 见 THEORY-MAP 已知偏差）。
 #[derive(Default)]
@@ -47,8 +52,10 @@ pub struct Store {
     bindings: BTreeMap<Symbol, Binding>,
 }
 
-struct Binding {
-    value: Box<dyn Any + Send + Sync>,
+pub(crate) struct Binding {
+    pub(crate) value: Box<dyn Any + Send + Sync>,
+    /// 安装该绑定的 fiber（None = 根/外部；不参与 `σγ`，Def 45）。
+    pub(crate) provider: Option<FiberId>,
 }
 
 impl Store {
@@ -57,8 +64,14 @@ impl Store {
         Self::default()
     }
 
-    /// `set(k, v)` 的表层：在 `realm` 处绑定类型化值。前置条件 `realm ∉ dom(σ)`。
-    pub fn bind<K: Key>(&mut self, realm: Symbol, value: K::Value) -> Result<(), StoreError> {
+    /// `set(k, v)` 的表层：在 `realm` 处绑定类型化值，记录安装者。
+    /// 前置条件 `realm ∉ dom(σ)`。
+    pub fn bind<K: Key>(
+        &mut self,
+        realm: Symbol,
+        value: K::Value,
+        provider: Option<FiberId>,
+    ) -> Result<(), StoreError> {
         if self.bindings.contains_key(&realm) {
             return Err(StoreError::AlreadyBound(realm));
         }
@@ -66,9 +79,24 @@ impl Store {
             realm,
             Binding {
                 value: Box::new(value),
+                provider,
             },
         );
         Ok(())
+    }
+
+    /// 符号级查询绑定（含提供者；供 `σγ` 推导，Def 45）。
+    pub(crate) fn binding(&self, realm: Symbol) -> Option<&Binding> {
+        self.bindings.get(&realm)
+    }
+
+    /// 某 fiber 安装的全部绑定 realm（Algorithm 5 的 `provided(fiber)`）。
+    pub(crate) fn realms_with_provider(&self, provider: FiberId) -> Vec<Symbol> {
+        self.bindings
+            .iter()
+            .filter(|(_, b)| b.provider == Some(provider))
+            .map(|(r, _)| *r)
+            .collect()
     }
 
     /// `get(k)` 的表层：读取 `realm` 处的绑定。前置条件 `realm ∈ dom(σ)`；
@@ -155,7 +183,7 @@ mod tests {
         assert_eq!(store.get::<DbKey>(db()), Err(StoreError::NotBound(db())));
         assert!(!store.contains(db()));
 
-        store.bind::<DbKey>(db(), String::from("pg")).unwrap();
+        store.bind::<DbKey>(db(), String::from("pg"), None).unwrap();
         assert!(store.contains(db()));
         assert_eq!(store.get::<DbKey>(db()).unwrap(), "pg");
 
@@ -171,8 +199,10 @@ mod tests {
         let mut store = Store::new();
         let r1 = Symbol::intern("r1");
         let r2 = Symbol::intern("r2");
-        store.bind::<DbKey>(r1, String::from("pg")).unwrap();
-        store.bind::<DbKey>(r2, String::from("mysql")).unwrap();
+        store.bind::<DbKey>(r1, String::from("pg"), None).unwrap();
+        store
+            .bind::<DbKey>(r2, String::from("mysql"), None)
+            .unwrap();
         assert_eq!(store.get::<DbKey>(r1).unwrap(), "pg");
         assert_eq!(store.get::<DbKey>(r2).unwrap(), "mysql");
 
@@ -189,12 +219,36 @@ mod tests {
     }
 
     #[test]
+    fn bindings_record_provider() {
+        // Def 45：绑定携带安装者（σ_n 归属）；σγ 推导只认 Active fiber。
+        let mut store = Store::new();
+        let mut counter = 0;
+        let fid = FiberId::fresh(&mut counter);
+        let realm = Symbol::intern("db");
+        store
+            .bind::<DbKey>(realm, String::from("pg"), Some(fid))
+            .unwrap();
+        assert_eq!(
+            store.binding(realm).and_then(|b| b.provider),
+            Some(fid),
+            "绑定记录提供者"
+        );
+        assert_eq!(store.realms_with_provider(fid), vec![realm]);
+
+        // 根绑定（provider = None）：不参与任何 fiber 的 provided 集合。
+        let r2 = Symbol::intern("r2");
+        store.bind::<DbKey>(r2, String::from("x"), None).unwrap();
+        assert_eq!(store.binding(r2).and_then(|b| b.provider), None);
+        assert_eq!(store.realms_with_provider(fid), vec![realm]);
+    }
+
+    #[test]
     fn duplicate_bind_rejected_without_mutation() {
         let mut store = Store::new();
-        store.bind::<DbKey>(db(), String::from("pg")).unwrap();
+        store.bind::<DbKey>(db(), String::from("pg"), None).unwrap();
         // 违反前置条件 realm ∉ dom(σ)：报错且不改变现有绑定
         assert_eq!(
-            store.bind::<DbKey>(db(), String::from("mysql")),
+            store.bind::<DbKey>(db(), String::from("mysql"), None),
             Err(StoreError::AlreadyBound(db()))
         );
         assert_eq!(store.get::<DbKey>(db()).unwrap(), "pg", "原绑定保持");
@@ -203,7 +257,7 @@ mod tests {
     #[test]
     fn type_mismatch_on_symbol_collision() {
         let mut store = Store::new();
-        store.bind::<DbKey>(db(), String::from("pg")).unwrap();
+        store.bind::<DbKey>(db(), String::from("pg"), None).unwrap();
         // 同一 realm 下不同值类型：访问点报 TypeMismatch
         assert!(matches!(
             store.get::<OtherDbKey>(db()),
@@ -229,7 +283,7 @@ mod tests {
     fn satisfies_is_conjunctive() {
         // Def 24：σ ⊧ d ⟺ ∀k ∈ d. k ∈ dom(σ)
         let mut store = Store::new();
-        store.bind::<DbKey>(db(), String::from("pg")).unwrap();
+        store.bind::<DbKey>(db(), String::from("pg"), None).unwrap();
 
         let empty: KeySet = KeySet::new();
         assert!(store.satisfies(&empty), "空规格恒满足");
@@ -240,7 +294,7 @@ mod tests {
         assert!(!store.satisfies(&both), "缺任一键即不满足");
 
         store
-            .bind::<CacheKey>(Symbol::intern(CacheKey::SYMBOL), 3)
+            .bind::<CacheKey>(Symbol::intern(CacheKey::SYMBOL), 3, None)
             .unwrap();
         assert!(store.satisfies(&both));
         assert_eq!(store.symbols().count(), 2);
