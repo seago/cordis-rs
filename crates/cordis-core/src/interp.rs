@@ -325,9 +325,9 @@ impl InterpState {
 
     /// 反复执行可启用的生命周期规则直至静止（Thm 66：必然到达）。
     ///
-    /// 步数上界取 `8·|Fγ| + 8`（经验值）：单个 fiber 在一次驱动过程中至多
-    /// 经历 reload→unload→reload 的有限轮换，每轮 ≤ 2 步，故每 fiber ≤ 6 步
-    /// 已覆盖正常轨迹；8 倍留足裕量，超出即 panic（oracle 自身出错，测试即失败）。
+    /// 步数上界取 `8·|Fγ| + 8`（经验值）：单个 fiber 的正常轨迹 ≤ 3 步
+    /// （reload→unload→reload 一次轮换），8 倍留足裕量，超出即 panic
+    /// （oracle 自身出错，测试即失败）。
     pub fn drive_to_quiescence(&mut self) {
         let limit = self.fibers.len() * 8 + 8;
         let mut steps = 0;
@@ -387,6 +387,12 @@ mod tests {
             inject: spec(inject),
             provide: spec(provide),
         }
+    }
+
+    /// 造一个不属于任何 registry 的"幽灵"fiber 名（绕过名字分配纪律的测试专用）。
+    fn ghost() -> FiberId {
+        let mut counter = 0xFF00;
+        FiberId::fresh(&mut counter)
     }
 
     /// 从状态出发按任意可启用规则分支，收集所有可达静止态（深度受限）。
@@ -463,9 +469,8 @@ mod tests {
     #[test]
     fn unknown_parent_rejected() {
         let mut s = InterpState::new();
-        let ghost = FiberId::fresh(&mut 100);
         assert_eq!(
-            s.insert(Some(ghost), &comp(&[], &["x"])),
+            s.insert(Some(ghost()), &comp(&[], &["x"])),
             Err(Violation::UnknownParent)
         );
     }
@@ -474,7 +479,7 @@ mod tests {
     fn lifecycle_rules_on_unknown_fiber_classify_consistently() {
         // 审查 m1：L- 规则对未知 fiber 必须统一报 UnknownFiber（而非 NoTarget）。
         let mut s = InterpState::new();
-        let ghost = FiberId::fresh(&mut 100);
+        let ghost = ghost();
         assert_eq!(s.reload(ghost), Err(Violation::UnknownFiber));
         assert_eq!(s.unload(ghost), Err(Violation::UnknownFiber));
         assert_eq!(s.retire(ghost), Err(Violation::UnknownFiber));

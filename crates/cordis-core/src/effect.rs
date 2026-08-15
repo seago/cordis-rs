@@ -1,7 +1,17 @@
 //! 可逆效应引擎（论文 §3.1：Def 8 的效应函数、Def 51 的效应迭代器、Algorithm 1 的 execute）。
 //!
 //! 宿主侧同步核心：`EffectIter` 的每步完成一步效应并产出逆；`execute` 按
-//! Algorithm 1 驱动迭代器（guard 在每次迭代边界检查），以 LIFO 顺序折叠各步逆。
+//! Algorithm 1 驱动迭代器（guard 在每次迭代边界检查），以 LIFO 顺序折叠各步逆
+//! （论文前导句："prepending each new inverse therefore yields LIFO recovery"）。
+//!
+//! **协议约束（审查 M-B）**：当前同步核心要求迭代器在有限步内终止——论文模型
+//! 中的效应序列是有限的（Def 51 的 `Maybe(ℑ)` 续体）；无限/订阅型效应不属于
+//! 本阶段模型，违反者将导致 `execute` 永不返回、累加器无界增长。PR #5 接入
+//! async 后另行支持。
+//!
+//! **panic 策略（审查 m-C）**：单线程宿主下 panic 即 bug（oracle 阶段策略）；
+//! 单步逆 panic 会中止剩余撤销（无 unwind 保护），调用方须保证逆不 panic。
+//!
 //! PR #5 接入 tokio 后提供异步步骤（Algorithm 1 的 `await iter.next()`），
 //! 本模块保持纯逻辑、零依赖（见 THEORY-MAP「已知偏差」）。
 
@@ -14,6 +24,9 @@ use std::rc::Rc;
 pub type Disposer = Box<dyn FnOnce() + 'static>;
 
 /// 效应迭代器 `𝔈iter_Γ`（Def 51）：宿主驱动，每步产出（逆，续体选项）。
+///
+/// **必须有限终止**：`next` 最终须产出 [`Step::Finished`]，否则 `execute` 永不返回
+/// （审查 M-B，见模块文档）。
 pub trait EffectIter: 'static {
     /// 执行一步效应并返回本步的逆。
     fn next(&mut self) -> Step;
@@ -74,40 +87,30 @@ impl EffectIter for Once {
     }
 }
 
-/// [`crate::context::Context::effect`] 的共享撤销句柄（Algorithm 1 第 10–17 行：
-/// armed 标志 + 惰性任务）。
-pub(crate) struct EffectHandle {
+/// 单步逆的幂等句柄（Algorithm 1 第 13–14 行的 armed 语义细化到每步）：
+/// 同一步逆的多个等价闭包（execute 组合 + 上下文累加器）共享一个句柄，
+/// 撤销至多生效一次，跨路径调用安全。
+pub(crate) struct StepGuard {
     armed: Cell<bool>,
     task: RefCell<Option<Disposer>>,
 }
 
-impl Default for EffectHandle {
-    fn default() -> Self {
-        Self {
+impl StepGuard {
+    /// 以一步逆新建句柄（armed = true）。
+    pub(crate) fn new(inv: Disposer) -> Rc<Self> {
+        Rc::new(Self {
             armed: Cell::new(true),
-            task: RefCell::new(None),
-        }
-    }
-}
-
-impl EffectHandle {
-    /// 新建句柄（armed = true，任务未就绪）。
-    pub(crate) fn new() -> Rc<Self> {
-        Rc::new(Self::default())
+            task: RefCell::new(Some(inv)),
+        })
     }
 
-    /// 安装 execute 的组合逆。
-    pub(crate) fn install(&self, task: Disposer) {
-        *self.task.borrow_mut() = Some(task);
+    /// 生成一个共享本句柄 armed 语义的 disposer（可多次调用生成多个等价闭包）。
+    pub(crate) fn disposer(self: &Rc<Self>) -> Disposer {
+        let guard = Rc::clone(self);
+        Box::new(move || guard.run())
     }
 
-    /// armed 标志（execute 的 guard 读取，Algorithm 1 第 11 行）。
-    pub(crate) fn is_armed(&self) -> bool {
-        self.armed.get()
-    }
-
-    /// 撤销（至多一次）：置 armed = false 并运行任务（Algorithm 1 第 12–16 行）。
-    pub(crate) fn dispose(&self) {
+    fn run(&self) {
         if !self.armed.get() {
             return;
         }
@@ -216,5 +219,18 @@ mod tests {
         let disposer = execute(Box::new(iter), || false);
         assert!(!ran.get(), "guard 首次即失效，迭代器不被驱动");
         disposer(); // 恒等逆
+    }
+
+    #[test]
+    fn step_guard_is_idempotent_across_copies() {
+        // 同一步逆的多个等价闭包（execute 组合 + 累加器）共享句柄，至多撤销一次。
+        let log = Rc::new(RefCell::new(Vec::<String>::new()));
+        let log2 = Rc::clone(&log);
+        let guard = StepGuard::new(Box::new(move || log2.borrow_mut().push("x".into())));
+        let d1 = guard.disposer();
+        let d2 = guard.disposer();
+        d1();
+        d2(); // no-op
+        assert_eq!(*log.borrow(), vec!["x"]);
     }
 }
