@@ -1,7 +1,7 @@
 //! 依赖表（论文 Def 22 的共效应上下文 `Σ`）。
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::key::Key;
@@ -37,9 +37,12 @@ impl std::error::Error for StoreError {}
 ///
 /// 所有操作都带 Def 23 的前置条件：`bind` 要求 `k ∉ dom(σ)`、`unbind`
 /// 要求 `k ∈ dom(σ)`；违反则报错且**不产生状态变更**。
+///
+/// 底层用 `BTreeMap`：迭代序进程内确定（`Symbol` 的 `Ord` 为进程内分配序，
+/// 见 THEORY-MAP 已知偏差）。
 #[derive(Default)]
 pub struct Store {
-    bindings: HashMap<Symbol, Binding>,
+    bindings: BTreeMap<Symbol, Binding>,
 }
 
 struct Binding {
@@ -113,5 +116,103 @@ impl Store {
     /// 满足谓词 `σ ⊧ d`（Def 24）：`∀k ∈ d. k ∈ dom(σ)`。
     pub fn satisfies(&self, spec: &KeySet) -> bool {
         spec.iter().all(|k| self.bindings.contains_key(&k))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DbKey;
+    impl Key for DbKey {
+        type Value = String;
+        const SYMBOL: &'static str = "db";
+    }
+
+    struct CacheKey;
+    impl Key for CacheKey {
+        type Value = u64;
+        const SYMBOL: &'static str = "cache";
+    }
+
+    /// 与 `DbKey` 声明同一符号但值类型不同的键（符号冲突场景）。
+    struct OtherDbKey;
+    impl Key for OtherDbKey {
+        type Value = u32;
+        const SYMBOL: &'static str = "db";
+    }
+
+    fn db() -> Symbol {
+        Symbol::intern(DbKey::SYMBOL)
+    }
+
+    #[test]
+    fn bind_get_unbind_roundtrip() {
+        let mut store = Store::new();
+        // get 前置条件：k ∉ dom(σ) 时 NotBound
+        assert_eq!(store.get::<DbKey>(), Err(StoreError::NotBound(db())));
+        assert!(!store.contains(db()));
+
+        store.bind::<DbKey>(String::from("pg")).unwrap();
+        assert!(store.contains(db()));
+        assert_eq!(store.get::<DbKey>().unwrap(), "pg");
+
+        // unbind 前置条件满足：返回原值并移除
+        assert_eq!(store.unbind::<DbKey>().unwrap(), String::from("pg"));
+        assert!(!store.contains(db()));
+        assert_eq!(store.get::<DbKey>(), Err(StoreError::NotBound(db())));
+    }
+
+    #[test]
+    fn duplicate_bind_rejected_without_mutation() {
+        let mut store = Store::new();
+        store.bind::<DbKey>(String::from("pg")).unwrap();
+        // 违反前置条件 k ∉ dom(σ)：报错且不改变现有绑定
+        assert_eq!(
+            store.bind::<DbKey>(String::from("mysql")),
+            Err(StoreError::AlreadyBound(db()))
+        );
+        assert_eq!(store.get::<DbKey>().unwrap(), "pg", "原绑定保持");
+    }
+
+    #[test]
+    fn type_mismatch_on_symbol_collision() {
+        let mut store = Store::new();
+        store.bind::<DbKey>(String::from("pg")).unwrap();
+        // 同一符号下不同值类型：访问点报 TypeMismatch
+        assert!(matches!(store.get::<OtherDbKey>(), Err(StoreError::TypeMismatch(s)) if s == db()));
+
+        // unbind 的类型检查先于移除：类型不匹配时绑定保持不变
+        assert!(matches!(
+            store.unbind::<OtherDbKey>(),
+            Err(StoreError::TypeMismatch(s)) if s == db()
+        ));
+        assert!(store.contains(db()), "类型不匹配时绑定不得被移除");
+        assert_eq!(store.get::<DbKey>().unwrap(), "pg");
+    }
+
+    #[test]
+    fn unbind_on_missing_key_is_not_bound() {
+        let mut store = Store::new();
+        assert_eq!(store.unbind::<DbKey>(), Err(StoreError::NotBound(db())));
+    }
+
+    #[test]
+    fn satisfies_is_conjunctive() {
+        // Def 24：σ ⊧ d ⟺ ∀k ∈ d. k ∈ dom(σ)
+        let mut store = Store::new();
+        store.bind::<DbKey>(String::from("pg")).unwrap();
+
+        let empty: KeySet = KeySet::new();
+        assert!(store.satisfies(&empty), "空规格恒满足");
+
+        let both: KeySet = [db(), Symbol::intern(CacheKey::SYMBOL)]
+            .into_iter()
+            .collect();
+        assert!(!store.satisfies(&both), "缺任一键即不满足");
+
+        store.bind::<CacheKey>(3).unwrap();
+        assert!(store.satisfies(&both));
+        assert_eq!(store.symbols().count(), 2);
     }
 }

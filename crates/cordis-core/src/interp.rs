@@ -185,6 +185,9 @@ impl InterpState {
         {
             return Err(Violation::UnknownParent);
         }
+        // 供给不相交检查覆盖 dom(Fγ) 中**全部** fiber（含已退役未移除者）：
+        // 与论文 O-Insert 前提 `∀m ∈ dom(Fγ). p ∩ p_m = ∅` 一致——
+        // 退役组件的供给名在其被 remove 前保持占用（THEORY-MAP 已知偏差 m4）。
         if self
             .fibers
             .values()
@@ -237,10 +240,14 @@ impl InterpState {
     ///
     /// 效应建模（Def 69 假设）：`σ_n := provide`，`θ := Active(ω)`。
     pub fn reload(&mut self, n: FiberId) -> Result<(), Violation> {
+        // 先校验存在性（与 unload 的错误分类一致：未知 fiber 报 UnknownFiber）。
+        if !self.fibers.contains_key(&n) {
+            return Err(Violation::UnknownFiber);
+        }
         let Some(view) = self.target(n) else {
             return Err(Violation::NoTarget);
         };
-        let f = self.fibers.get_mut(&n).ok_or(Violation::UnknownFiber)?;
+        let f = self.fibers.get_mut(&n).expect("existence checked above");
         if !matches!(f.state, Lifecycle::Inactive) {
             return Err(Violation::NotInactive);
         }
@@ -318,7 +325,9 @@ impl InterpState {
 
     /// 反复执行可启用的生命周期规则直至静止（Thm 66：必然到达）。
     ///
-    /// 步数上界按经验取 `8·|Fγ| + 8`；超过即 panic（oracle 自身出错，测试即失败）。
+    /// 步数上界取 `8·|Fγ| + 8`（经验值）：单个 fiber 在一次驱动过程中至多
+    /// 经历 reload→unload→reload 的有限轮换，每轮 ≤ 2 步，故每 fiber ≤ 6 步
+    /// 已覆盖正常轨迹；8 倍留足裕量，超出即 panic（oracle 自身出错，测试即失败）。
     pub fn drive_to_quiescence(&mut self) {
         let limit = self.fibers.len() * 8 + 8;
         let mut steps = 0;
@@ -459,6 +468,17 @@ mod tests {
             s.insert(Some(ghost), &comp(&[], &["x"])),
             Err(Violation::UnknownParent)
         );
+    }
+
+    #[test]
+    fn lifecycle_rules_on_unknown_fiber_classify_consistently() {
+        // 审查 m1：L- 规则对未知 fiber 必须统一报 UnknownFiber（而非 NoTarget）。
+        let mut s = InterpState::new();
+        let ghost = FiberId::fresh(&mut 100);
+        assert_eq!(s.reload(ghost), Err(Violation::UnknownFiber));
+        assert_eq!(s.unload(ghost), Err(Violation::UnknownFiber));
+        assert_eq!(s.retire(ghost), Err(Violation::UnknownFiber));
+        assert_eq!(s.remove(ghost), Err(Violation::UnknownFiber));
     }
 
     #[test]

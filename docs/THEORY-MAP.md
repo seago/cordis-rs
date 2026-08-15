@@ -7,8 +7,8 @@
 
 | 论文符号 / 术语 | 章节 | 代码（crate::path） | 测试 | 备注 |
 |---|---|---|---|---|
-| `k: K`（键符号） | Def 22 | `cordis_core::symbol::Symbol`（全局驻留） | 单元 | 完成（PR #2） |
-| `𝒱 k`（值类型族） | Def 24 | `cordis_core::key::Key`（`type Value` + `const SYMBOL`） | 单元 | 完成（PR #2）；符号冲突在访问点报 `TypeMismatch` |
+| `k: K`（键符号） | Def 22 | `cordis_core::symbol::Symbol`（全局驻留） | 单元 | 完成（PR #2，审查后补测） |
+| `𝒱 k`（值类型族） | Def 24 | `cordis_core::key::Key`（`type Value` + `const SYMBOL`） | —（经 `Store` 间接覆盖） | 完成（PR #2） |
 | `𝔇Σ` / `𝔓Γ`（键集合） | Def 25/43 | `cordis_core::keyset::KeySet` | 单元 | 完成（PR #2） |
 | `Σ`（依赖表） | Def 22 | `cordis_core::store::Store` | 单元 | 完成（PR #2）；`get`/`set`/撤销带 Def 23 前置条件 |
 | 满足谓词 `σ⊧d` | Def 24 | `Store::satisfies` / `InterpState::satisfied` | 单元 | 完成（PR #2） |
@@ -20,7 +20,7 @@
 | `notify`（分类通知） | Def 26, Alg 3 | 待填 | | PR #4 |
 | 组件 `(d, p, e)` | Def 43 | `interp::Component`（参考实现） | 单元 | 生产版 PR #5 |
 | fiber `⟨d, p, e, π, σ, τ, θ⟩` | Def 44 | `interp::Fiber`（参考实现） | 单元 | 生产版 PR #5 |
-| `n: 𝔑`（fiber 名） | Def 44/45 | `cordis_core::fiber::FiberId` | 单元 | 完成（PR #2） |
+| `n: 𝔑`（fiber 名） | Def 44/45 | `cordis_core::fiber::FiberId` | —（经 `interp` 间接覆盖） | 完成（PR #2） |
 | `dom(𝐹𝛾)`（registry） | Def 45 | `interp::InterpState`（BTreeMap） | 单元 | 参考实现 |
 | `target_n(γ)` / 静止判定 | Def 46 | `InterpState::target` / `is_quiet` | 单元 | 参考实现 |
 | `ΘΓ`（生命周期状态） | Def 49 | `interp::Lifecycle`（两状态版） | 单元 | 参考实现；扩展版 PR #5 |
@@ -56,6 +56,8 @@
 | 2026-08-15 / PR #2 | `step_lifecycle` 固定按 fiber id 升序取首个可启用规则；论文的规则不规定调度 | §4.2（规则对任何序列成立） | 公开差异声明（oracle 确定性需要） | 记录 |
 | 2026-08-15 / PR #3 | 效应迭代器为同步版；论文 Algorithm 1 的 `await iter.next()` 由 PR #5 接入 tokio 时提供（引擎逻辑不变） | Def 51, Alg 1 | 公开差异声明（阶段实现选择） | 记录 |
 | 2026-08-15 / PR #3 | `ctx.dispose ← dispose ∘ ctx.dispose` 于注册时执行；论文伪代码置于 dispose 内部（armed 幂等保证可观察等价） | Alg 1 第 17 行 | 公开差异声明（实现选择） | 记录 |
+| 2026-08-15 / PR #2 审查 | `Symbol` 的 `Ord`/`Hash` 为进程内分配序：跨进程不可比较、迭代序跨运行不保证；跨边界（wasm）以名称字符串为媒介，不使用 id | Def 22（键为原子） | 公开差异声明（文档已修正：进程内确定性） | 记录 |
+| 2026-08-15 / PR #2 审查 | O-Insert 的供给不相交检查覆盖 `dom(Fγ)` 全部 fiber（含已退役未移除者）：退役组件的供给名在 remove 前保持占用 | §4.2 O-Insert 前提 `∀m ∈ dom(Fγ)`（与论文一致，无偏差；补充说明） | 无偏差（注释 + 记录） | 记录 |
 
 ## 里程碑走查记录
 

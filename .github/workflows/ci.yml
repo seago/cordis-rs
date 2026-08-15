@@ -7,6 +7,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # 全局 rustc 警告门禁（审查 m3 恢复）：workspace 当前零依赖，安全；
+  # 引入依赖后若出现无法消除的依赖警告，改为在 crate 内局部放宽并注明理由。
+  RUSTFLAGS: "-D warnings"
 
 jobs:
   check:
@@ -27,7 +30,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test
         run: cargo test --workspace
