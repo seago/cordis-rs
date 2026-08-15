@@ -1,0 +1,14 @@
+[package]
+name = "cordis-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Cordis Wasm 组件后端：wasmtime + 组件模型、wit 世界、桥接层（M1）"
+
+[lints]
+workspace = true
+
+[dependencies]
+cordis-core = { path = "../cordis-core" }

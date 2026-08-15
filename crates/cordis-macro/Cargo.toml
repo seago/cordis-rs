@@ -1,0 +1,14 @@
+[package]
+name = "cordis-macro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Cordis 过程宏：#[component]/#[inject]/#[provide]（DX 层，M0 后半）"
+
+[lints]
+workspace = true
+
+[dependencies]
+cordis-core = { path = "../cordis-core" }

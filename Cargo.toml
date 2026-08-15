@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cordis",
+    "crates/cordis-core",
+    "crates/cordis-hmr",
+    "crates/cordis-loader",
+    "crates/cordis-macro",
+    "crates/cordis-native",
+    "crates/cordis-wasm",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/seago/cordis-rs"
+rust-version = "1.95"
+
+[workspace.lints.rust]
+# 骨架阶段全量开启；个别 crate 需要局部放宽时在该 crate 内覆盖并注明理由
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = "warn"

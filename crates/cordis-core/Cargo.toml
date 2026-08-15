@@ -1,0 +1,11 @@
+[package]
+name = "cordis-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Cordis 宿主运行时核心：可逆效应、反应式共效应、fiber 生命周期（论文 §3–§5.1）"
+
+[lints]
+workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "cordis-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Cordis 进程内组件后端：Component trait（受信组件，trait 对象直通）"
+
+[lints]
+workspace = true
+
+[dependencies]
+cordis-core = { path = "../cordis-core" }

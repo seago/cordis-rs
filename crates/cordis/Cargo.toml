@@ -1,0 +1,14 @@
+[package]
+name = "cordis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Cordis 门面 crate：统一导出（等价于 npm 的 @cordisjs/core）"
+
+[lints]
+workspace = true
+
+[dependencies]
+cordis-core = { path = "../cordis-core" }

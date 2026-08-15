@@ -1,0 +1,14 @@
+[package]
+name = "cordis-hmr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Cordis 热模块替换引擎：三阶段事务性重载（论文 §5.2.2）"
+
+[lints]
+workspace = true
+
+[dependencies]
+cordis-core = { path = "../cordis-core" }
