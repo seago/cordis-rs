@@ -6,7 +6,9 @@
 //!
 //! - [`symbol`] / [`key`] / [`keyset`] / [`store`]：Def 22–25 的键与依赖表；
 //! - [`effect`]：Def 8/51 的可逆效应与 Algorithm 1 的 execute 引擎（PR #3）；
-//! - [`context`]：Def 32 的 `Γ∞` 最小版（store + 累加器，PR #3）；
+//! - [`context`]：Def 32 的 `Γ∞` 投影 + 共效应操作（`get`/`set`/`isolate`/
+//!   `intercept`，PR #4）与 [`Runtime`]（共享 `σ`）；
+//! - [`notify`]：Def 26 的通知分类（activating/deactivating/neutral，PR #4）；
 //! - [`interp`]：§4.2 基础演算的参考解释器（oracle，PR #2）。
 //!
 //! 论文符号 ↔ 代码映射见 `docs/THEORY-MAP.md`。
@@ -19,14 +21,16 @@ pub mod fiber;
 pub mod interp;
 pub mod key;
 pub mod keyset;
+pub mod notify;
 pub mod store;
 pub mod symbol;
 
-pub use context::Context;
+pub use context::{Context, InterceptMeta, Runtime};
 pub use effect::{Disposer, EffectIter, Step, execute, once};
 pub use fiber::FiberId;
 pub use key::Key;
 pub use keyset::KeySet;
+pub use notify::{Classification, classify};
 pub use store::{Store, StoreError};
 pub use symbol::Symbol;
 

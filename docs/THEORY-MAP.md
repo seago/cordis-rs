@@ -11,13 +11,14 @@
 | `𝒱 k`（值类型族） | Def 24 | `cordis_core::key::Key`（`type Value` + `const SYMBOL`） | —（经 `Store` 间接覆盖） | 完成（PR #2） |
 | `𝔇Σ` / `𝔓Γ`（键集合） | Def 25/43 | `cordis_core::keyset::KeySet` | 单元 | 完成（PR #2） |
 | `Σ`（依赖表） | Def 22 | `cordis_core::store::Store` | 单元 | 完成（PR #2）；`get`/`set`/撤销带 Def 23 前置条件 |
-| 满足谓词 `σ⊧d` | Def 24 | `Store::satisfies` / `InterpState::satisfied` | 单元 | 完成（PR #2） |
-| `Γ∞`（统一上下文类型） | Def 32 | `cordis_core::context::Context`（PR #3 最小版：store + 累加器） | 单元 | 最小版完成（PR #3）；realm/拦截投影 PR #4 |
+| 满足谓词 `σ⊧d` | Def 24 | `Store::satisfies` / `Context::satisfies`（经 `ρ` 解析）/ `InterpState::satisfied` | 单元 | 完成（PR #2/#4） |
+| `Γ∞`（统一上下文类型） | Def 32 | `cordis_core::context::Context`（`ρ` + `ι` + 累加器）+ `Runtime`（共享 `σ`） | 单元 | 完成（PR #3–4） |
 | `𝔈Γ` / `𝔈iter_Γ`（效应函数/迭代器） | Def 8/51 | `cordis_core::effect::{Disposer, EffectIter, Step, once}` | 单元 | 完成（PR #3，同步版） |
 | `effectΓ(𝑒)` / `ctx.effect` | Def 12, Alg 1 | `Context::effect` | 单元 | 完成（PR #3：armed + 组合入累加器） |
-| `get` / `set`（共效应操作） | Def 23, Alg 2 | 待填（表操作已在 `Store`） | | 效应包装 PR #4 |
-| `isolate` / `intercept` | Def 29/31 | 待填 | | PR #4 |
-| `notify`（分类通知） | Def 26, Alg 3 | 待填 | | PR #4 |
+| `get` / `set`（共效应操作） | Def 23, Alg 2 | `Context::get` / `set`（`Store` 表操作，realm 键控） | 单元 | 完成（PR #4：可逆 + 双侧 notify） |
+| `isolate` | Def 28/29 | `Context::isolate`（派生实现，Def 27） | 单元 | 完成（PR #4） |
+| `intercept` | Def 30/31 | `Context::intercept` / `intercept_of`（`InterceptMeta` 右偏合并） | 单元 | 完成（PR #4） |
+| `notify`（分类通知） | Def 26, Alg 3 | `notify::classify` + `Context::notify`（反应器机制） | 单元 | 完成（PR #4 分类部分）；fiber 反应器 PR #5 |
 | 组件 `(d, p, e)` | Def 43 | `interp::Component`（参考实现） | 单元 | 生产版 PR #5 |
 | fiber `⟨d, p, e, π, σ, τ, θ⟩` | Def 44 | `interp::Fiber`（参考实现） | 单元 | 生产版 PR #5 |
 | `n: 𝔑`（fiber 名） | Def 44/45 | `cordis_core::fiber::FiberId` | —（经 `interp` 间接覆盖） | 完成（PR #2） |
@@ -28,7 +29,7 @@
 | 支持集 / Lemma 70 | Def 67–70 | `InterpState::support_set` | 单元 | 参考实现 |
 | `O-Insert` / `O-Retire` / `O-Remove` | §4.2 | `InterpState::insert` / `retire` / `remove` | 单元 | 参考实现 |
 | `L-Reload` / `L-Unload` | §4.2 | `InterpState::reload` / `unload` | 单元 | 参考实现 |
-| `recover` / accumulator `g` | Def 6, Alg 1 | `effect::execute`（LIFO 折叠）/ `Context::dispose_all` / `EffectHandle` | 单元 | 完成（PR #3） |
+| `recover` / accumulator `g` | Def 6, Alg 1 | `effect::execute`（LIFO 折叠）/ `Context::dispose_all` / `StepGuard` | 单元 | 完成（PR #3） |
 | `relied_n(γ)`（撤离 guard） | Def 50 | 待填 | | PR #5 |
 | `use`（组件实例化） | Alg 4 | 待填 | | PR #5 |
 | `refresh` / `reload` / `unload` | Alg 5 | 待填 | | PR #5 |
@@ -44,7 +45,7 @@
 | Thm 64：单转换不跨两次解析 | | 未开始（PR #5–6） |
 | Thm 66：Progress、guard 不死锁 | `interp::tests::drive_*`（参考解释器自检） | 参考实现已验（PR #2）；真实引擎 PR #6 |
 | Thm 73 / Cor 62：Confluence、离场无残留 | `interp::tests::confluence_all_interleavings`（穷举交错） | 参考实现已验（PR #2）；真实引擎 PR #6 |
-| Def 26：通知分类正确性 | | 未开始（PR #4） |
+| Def 26：通知分类正确性 | `notify::tests::classification_matrix`（8 组合分类矩阵） | 完成（PR #4） |
 
 ## 已知偏差
 
@@ -62,6 +63,9 @@
 | 2026-08-15 / PR #3 审查 | **约束（M-B）**：同步核心要求效应迭代器有限终止（论文效应序列有限，Def 51 的 `Maybe(ℑ)`）；无限/订阅型效应由 PR #5 async 支持 | Def 51 | 公开差异声明（阶段限制，文档已明示） | 记录 |
 | 2026-08-15 / PR #3 审查 | armed 标志当前仅作 execute 的 guard 输入（同步核心中恒真）；「dispose 中断在途迭代」在 PR #5 async 时代实现；撤销幂等由每步 `StepGuard` 保证 | Alg 1 第 10–16 行 | 公开差异声明（阶段实现选择） | 记录 |
 | 2026-08-15 / PR #3 审查 | panic 策略：panic = bug（单线程宿主，无 unwind 保护；单步逆 panic 中止剩余撤销） | — | 记录（模块文档已明示） | 记录 |
+| 2026-08-15 / PR #4 | notify 的 fiber 遍历推迟到 PR #5（registry 未建立）；当前 `Context::notify` 仅保留反应器机制（`Runtime::on_notify`），无反应器时为空操作 | Alg 3（依赖 Def 45 的 registry） | 公开差异声明（阶段实现选择） | 记录 |
+| 2026-08-15 / PR #4 | 拦截元数据读取 API（`intercept_of`）要求 `M: Clone`（对象安全的 `clone_box` 之外的最小约束）；合并始终右偏（`new` 优先，§5.1.2） | Def 30/31 | 实现说明 | 记录 |
+| 2026-08-15 / PR #4 | `Store` 错误携带 realm 而非用户键（`AlreadyBound(realm)` 等）——realm 与键在未隔离时相同，隔离场景以 realm 为准（Def 29 前置条件沿 `ρ` 转译） | Def 23/29 | 实现说明 | 记录 |
 
 ## 里程碑走查记录
 
