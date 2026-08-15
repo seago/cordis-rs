@@ -38,7 +38,7 @@
 
 | 定理 / 结论 | 测试位置 | 状态 |
 |---|---|---|
-| Thm 7 / Thm 16：LIFO 恢复、声音不变量 | `effect::tests` / `context::tests`（`execute_runs_inverses_in_lifo`、`thm16_*`、`accumulator_reverts_all_effects_lifo`） | 完成（PR #3） |
+| Thm 7 / Thm 16：LIFO 恢复、声音不变量 | `effect::tests` / `context::tests`（`execute_runs_inverses_in_lifo`、`thm16_*`、`accumulator_reverts_all_effects_lifo`、**`nested_effect_reverts_in_application_order`**） | 完成（PR #3；嵌套顺序审查后修复） |
 | Cor 21：独立效应乱序撤销 | | 未开始（PR #3 后续，§3.3.2 就绪后） |
 | Thm 63：依赖者先停、teardown 可读依赖 | | 未开始（PR #5–6） |
 | Thm 64：单转换不跨两次解析 | | 未开始（PR #5–6） |
@@ -58,6 +58,10 @@
 | 2026-08-15 / PR #3 | `ctx.dispose ← dispose ∘ ctx.dispose` 于注册时执行；论文伪代码置于 dispose 内部（armed 幂等保证可观察等价） | Alg 1 第 17 行 | 公开差异声明（实现选择） | 记录 |
 | 2026-08-15 / PR #2 审查 | `Symbol` 的 `Ord`/`Hash` 为进程内分配序：跨进程不可比较、迭代序跨运行不保证；跨边界（wasm）以名称字符串为媒介，不使用 id | Def 22（键为原子） | 公开差异声明（文档已修正：进程内确定性） | 记录 |
 | 2026-08-15 / PR #2 审查 | O-Insert 的供给不相交检查覆盖 `dom(Fγ)` 全部 fiber（含已退役未移除者）：退役组件的供给名在 remove 前保持占用 | §4.2 O-Insert 前提 `∀m ∈ dom(Fγ)`（与论文一致，无偏差；补充说明） | 无偏差（注释 + 记录） | 记录 |
+| 2026-08-15 / PR #3 审查 | **修复（M-A）**：原实现按「效应级注册完成时」入栈累加器，嵌套效应（外层迭代步骤间注册的内层效应）撤销顺序错误（外层整组先撤）；改为**每步逆产出时入栈**（应用序 LIFO，嵌套正确交错），与论文 "prepending each new inverse therefore yields LIFO recovery" 及 track 模型（`φ ∘ g`）一致 | Alg 1 前导句、Def 3、Thm 16 | 修正（含嵌套回归测试） | 已修复 |
+| 2026-08-15 / PR #3 审查 | **约束（M-B）**：同步核心要求效应迭代器有限终止（论文效应序列有限，Def 51 的 `Maybe(ℑ)`）；无限/订阅型效应由 PR #5 async 支持 | Def 51 | 公开差异声明（阶段限制，文档已明示） | 记录 |
+| 2026-08-15 / PR #3 审查 | armed 标志当前仅作 execute 的 guard 输入（同步核心中恒真）；「dispose 中断在途迭代」在 PR #5 async 时代实现；撤销幂等由每步 `StepGuard` 保证 | Alg 1 第 10–16 行 | 公开差异声明（阶段实现选择） | 记录 |
+| 2026-08-15 / PR #3 审查 | panic 策略：panic = bug（单线程宿主，无 unwind 保护；单步逆 panic 中止剩余撤销） | — | 记录（模块文档已明示） | 记录 |
 
 ## 里程碑走查记录
 
