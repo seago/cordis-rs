@@ -25,7 +25,7 @@ pub mod notify;
 pub mod store;
 pub mod symbol;
 
-pub use context::{Context, InterceptMeta, Runtime};
+pub use context::{Context, InterceptMeta, Reactor, Runtime};
 pub use effect::{Disposer, EffectIter, Step, execute, once};
 pub use fiber::FiberId;
 pub use key::Key;

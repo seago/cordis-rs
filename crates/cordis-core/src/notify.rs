@@ -7,6 +7,12 @@
 //!
 //! fiber 级通知（Algorithm 3 的 refresh 调用）依赖 registry（PR #5）；
 //! 本模块提供分类原语与上下文级传播机制（[`crate::context::Context::notify`]）。
+//!
+//! **衔接留白（审查 m1）**：`classify` 需要前/后两个 `Store` 快照，而
+//! [`Context::notify`] 只广播受影响**键**（不携带状态快照；`Store` 不可克隆）。
+//! 快照/变更日志机制由 **PR #5** 提供（届时确定 `notify` 携带 `prev` 快照或
+//! 变更描述的形态，fiber 反应器据此完成分类）；在此之前 `classify` 是
+//! 独立验证的纯函数，系统内无调用点（THEORY-MAP 已知偏差）。
 
 use crate::keyset::KeySet;
 use crate::store::Store;

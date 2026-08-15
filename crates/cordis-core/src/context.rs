@@ -37,7 +37,10 @@ use crate::symbol::Symbol;
 /// 从 vtable 排除（不可经 `dyn` 调用，但 trait 仍可对象化）；`clone_box`
 /// 提供深拷贝（派生上下文继承 `ι` 所需）。读取 API
 /// （[`Context::intercept_of`]）在方法上以 `Clone` 约束具体类型。
-pub trait InterceptMeta: Any + Send + Sync + 'static {
+///
+/// 不要求 `Send + Sync`（审查 m4）：宿主为单线程 `Rc` 结构（ADR-0002），
+/// 元数据只存活于进程内、不跨线程/不跨边界。
+pub trait InterceptMeta: Any + 'static {
     /// 右偏合并（`new` 优先；语义由各键的 `⊕k` 决定，如标量覆写、集合取并）。
     fn merge(existing: &Self, new: &Self) -> Self
     where
@@ -67,6 +70,10 @@ impl Runtime {
     /// 注册通知反应器（Algorithm 3 的 fiber 遍历由反应器承担；PR #5 接入
     /// registry 后注册 fiber 反应器）。反应器在每次 binding 变更（绑定或
     /// 撤销）后以受影响键集合被调用。
+    ///
+    /// **限制（审查 m5）**：当前只增不减（无移除句柄）——PR #5 接入
+    /// fiber 反应器时提供 `ReactorId` 或改注册表，以支持 fiber 卸载路径
+    /// （Algorithm 5 第 26 行）移除对应反应器。
     pub fn on_notify(&self, reactor: impl Fn(&Context, &[Symbol]) + 'static) {
         self.reactors.borrow_mut().push(Rc::new(reactor));
     }
@@ -151,9 +158,16 @@ impl Context {
     /// （Algorithm 2 第 8/11 行）。
     ///
     /// 返回的 disposer 撤销本绑定；同时已在累加器与 notify 中登记。
+    ///
+    /// **错误载体（审查 m2）**：本层报**用户键**（`AlreadyBound(key)`）；
+    /// 表层 [`Store::bind`] 报 **realm**（`AlreadyBound(realm)`）——未隔离时
+    /// 两者相同，隔离场景以各自语义为准（THEORY-MAP 已知偏差）。
     pub fn set<K: Key>(self: &Rc<Self>, value: K::Value) -> Result<Disposer, StoreError> {
         let key = Symbol::intern(K::SYMBOL);
         let realm = self.resolve_realm(key);
+        // 前置检查（快速失败）：单线程 + 无重入路径下，检查与绑定之间无
+        // TOCTOU 窗口，expect 安全（审查 m3）。**PR #5 async 化必改项**：
+        // await 可插入其他任务，绑定失败须改为可传播错误而非 panic。
         if self.runtime.store.borrow().contains(realm) {
             return Err(StoreError::AlreadyBound(key));
         }
@@ -237,8 +251,17 @@ impl Context {
     ///
     /// 反应器负责按 `fiber.inject` 与 realm 匹配筛选并驱动 refresh
     /// （PR #5 接入 fiber 反应器；当前无反应器时为空操作）。
+    ///
+    /// **重入纪律（审查 M1）**：本方法以**快照迭代**调用反应器（先克隆
+    /// 反应器列表再遍历，`Rc` 克隆廉价）——反应器内调用 [`Runtime::on_notify`]
+    /// 注册新反应器不会 `RefCell` panic，且新反应器**本轮不触发**。
+    /// 但反应器内**同步触发新的共效应变更**（如 [`Context::set`]）会递归
+    /// 广播 notify——PR #5 的 fiber 反应器以 refresh 的异步惯性（inertia）
+    /// 切断同步递归；在此之前反应器应避免在通知处理中同步 set，或以守卫
+    /// 标志显式切断（见 `nested_notify_terminates_with_guarded_reactor` 测试）。
     pub fn notify(&self, keys: &[Symbol]) {
-        for reactor in self.runtime.reactors.borrow().iter() {
+        let reactors: Vec<Reactor> = self.runtime.reactors.borrow().iter().cloned().collect();
+        for reactor in reactors {
             reactor(self, keys);
         }
     }
@@ -578,6 +601,45 @@ mod tests {
             vec![vec!["a".to_string()], vec!["a".to_string()]],
             "撤销侧同样通知"
         );
+    }
+
+    #[test]
+    fn notify_reactor_can_register_new_reactor() {
+        // 审查 M1：快照迭代——反应器内注册新反应器不 panic（borrow 已释放），
+        // 且新反应器本轮不触发。
+        let runtime = Rc::new(Runtime::new());
+        let ctx = runtime.context();
+        let calls = Rc::new(Cell::new(0));
+        let calls2 = Rc::clone(&calls);
+        runtime.on_notify(move |ctx, _keys| {
+            calls2.set(calls2.get() + 1);
+            // 反应器内注册新反应器：快照迭代下安全。
+            ctx.runtime().on_notify(|_, _| {});
+        });
+        drop(ctx.set::<KeyA>(String::from("va")).unwrap());
+        assert_eq!(calls.get(), 1, "新反应器本轮不触发");
+    }
+
+    #[test]
+    fn nested_notify_terminates_with_guarded_reactor() {
+        // 审查 M1：反应器内同步 set 会递归广播 notify——以守卫标志显式切断，
+        // 验证终止与事件序列（PR #5 的 fiber 反应器以 refresh 惯性切断同步递归）。
+        let ctx = Context::new();
+        let events = Rc::new(RefCell::new(Vec::<String>::new()));
+        let done = Rc::new(Cell::new(false));
+        let events2 = Rc::clone(&events);
+        let done2 = Rc::clone(&done);
+        let ctx2 = Rc::clone(&ctx);
+        ctx.runtime().on_notify(move |_ctx, keys| {
+            events2.borrow_mut().push(keys[0].as_str().to_string());
+            if !done2.get() {
+                done2.set(true);
+                // 反应器内同步 set → 嵌套 notify；守卫保证终止。
+                drop(ctx2.set::<KeyB>(7).unwrap());
+            }
+        });
+        drop(ctx.set::<KeyA>(String::from("va")).unwrap());
+        assert_eq!(*events.borrow(), vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]
