@@ -206,3 +206,40 @@
 | ⑦ | §6.2 broker 示例（可表达性演示） | 本次新增 | M3 案例素材 |
 | ⑧ | 恶意 guest 触发宿主 panic（越界 set → 核心 panic!）的边界——**M2-PR1（PR #17）收官**：不再依赖 catch_unwind 兜底——桥接 `forward_pending` 把越界写（核心纪律 panic 载荷）与绑定冲突（AlreadyBound）统一转为 `FiberError::raise` → 失败 outcome（fiber 失败态、宿主存活）；测试 `guest_undeclared_set_becomes_error_outcome_and_host_survives` | 本次新增（§6.3 补查风险点） | **已落地**（PR #17：语义处置随 ⑤ 一并收官） |
 | ⑨ | 运行时符号级动态解析 vs 编译期类型化 DI | 本次新增 | **评估完成（M2-PR6）**：保持通用 `context` 接口 + 符号级动态值 API——§6.4 的"运行时动态中介"正是论文要求（"dependency access must be dynamically mediated"）；结构检查由宿主侧注入键核对承担（load_guest 断言）；typed world（import 段即 inject 规格）列为 DX 增强（M3 或按需）——关闭为记录 |
+| M2 加载器 + HMR | 2026-08-17 | §5.2（§5.2.1/5.2.2） | **门禁判定：通过（含处置清单）**——§5.2.1 声明式配置：Def 74 全字段条目（id/url/isolate/intercept/config/disabled）落地 + 按字段最小扰动分派（url/revision 重建、**intercept 就地**、**isolate = Algorithm 7 realm 重指派**、disabled 卸载/重载）+ 配置树（group/include 分支条目、子列表 keyed diff 递归、组持有者 fiber = π 语义）+ 托管 realm（local/global + delimiter→树成员等价适应）；已知边界：双向写回未实现（条目权威）、组条目 isolate 不应用。§5.2.2 HMR：Alg 8/9/10 三阶段落地（分类不动点/过期检测/事务性重载 + 回滚——不进入半重载）；模块图 = HashMapGraph/WasmLeafGraph（cargo metadata/wit 解析为生产化适配器，边界记录）；门禁用例直证：保存即生效 + 其他组件状态保留 + 双回滚。**本次走查处置**：处置清单 ① ② ③ ④ ⑤ ⑥ ⑧ ⑨ 全部落地/评估收尾（⑦ broker 示例归 M3）；新增记录：⑩ 双向写回未实现 ⑪ 组条目 isolate 不应用 ⑫ 模块图生产化适配器 | 处置清单（下里程碑首批任务）：⑦ §6.2 broker 示例（M3 案例素材）；⑩ 双向写回（组件→条目方向，M3 评估）；⑪ 组条目 isolate 注解（M3 或 typed world 时）；⑫ cargo metadata/wit 模块图适配器（M3 或按需） |
+
+
+## M2 走查记录（2026-08-17，PR #23）
+
+> 程序（PLAN §7）：重读 §5.2 → 逐条核对已知偏差 → 补查映射 → 走查记录 + 处置清单。
+> 稳定态确认：`cargo test --workspace` 30 二进制全绿、clippy/fmt 门禁干净、API 冻结（M2 边界）。
+
+### §5.2.1 Declarative Configuration（声明式配置）
+
+| 论文段落 | 实现证据 | 对照 |
+|---|---|---|
+| Def 74 条目全字段（id/url/isolate/intercept/config/disabled）；双向绑定（loader 响应条目变更调整 fiber；组件改配置/禁自身写回条目） | `Entry`（id/component=url/isolate/intercept/config/revision/disabled/children）；per-field dispatch（M2-PR3/4） | **对应**（组件→条目写回方向缺席——**新增记录⑩**：条目为权威记录，组件不能自改配置/禁自身） |
+| 协调：Theorem 73（quiescent 状态只由最终配置决定）+ Cor 62（离场无残留）+ Thm 66（必静止）支撑增量协调 | 两阶段递归协调（每层先卸载侧释放供给名、再实例化侧——同供给替换单次 apply）；keyed diff 幸存子条目不重建 | **对应**（property 测试 + loader 测试实证） |
+| per-field dispatch：id/url → 重建；isolate → Algorithm 7；intercept → 就地；config → 组件自决；disabled → 卸载/重载 | url/revision 变更 → 重建；isolate 变更 → `patch_isolation`（Algorithm 7，不重建）；intercept 变更 → `intercept_set_boxed`/`intercept_clear` 就地（读时咨询、不触发 reload）；disabled → 拆除/重装；config 变更经 revision 重建（协调键代行组件级 diff——M0 已记录） | **对应**（config 交由组件自决的语义由协调键承担，M0 记录） |
+| 配置树 + group/include（@cordisjs/group 子列表 keyed diff；include 外部配置嫁接） | `Entry::group`/`include` 分支条目；组持有者 fiber（空组件，π = 组 fiber，Def 47）；子列表 keyed diff 递归；组拆除自底向上 | **对应**（include 与 group 结构相同——外部配置文件解析由编排方承担） |
+| 托管 realm：local（按 entry id 打标、随迁）/ global（命名共享）；realm 无条目引用时丢弃；Algorithm 7 delimiter 重指派 | `IsolateAnnotation`（Local/Global）；实例化期经派生 ctx 应用；`patch_isolation`（Δ 键 → patch ρ → refresh → 移动子树绑定 → affected 通知） | **对应**（**适应记录**：delimiter own 判定 = loader 树子树成员关系等价；ρ 拷贝继承 → patch 遍历子树） |
+| intercept 更新就地、读时咨询 | `intercept_set_boxed`（条目注解权威、重放幂等）+ `intercept_clear` + `get_meta` 读路径合并 | **对应**（**边界⑤**：移除注解不回退父（组）继承值——扁平拷贝语义） |
+
+### §5.2.2 Hot Module Replacement（HMR）
+
+| 论文段落 | 实现证据 | 对照 |
+|---|---|---|
+| HMR 无需开发者标注的验收边界（fiber 界定全部效应/共效应） | fiber 生命周期 + 可逆效应（L-Raise 失败模型提供重载失败的精确检测） | **对应** |
+| Phase 1 分类（Alg 8）：stashed/externals 种子不动点 | `classify`（自 stashed 向下传播、环默认拒绝；Alg 9 的树 ∩ accepted 负责上游） | **对应** |
+| Phase 2 过期检测（Alg 9）：依赖树 ∩ accepted、declined 边界 | `detect`/`get_dependencies` | **对应** |
+| Phase 3 事务性重载（Alg 10）：backup → dispose + use → 失败 restore + 重建 | `Hmr::reload`（备份 = loader 注册表取出旧组件；重载 = 注册新模块 + revision 递增重建仅过期条目；失败检测 = 加载错误 + fiber 失败态（L-Raise）；回滚 = 恢复旧组件 + 重新 apply） | **对应**（缓存 = loader 注册表——invalidate/backup 的等价实现） |
+| get_imports：native cargo metadata 依赖图 / wasm wit import 图 | `ModuleGraph` trait：`HashMapGraph`（数据驱动）+ `WasmLeafGraph`（M1 wasm 插件仅导入宿主 context 接口 = 叶子） | **边界记录⑫**（cargo metadata/wit 解析为生产化适配器） |
+
+### 处置清单（M2 走查产物；承 M1 清单 + 本次新增）
+
+| # | 处置项 | 去向 |
+|---|---|---|
+| ⑦ | §6.2 broker 示例（可表达性演示） | M3 案例素材 |
+| ⑩ | 双向写回（组件→条目方向） | M3 评估 |
+| ⑪ | 组条目 isolate 注解 | M3 或 typed world 时 |
+| ⑫ | cargo metadata / wit 模块图适配器 | M3 或按需 |
