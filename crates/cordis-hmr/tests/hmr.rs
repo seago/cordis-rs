@@ -345,3 +345,139 @@ fn hmr_reload_rolls_back_on_component_failure() {
     ));
     assert!(runtime.is_quiet(), "静止");
 }
+
+/// 空 stashed：无过期条目 → 空操作（REVIEW-4c6e7fc nit4）。
+#[test]
+fn hmr_reload_noop_without_stashed() {
+    let (loader, runtime) = setup("1");
+    let p_first = loader.fiber("p").expect("provider").id();
+    let c_first = loader.fiber("c").expect("consumer").id();
+
+    let graph = HashMapGraph(HashMap::from([("db".to_string(), vec![])]));
+    let hmr = Hmr::new(loader.clone(), Box::new(MapLoader(HashMap::new())));
+    let desired = vec![
+        Entry::new("p", "db", Rc::new("1".to_string()), 0, false),
+        Entry::new("c", "cons", Rc::new(()), 0, false),
+    ];
+    let stale = hmr
+        .reload(&[], &[], &graph, &desired)
+        .expect("空 stashed 空操作");
+    assert!(stale.is_empty(), "无过期条目");
+    assert_eq!(loader.fiber("p").unwrap().id(), p_first, "provider 未动");
+    assert_eq!(loader.fiber("c").unwrap().id(), c_first, "consumer 未动");
+    assert_eq!(sum_of(&runtime), "sum(1)", "状态不变");
+}
+
+/// 事务 panic 安全（REVIEW-4c6e7fc major1）：新模块供给与其它存活条目
+/// 冲突 → `apply` panic → **先回滚再重抛**（panic = bug 纪律 + 永不半
+/// 重载）。
+#[test]
+fn hmr_reload_rolls_back_before_repanic_on_provision_clash() {
+    let (loader, runtime) = setup("1");
+    assert_eq!(sum_of(&runtime), "sum(1)");
+
+    // 新版本 db 同时提供 val + sum → 与条目 o 的 sum 供给冲突。
+    struct Clashing;
+    impl Component for Clashing {
+        fn inject(&self) -> KeySet {
+            KeySet::new()
+        }
+        fn provide(&self) -> KeySet {
+            spec(&["val", "sum"])
+        }
+        fn apply(&self, ctx: Rc<Context>, _config: &dyn std::any::Any) -> Box<dyn EffectIter> {
+            Box::new(once_finished(move || {
+                ctx.set::<ValKey>("clash".into()).expect("绑定 val")
+            }))
+        }
+    }
+    let mut versions: HashMap<String, Rc<dyn Component>> = HashMap::new();
+    versions.insert("db".to_string(), Rc::new(Clashing));
+    let graph = HashMapGraph(HashMap::from([("db".to_string(), vec![])]));
+    let hmr = Hmr::new(loader.clone(), Box::new(MapLoader(versions)));
+    let desired = vec![
+        Entry::new("p", "db", Rc::new("1".to_string()), 0, false),
+        Entry::new("c", "cons", Rc::new(()), 0, false),
+    ];
+
+    // apply panic（ProvisionClash：新 db 提供 val+sum，与 c 的 sum 冲突）
+    // → 回滚后重抛。
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        hmr.reload(&["db".to_string()], &[], &graph, &desired)
+    }));
+    assert!(result.is_err(), "供给冲突 panic 传播（panic = bug）");
+
+    // 系统已回滚：旧版本生效、条目 c 状态保留、无半重载残留。
+    assert_eq!(sum_of(&runtime), "sum(1)", "回滚到旧版本");
+    assert!(
+        matches!(
+            &*loader.fiber("c").expect("c 仍在").state(),
+            FiberState::Active { .. }
+        ),
+        "consumer 状态保留"
+    );
+    assert!(runtime.is_quiet(), "静止（无半重载残留）");
+}
+
+/// 多条目共享同一组件名（REVIEW-4c6e7fc nit2）：stale 去重、全部共享
+/// 条目重建。
+#[test]
+fn hmr_reload_rebuilds_all_entries_sharing_url() {
+    let (loader, runtime) = setup("1");
+    // 第二个条目 p2 也使用 db 组件（同 url）——提供 val 冲突？两个条目
+    // 都提供 val → ProvisionClash。改为 p2 用 Consumer（注入 val）——
+    // 共享 url 需同组件；Consumer 提供 sum 与 c 冲突。用 distinct 组件
+    // 名注册表：两个条目共用 "db"（提供 val）不可能共存。
+    // 实际可共享场景：两个条目都用**消费者**（注入 val、无供给冲突）：
+    loader.register_component("cons", Rc::new(Consumer));
+    let _ = &runtime;
+    // 重建场景：c1、c2 都是 cons（注入 val、提供 sum？——提供 sum 会
+    // 冲突）。用无供给的消费者变体：
+    struct PureConsumer;
+    impl Component for PureConsumer {
+        fn inject(&self) -> KeySet {
+            spec(&["val"])
+        }
+        fn provide(&self) -> KeySet {
+            KeySet::new()
+        }
+        fn apply(&self, _ctx: Rc<Context>, _config: &dyn std::any::Any) -> Box<dyn EffectIter> {
+            Box::new(once_finished(|| Box::new(|| {}) as Disposer))
+        }
+    }
+    loader.register_component("pure", Rc::new(PureConsumer));
+    loader.apply(&[
+        Entry::new("p", "db", Rc::new("1".to_string()), 0, false),
+        Entry::new("c1", "pure", Rc::new(()), 0, false),
+        Entry::new("c2", "pure", Rc::new(()), 0, false),
+    ]);
+    assert!(
+        loader.fiber("c1").is_some() && loader.fiber("c2").is_some(),
+        "双消费者激活"
+    );
+
+    // stashed = [db]（提供者）→ 过期；pure 的依赖树 = {pure, val?}——
+    // pure 无模块级导入（图里无 pure）→ 不过期。断言只有 db 过期。
+    let graph = HashMapGraph(HashMap::from([("db".to_string(), vec![])]));
+    let mut versions: HashMap<String, Rc<dyn Component>> = HashMap::new();
+    versions.insert("db".to_string(), Rc::new(Provider));
+    let hmr = Hmr::new(loader.clone(), Box::new(MapLoader(versions)));
+    let desired = vec![
+        Entry::new("p", "db", Rc::new("1".to_string()), 0, false),
+        Entry::new("c1", "pure", Rc::new(()), 0, false),
+        Entry::new("c2", "pure", Rc::new(()), 0, false),
+    ];
+    let stale = hmr
+        .reload(&["db".to_string()], &[], &graph, &desired)
+        .expect("重载成功（新模块 = 旧 Provider 类型 + 配置不变）");
+    assert_eq!(stale, vec!["db".to_string()], "仅 db 过期（stale 去重）");
+    assert!(
+        runtime.store().contains(Symbol::intern("val")),
+        "db 重建后 val 绑定"
+    );
+    assert!(
+        loader.fiber("c1").is_some() && loader.fiber("c2").is_some(),
+        "共享 url 的两个消费者条目保留（未过期）"
+    );
+    assert!(runtime.is_quiet(), "静止");
+}

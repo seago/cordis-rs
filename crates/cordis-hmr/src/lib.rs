@@ -217,6 +217,12 @@ impl Hmr {
     /// 取出旧组件；重载 = 注册新组件 + `apply`（revision 递增触发重建）；
     /// 失败检测 = 实例化后的 fiber 失败态（L-Raise，`Inactive(Some(ζ))`，
     /// M2-PR1）与加载错误；回滚 = 恢复旧组件注册 + 重新 apply。
+    ///
+    /// **事务的 panic 安全（REVIEW-4c6e7fc major1）**：`Loader::apply` 以
+    /// panic 表达配置错误（供给冲突 / 未知组件 / 实例化失败）——整个事务
+    /// 以 `catch_unwind` 包裹：**任何 panic 都先回滚再重抛**（panic = bug
+    /// 纪律 + 永不半重载保证；回滚本身恢复旧组件 + 旧供给格局，不再触发
+    /// 冲突）。
     pub fn reload(
         &self,
         stashed: &[String],
@@ -226,9 +232,14 @@ impl Hmr {
     ) -> anyhow::Result<Vec<String>> {
         // 阶段 1：分类（Alg 8）。
         let classification = classify(stashed, externals, graph);
-        // 阶段 2：过期条目（Alg 9）。
-        let entry_urls: Vec<String> = desired.iter().map(|e| e.component.clone()).collect();
-        let stale = detect(&entry_urls, &classification, graph);
+        // 阶段 2：过期条目（Alg 9）。url 去重（多条目共享同一组件名，
+        // REVIEW-4c6e7fc nit2）。
+        let entry_urls: BTreeSet<String> = desired.iter().map(|e| e.component.clone()).collect();
+        let stale = detect(
+            &entry_urls.into_iter().collect::<Vec<_>>(),
+            &classification,
+            graph,
+        );
         if stale.is_empty() {
             return Ok(stale);
         }
@@ -260,8 +271,10 @@ impl Hmr {
                 })
                 .collect();
             self.loader.apply(&bumped);
-            // 失败检测：过期条目的 fiber 失败态（L-Raise）。
-            for entry in &bumped {
+            // 失败检测：**仅过期条目**的 fiber 失败态（L-Raise；非过期
+            // 条目未重建、其既有失败 fiber 不得误判，REVIEW-4c6e7fc
+            // nit3）。
+            for entry in bumped.iter().filter(|e| stale.contains(&e.component)) {
                 if let Some(fiber) = self.loader.fiber(&entry.id)
                     && matches!(&*fiber.state(), FiberState::Inactive(Some(_)))
                 {
@@ -271,26 +284,39 @@ impl Hmr {
             Ok(())
         };
 
-        match reload_all() {
-            Ok(()) => Ok(stale),
-            Err(err) => {
-                // 回滚：恢复旧组件 + 重新 apply（revision 再递增）。
-                for (url, component) in &backup {
-                    self.loader
-                        .register_component(url.clone(), std::rc::Rc::clone(component));
-                }
-                let rolled: Vec<Entry> = desired
-                    .iter()
-                    .map(|e| {
-                        let mut e = e.clone();
-                        if stale.contains(&e.component) {
-                            e.revision += 2;
-                        }
-                        e
-                    })
-                    .collect();
-                self.loader.apply(&rolled);
+        // 回滚：恢复旧组件注册 + 重新 apply。revision +2 是"回滚后的新
+        // 基线"启发式（+1 已由失败尝试消费；若调用方随后以相同 desired
+        // 重试，revision 继续单调，不会与既有加载态混淆——REVIEW-4c6e7fc
+        // nit1）。
+        let rollback = |backup: &HashMap<String, Rc<dyn cordis_core::Component>>| {
+            for (url, component) in backup {
+                self.loader
+                    .register_component(url.clone(), Rc::clone(component));
+            }
+            let rolled: Vec<Entry> = desired
+                .iter()
+                .map(|e| {
+                    let mut e = e.clone();
+                    if stale.contains(&e.component) {
+                        e.revision += 2;
+                    }
+                    e
+                })
+                .collect();
+            self.loader.apply(&rolled);
+        };
+
+        // 事务：任何 panic（配置错误 = bug）都先回滚再重抛——永不半重载。
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(reload_all));
+        match outcome {
+            Ok(Ok(())) => Ok(stale),
+            Ok(Err(err)) => {
+                rollback(&backup);
                 Err(err.context("事务性重载失败，已回滚到备份版本"))
+            }
+            Err(payload) => {
+                rollback(&backup);
+                std::panic::resume_unwind(payload);
             }
         }
     }
