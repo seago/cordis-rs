@@ -102,6 +102,18 @@ impl Context {
         self.realms.borrow().get(&key).copied().unwrap_or(key)
     }
 
+    /// 公开只读的 `ρ(k)`（M2-PR4：Algorithm 7 的 affected 判定需要）。
+    pub fn realm_of(&self, key: Symbol) -> Symbol {
+        self.resolve_realm(key)
+    }
+
+    /// **就地改写本上下文 `ρ` 表的 `key` 映射（M2-PR4，Algorithm 7 的
+    /// `entry.ctx[@@isolate] ← ρ′`）**——与派生的 [`Context::isolate`]
+    /// 互补；不触发 reload（调用方负责 refresh/通知）。
+    pub fn isolate_in_place(&self, key: Symbol, realm: Symbol) {
+        self.realms.borrow_mut().insert(key, realm);
+    }
+
     /// 共效应表的可变访问（仅测试使用；公开读写经 [`Context::get`]/[`Context::set`]）。
     #[cfg(test)]
     pub(crate) fn store_cell(&self) -> &RefCell<Store> {

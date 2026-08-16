@@ -41,7 +41,7 @@ use cordis_core::context::InterceptMeta;
 use cordis_core::effect::{EffectIter, once};
 use cordis_core::keyset::KeySet;
 use cordis_core::symbol::Symbol;
-use cordis_core::{Component, Context, Disposer, Fiber, Runtime};
+use cordis_core::{Component, Context, Disposer, Fiber, FiberId, Runtime};
 
 /// 隔离注解（Def 74 的 `isolate`；§5.2.1 托管 realm 的两种作用域）。
 ///
@@ -220,6 +220,9 @@ struct LoadedEntry {
     disabled: bool,
     isolate: Option<IsolateAnnotation>,
     intercept: Intercepts,
+    /// 条目上下文（注解派生；Algorithm 7 重指派时就地 patch ρ，
+    /// M2-PR4）。
+    ctx: Rc<Context>,
     /// 实例化的 fiber（组 = 持有者 fiber；`disabled` 或尚未满足依赖时为
     /// `None`）。
     fiber: Option<Rc<Fiber>>,
@@ -330,10 +333,10 @@ impl Loader {
                 continue;
             };
             let disabling = !l.disabled && entry.disabled;
-            let rebuilding = !entry.disabled
-                && (l.component != entry.component
-                    || l.revision != entry.revision
-                    || l.isolate != entry.isolate);
+            let rebuilding =
+                !entry.disabled && (l.component != entry.component || l.revision != entry.revision);
+            // 注（M2-PR4）：isolate 变更**不走卸载侧**——经 Algorithm 7
+            // realm 重指派（patch_isolation，reconcile_into 内处理）。
             if disabling || rebuilding {
                 self.unload_from(&id, loaded);
             }
@@ -405,21 +408,16 @@ impl Loader {
             return;
         }
 
-        // 叶子：component / revision / isolate 变更 → 重建。
-        if loaded.component != entry.component
-            || loaded.revision != entry.revision
-            || loaded.isolate != entry.isolate
-        {
+        // 叶子：component / revision 变更 → 重建；isolate 变更 →
+        // **Algorithm 7 realm 重指派**（M2-PR4，替代重建）。
+        if loaded.component != entry.component || loaded.revision != entry.revision {
             self.unload_from(&entry.id, map);
-            let fiber = self.instantiate_leaf(entry, parent_ctx);
-            if let Some(l) = map.get_mut(&entry.id) {
-                l.component = entry.component.clone();
-                l.config = Rc::clone(&entry.config);
-                l.revision = entry.revision;
-                l.isolate = entry.isolate.clone();
-                l.intercept = entry.intercept.clone();
-                l.fiber = Some(fiber);
-            }
+            let fresh = self.make_loaded(entry, parent_ctx);
+            map.insert(entry.id.clone(), fresh);
+            return;
+        }
+        if loaded.isolate != entry.isolate {
+            self.patch_isolation(entry, loaded, map);
             return;
         }
         // 仅拦截注解变化：就地应用（不重建）。
@@ -434,12 +432,13 @@ impl Loader {
 
     /// 构造（并加载）条目：叶子实例化组件；分支实例化持有者 + 递归子条目。
     fn make_loaded(&self, entry: &Entry, parent_ctx: &Rc<Context>) -> LoadedEntry {
+        let ctx = self.entry_ctx(entry, parent_ctx);
         if entry.is_group() {
             let mut children = HashMap::new();
             let fiber = if entry.disabled {
                 None
             } else {
-                let holder = self.instantiate_group(entry, parent_ctx);
+                let holder = self.instantiate_group(entry, &ctx);
                 self.apply_into(&entry.children, holder.ctx().clone(), &mut children);
                 Some(holder)
             };
@@ -450,6 +449,7 @@ impl Loader {
                 disabled: entry.disabled,
                 isolate: entry.isolate.clone(),
                 intercept: entry.intercept.clone(),
+                ctx,
                 fiber,
                 children,
             }
@@ -457,7 +457,7 @@ impl Loader {
             let fiber = if entry.disabled {
                 None
             } else {
-                Some(self.instantiate_leaf(entry, parent_ctx))
+                Some(self.instantiate_leaf(entry, &ctx))
             };
             LoadedEntry {
                 component: entry.component.clone(),
@@ -466,16 +466,46 @@ impl Loader {
                 disabled: entry.disabled,
                 isolate: entry.isolate.clone(),
                 intercept: entry.intercept.clone(),
+                ctx,
                 fiber,
                 children: HashMap::new(),
             }
         }
     }
 
-    /// 叶子实例化：注解 ctx（isolate 派生 + intercept 派生）上注册组件；
-    /// 若父为 fiber（组内），在父 ctx 注册级联退役（Def 47 注册逆——
-    /// 父退役 → O-Retire 本 fiber）。
-    fn instantiate_leaf(&self, entry: &Entry, parent_ctx: &Rc<Context>) -> Rc<Fiber> {
+    /// 条目上下文：叶子 = 注解 ctx（isolate 派生 + intercept 派生）；
+    /// 分支 = 派生 + 组拦截注解（isolate 无声明键可应用，M2-PR3 边界）。
+    fn entry_ctx(&self, entry: &Entry, parent_ctx: &Rc<Context>) -> Rc<Context> {
+        if entry.is_group() {
+            let ctx = parent_ctx.derive();
+            for (key, meta) in entry.intercept.iter() {
+                ctx.intercept_set_boxed(key, meta.clone_box());
+            }
+            ctx
+        } else {
+            let component = self
+                .components
+                .borrow()
+                .get(&entry.component)
+                .cloned()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "未注册的组件 `{}`（先 register_component）",
+                        entry.component
+                    )
+                });
+            let keys: KeySet = component
+                .inject()
+                .iter()
+                .chain(component.provide().iter())
+                .collect();
+            self.annotated_ctx(parent_ctx, entry, &keys)
+        }
+    }
+
+    /// 叶子实例化：在注解 ctx 上注册组件；若父为 fiber（组内），在父 ctx
+    /// 注册级联退役（Def 47 注册逆——父退役 → O-Retire 本 fiber）。
+    fn instantiate_leaf(&self, entry: &Entry, ctx: &Rc<Context>) -> Rc<Fiber> {
         let component = self
             .components
             .borrow()
@@ -487,18 +517,12 @@ impl Loader {
                     entry.component
                 )
             });
-        let keys: KeySet = component
-            .inject()
-            .iter()
-            .chain(component.provide().iter())
-            .collect();
-        let ctx = self.annotated_ctx(parent_ctx, entry, &keys);
         let fiber = ctx
             .use_component(component, Rc::clone(&entry.config))
             .unwrap_or_else(|err| panic!("条目 `{}` 实例化失败：{err:?}（配置错误）", entry.id));
         // 级联：父 fiber 退役 → 子代 O-Retire（Def 47；经父 ctx 累加器）。
-        if parent_ctx.fiber().is_some() {
-            drop(parent_ctx.effect(|| -> Box<dyn EffectIter> {
+        if ctx.fiber().is_some() {
+            drop(ctx.effect(|| -> Box<dyn EffectIter> {
                 let f = Rc::clone(&fiber);
                 Box::new(once(Box::new(move || {
                     Box::new(move || f.retire()) as Disposer
@@ -509,19 +533,14 @@ impl Loader {
     }
 
     /// 组持有者实例化：无注入/供给的空组件（组的角色 = 子条目的父 fiber，
-    /// Def 47 注册）；组拦截注解派生应用（isolate 无声明键可应用，M2-PR3
-    /// 边界）。
-    fn instantiate_group(&self, entry: &Entry, parent_ctx: &Rc<Context>) -> Rc<Fiber> {
-        let ctx = parent_ctx.derive();
-        for (key, meta) in entry.intercept.iter() {
-            ctx.intercept_set_boxed(key, meta.clone_box());
-        }
+    /// Def 47 注册）。
+    fn instantiate_group(&self, entry: &Entry, ctx: &Rc<Context>) -> Rc<Fiber> {
         let holder = ctx
             .use_component(Rc::new(GroupHolder), Rc::clone(&entry.config))
             .unwrap_or_else(|err| panic!("组条目 `{}` 实例化失败：{err:?}（配置错误）", entry.id));
         // 组持有者也注册级联（组在组内时）。
-        if parent_ctx.fiber().is_some() {
-            drop(parent_ctx.effect(|| -> Box<dyn EffectIter> {
+        if ctx.fiber().is_some() {
+            drop(ctx.effect(|| -> Box<dyn EffectIter> {
                 let f = Rc::clone(&holder);
                 Box::new(once(Box::new(move || {
                     Box::new(move || f.retire()) as Disposer
@@ -564,6 +583,154 @@ impl Loader {
             if !desired.contains_key(key) {
                 ctx.intercept_clear(key);
             }
+        }
+    }
+
+    /// **Algorithm 7：隔离 realm 重指派（M2-PR4，替代 isolate 变更重建）**
+    ///
+    /// 论文用 delimiter（`δk` 标签）判定"绑定是否属本条目"（own）；本实现
+    /// 以 **loader 树的子树成员关系**等价判定（条目 fiber + 递归子代）——
+    /// 适应记录见 THEORY-MAP PR #20 行。
+    ///
+    /// 步骤（对照 Algorithm 7）：Δ = 变化键（旧 realm vs 新 realm）→
+    /// patch `ρ`（条目 ctx + 子树各 fiber ctx——ρ 表为拷贝继承，需遍历；
+    /// 论文为持久化结构共享）→ refresh 子树 fiber（重算目标）→ 移动
+    /// 子树绑定（own ∧ store[s1] ∧ ¬store[s2]）→ 通知 affected 外部依赖者
+    /// （resolve ∈ {s1,s2} ∧ own(D) ≠ own(P)）。
+    fn patch_isolation(
+        &self,
+        entry: &Entry,
+        loaded: &LoadedEntry,
+        map: &mut HashMap<String, LoadedEntry>,
+    ) {
+        let fiber = loaded.fiber.as_ref().expect("patch 仅在已激活条目");
+        let component = fiber.component();
+        let keys: KeySet = component
+            .inject()
+            .iter()
+            .chain(component.provide().iter())
+            .collect();
+
+        // Δ：变化键（s1 = 旧 realm，s2 = 新 realm）。
+        let mut diff: Vec<(Symbol, Symbol, Symbol)> = Vec::new();
+        for key in keys.iter() {
+            let s1 = self.realm_of(loaded.isolate.as_ref(), &entry.id, key);
+            let s2 = self.realm_of(entry.isolate.as_ref(), &entry.id, key);
+            if s1 != s2 {
+                diff.push((key, s1, s2));
+            }
+        }
+        if diff.is_empty() {
+            self.update_leaf_fields(entry, loaded, map);
+            return;
+        }
+
+        // 子树成员（own 判定；论文 delimiter 的树等价）。
+        let subtree = self.collect_subtree_ids(loaded);
+
+        // patch ρ：条目 ctx + 子树各 fiber ctx（拷贝继承 → 遍历）。
+        for (key, _, s2) in &diff {
+            loaded.ctx.isolate_in_place(*key, *s2);
+            for fid in &subtree {
+                if let Some(f) = self.runtime.fiber(*fid) {
+                    f.ctx().isolate_in_place(*key, *s2);
+                }
+            }
+        }
+
+        // refresh 子树 fiber（目标重算：重绑 s2 / 卸载）。
+        for fid in &subtree {
+            if let Some(f) = self.runtime.fiber(*fid) {
+                self.runtime.refresh(&f);
+            }
+        }
+
+        // 移动子树绑定（own ∧ store[s1] ∧ ¬store[s2]）；own 判定在移动
+        // **之前**快照（移动后 s1 无绑定，affected 谓词需要迁移前事实）。
+        let prov_owns: Vec<bool> = diff
+            .iter()
+            .map(|(_, s1, _)| {
+                self.runtime
+                    .provider_of_realm(*s1)
+                    .is_some_and(|p| subtree.contains(&p))
+            })
+            .collect();
+        for ((_, s1, s2), own) in diff.iter().zip(prov_owns.iter()) {
+            if *own && !self.runtime.store().contains(*s2) {
+                self.runtime
+                    .move_binding(*s1, *s2)
+                    .unwrap_or_else(|err| panic!("Algorithm 7 绑定迁移失败：{err:?}（bug）"));
+            }
+        }
+
+        // 通知 affected 外部依赖者（排除子树成员——已 patch + refresh）：
+        // resolve ∈ {s1,s2} ∧ own(D) ≠ own(P)（外部 own(D)=false）。
+        let diff_clone = diff.clone();
+        self.runtime.notify_affected(move |f| {
+            if subtree.contains(&f.id()) {
+                return false;
+            }
+            diff_clone
+                .iter()
+                .zip(prov_owns.iter())
+                .any(|((key, s1, s2), own)| {
+                    let r = f.ctx().realm_of(*key);
+                    (r == *s1 || r == *s2) && *own
+                })
+        });
+
+        self.update_leaf_fields(entry, loaded, map);
+    }
+
+    /// 叶子字段同步（patch_isolation 收尾；拦截注解就地差异应用）。
+    fn update_leaf_fields(
+        &self,
+        entry: &Entry,
+        loaded: &LoadedEntry,
+        map: &mut HashMap<String, LoadedEntry>,
+    ) {
+        if let Some(l) = map.get_mut(&entry.id) {
+            l.component = entry.component.clone();
+            l.config = Rc::clone(&entry.config);
+            l.revision = entry.revision;
+            l.isolate = entry.isolate.clone();
+            l.intercept = entry.intercept.clone();
+            if let Some(fiber) = &l.fiber {
+                self.apply_intercept(fiber.ctx(), &loaded.intercept, &entry.intercept);
+            }
+        }
+    }
+
+    /// isolate 注解 → 键的 realm 符号。
+    fn realm_of(&self, isolate: Option<&IsolateAnnotation>, id: &str, key: Symbol) -> Symbol {
+        match isolate {
+            None => key,
+            Some(IsolateAnnotation::Local) => {
+                Symbol::intern(&format!("local:{id}:{}", key.as_str()))
+            }
+            Some(IsolateAnnotation::Global(name)) => {
+                Symbol::intern(&format!("global:{name}:{}", key.as_str()))
+            }
+        }
+    }
+
+    /// 子树 fiber id 集合（条目 fiber + 递归子代）。
+    fn collect_subtree_ids(&self, loaded: &LoadedEntry) -> std::collections::HashSet<FiberId> {
+        let mut ids = std::collections::HashSet::new();
+        self.collect_subtree_ids_into(loaded, &mut ids);
+        ids
+    }
+
+    fn collect_subtree_ids_into(
+        &self,
+        loaded: &LoadedEntry,
+        ids: &mut std::collections::HashSet<FiberId>,
+    ) {
+        if let Some(fiber) = &loaded.fiber {
+            ids.insert(fiber.id());
+        }
+        for child in loaded.children.values() {
+            self.collect_subtree_ids_into(child, ids);
         }
     }
 
@@ -1174,19 +1341,131 @@ mod tests {
     }
 
     #[test]
-    fn isolate_change_rebuilds_leaf() {
-        let (loader, _runtime) = loader();
+    fn isolate_change_reassigns_realms_without_rebuild() {
+        let (loader, runtime) = loader();
         loader.register_component("db", val_provider());
-        let base = Entry::new("p", "db", Rc::new("v".to_string()), 0, false);
-        loader.apply(&[base.clone().with_isolate(IsolateAnnotation::Local)]);
-        let first = loader.fiber("p").expect("激活").id();
+        loader.register_component("cons", sum_consumer());
+        let base_p = Entry::new("p", "db", Rc::new("v".to_string()), 0, false)
+            .with_isolate(IsolateAnnotation::Global("db".into()));
+        let base_c = Entry::new("c", "cons", Rc::new(()), 0, false)
+            .with_isolate(IsolateAnnotation::Global("db".into()));
+        loader.apply(&[base_p.clone(), base_c.clone()]);
+        let p_first = loader.fiber("p").expect("p 激活").id();
+        let c_first = loader.fiber("c").expect("c 激活（共享 realm）").id();
+        assert!(
+            runtime.store().contains(Symbol::intern("global:db:val")),
+            "绑定在旧 realm"
+        );
 
-        // isolate 变更 → 重建（M2-PR3 边界：Algorithm 7 realm 重指派随
-        // M2-PR4）。
-        loader.apply(&[base
-            .clone()
-            .with_isolate(IsolateAnnotation::Global("db".into()))]);
-        let second = loader.fiber("p").expect("重建后激活").id();
-        assert_ne!(first, second, "isolate 变更 → 重建（新 fiber）");
+        // p 的 isolate 变更（Global db → db2）：**Algorithm 7 重指派**——
+        // 不重建（fiber id 不变），绑定迁移到新 realm。
+        loader.apply(&[
+            base_p
+                .clone()
+                .with_isolate(IsolateAnnotation::Global("db2".into())),
+            base_c.clone(),
+        ]);
+        assert_eq!(
+            loader.fiber("p").expect("p 仍在").id(),
+            p_first,
+            "Algorithm 7 不重建（fiber 不变）"
+        );
+        let store = runtime.store();
+        assert!(
+            store.contains(Symbol::intern("global:db2:val")),
+            "绑定迁移到新 realm"
+        );
+        assert!(
+            !store.contains(Symbol::intern("global:db:val")),
+            "旧 realm 无绑定"
+        );
+        drop(store);
+        // c 仍解析旧 realm → 依赖丢失 → 停用（affected 通知）。
+        assert!(
+            matches!(
+                &*loader.fiber("c").expect("c 仍在").state(),
+                FiberState::Inactive(_)
+            ),
+            "c 停用（提供者 realm 迁移，依赖不可见）"
+        );
+        assert!(runtime.is_quiet(), "静止");
+
+        // c 也迁到 db2 → 重新激活（c 的 fiber 亦不变）。
+        loader.apply(&[
+            base_p
+                .clone()
+                .with_isolate(IsolateAnnotation::Global("db2".into())),
+            base_c
+                .clone()
+                .with_isolate(IsolateAnnotation::Global("db2".into())),
+        ]);
+        assert_eq!(
+            loader.fiber("c").expect("c 仍在").id(),
+            c_first,
+            "c 亦不重建"
+        );
+        assert!(
+            matches!(
+                &*loader.fiber("c").unwrap().state(),
+                FiberState::Active { .. }
+            ),
+            "c 在新 realm 重新激活"
+        );
+        assert!(runtime.is_quiet(), "静止");
+    }
+
+    /// Algorithm 7 子树场景：组内子条目的绑定随条目 realm 迁移（own 判定
+    /// 覆盖子树成员）。
+    #[test]
+    fn isolate_change_moves_group_child_binding() {
+        let (loader, runtime) = loader();
+        loader.register_component("db", val_provider());
+        loader.register_component("cons", sum_consumer());
+        let child = Entry::new("a", "db", Rc::new("1".to_string()), 0, false)
+            .with_isolate(IsolateAnnotation::Global("db".into()));
+        loader.apply(&[
+            Entry::group("g", vec![child]),
+            Entry::new("c", "cons", Rc::new(()), 0, false)
+                .with_isolate(IsolateAnnotation::Global("db".into())),
+        ]);
+        assert!(loader.fiber("a").is_some(), "组内子条目激活");
+        assert!(
+            matches!(
+                &*loader.fiber("c").unwrap().state(),
+                FiberState::Active { .. }
+            ),
+            "c 依赖组内提供者激活"
+        );
+
+        // 组内子条目 a 的 isolate 变更：绑定迁移 + c 停用；a 不重建。
+        loader.apply(&[
+            Entry::group(
+                "g",
+                vec![
+                    Entry::new("a", "db", Rc::new("1".to_string()), 0, false)
+                        .with_isolate(IsolateAnnotation::Global("db2".into())),
+                ],
+            ),
+            Entry::new("c", "cons", Rc::new(()), 0, false)
+                .with_isolate(IsolateAnnotation::Global("db".into())),
+        ]);
+        let store = runtime.store();
+        assert!(
+            store.contains(Symbol::intern("global:db2:val")),
+            "子条目绑定已迁移"
+        );
+        assert!(
+            !store.contains(Symbol::intern("global:db:val")),
+            "旧 realm 无绑定"
+        );
+        drop(store);
+        assert!(
+            matches!(
+                &*loader.fiber("c").unwrap().state(),
+                FiberState::Inactive(_)
+            ),
+            "c 停用（依赖随 realm 迁移）"
+        );
+        assert!(runtime.is_quiet(), "静止");
     }
 }

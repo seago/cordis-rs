@@ -115,6 +115,21 @@ impl Store {
         Ok(binding.value)
     }
 
+    /// 迁移绑定（Algorithm 7 的 `store[s2] <- store[s1]; delete store[s1]`，
+    /// M2-PR4）：把 `from` 处的绑定（值 + 提供者）移到 `to`。
+    /// 前置：`from ∈ dom(σ)` ∧ `to ∉ dom(σ)`。
+    pub(crate) fn move_binding(&mut self, from: Symbol, to: Symbol) -> Result<(), StoreError> {
+        if self.bindings.contains_key(&to) {
+            return Err(StoreError::AlreadyBound(to));
+        }
+        let binding = self
+            .bindings
+            .remove(&from)
+            .ok_or(StoreError::NotBound(from))?;
+        self.bindings.insert(to, binding);
+        Ok(())
+    }
+
     /// 符号级查询绑定（含提供者；供 `σγ` 推导，Def 45）。
     pub(crate) fn binding(&self, realm: Symbol) -> Option<&Binding> {
         self.bindings.get(&realm)

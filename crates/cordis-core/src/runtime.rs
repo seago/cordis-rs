@@ -27,7 +27,7 @@ use crate::context::Context;
 use crate::effect::{Disposer, EffectIter, execute, once};
 use crate::fiber::{Fiber, FiberError, FiberId, FiberState, View};
 use crate::keyset::KeySet;
-use crate::store::Store;
+use crate::store::{Store, StoreError};
 use crate::symbol::Symbol;
 
 /// 通知反应器（Algorithm 3 的筛选/refresh 由反应器承担）。
@@ -277,6 +277,30 @@ impl Runtime {
     /// fiber 的某个注入键 `ik` 经其自身 `ρ` 解析到载荷 realm 即受影响
     /// （等价于论文的 `key ∈ fiber.inject ∧ fiber.ctx[@@isolate][key] =
     /// ctx[@@isolate][key]`）。refresh 幂等：target 未变则无操作。
+    /// 迁移绑定（Algorithm 7 原语，M2-PR4）：`store[s2] ← store[s1]`；
+    /// 前置 `from ∈ dom(σ)` ∧ `to ∉ dom(σ)`。
+    pub fn move_binding(&self, from: Symbol, to: Symbol) -> Result<(), StoreError> {
+        self.store.borrow_mut().move_binding(from, to)
+    }
+
+    /// `realm` 处绑定的提供者 fiber（Algorithm 7 的 own 判定用）。
+    pub fn provider_of_realm(&self, realm: Symbol) -> Option<FiberId> {
+        self.store.borrow().binding(realm).and_then(|b| b.provider)
+    }
+
+    /// 按自定义谓词通知 fiber 反应器（M2-PR4，Algorithm 7 的
+    /// `notify(entry.ctx, Δ, affected)`——替代 Algorithm 3 的 realm 测试）：
+    /// 谓词为真的 fiber 被 refresh（目标重算）。
+    pub fn notify_affected(&self, pred: impl Fn(&Fiber) -> bool) {
+        let affected: Vec<Rc<Fiber>> = {
+            let fibers = self.fibers.borrow();
+            fibers.values().filter(|f| pred(f)).cloned().collect()
+        };
+        for fiber in affected {
+            self.refresh(&fiber);
+        }
+    }
+
     pub(crate) fn notify_fibers(&self, keys: &[Symbol]) {
         let affected: Vec<Rc<Fiber>> = {
             let fibers = self.fibers.borrow();
