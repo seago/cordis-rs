@@ -11,7 +11,7 @@
 | `𝒱 k`（值类型族） | Def 24 | `cordis_core::key::Key`（`type Value` + `const SYMBOL`） | —（经 `Store` 间接覆盖） | 完成（PR #2） |
 | `𝔇Σ` / `𝔓Γ`（键集合） | Def 25/43 | `cordis_core::keyset::KeySet` | 单元 | 完成（PR #2） |
 | `Σ`（依赖表） | Def 22 | `cordis_core::store::Store` | 单元 | 完成（PR #2）；`get`/`set`/撤销带 Def 23 前置条件 |
-| 满足谓词 `σ⊧d` | Def 24 | `Store::satisfies` / `Context::satisfies`（经 `ρ` 解析）/ `InterpState::satisfied` | 单元 | 完成（PR #2/#4） |
+| 满足谓词 `σ⊧d` | Def 24 | `Store::satisfies` / `Context::satisfies`（经 `ρ` 解析）/ `InterpState::satisfied` | 单元 | 完成（PR #2/#4）；**注意**（M0 走查）：这是**原始表**谓词（含未 Active 绑定）；Def 45 的**状态级** `γ⊧d = σγ⊧d`（仅 Active fiber 表并集）由 `Runtime::satisfied`（`provider_of` 派生）实现，是生命周期规则（`compute_target`）所用者 |
 | `Γ∞`（统一上下文类型） | Def 32 | `cordis_core::context::Context`（`ρ` + `ι` + 累加器）+ `Runtime`（共享 `σ`） | 单元 | 完成（PR #3–4） |
 | `𝔈Γ` / `𝔈iter_Γ`（效应函数/迭代器） | Def 8/51 | `cordis_core::effect::{Disposer, EffectIter, Step, once}` | 单元 | 完成（PR #3，同步版） |
 | `effectΓ(𝑒)` / `ctx.effect` | Def 12, Alg 1 | `Context::effect` | 单元 | 完成（PR #3：armed + 组合入累加器） |
@@ -40,10 +40,10 @@
 |---|---|---|
 | Thm 7 / Thm 16：LIFO 恢复、声音不变量 | `effect::tests` / `context::tests`（`execute_runs_inverses_in_lifo`、`thm16_*`、`accumulator_reverts_all_effects_lifo`、**`nested_effect_reverts_in_application_order`**） | 完成（PR #3；嵌套顺序审查后修复） |
 | Cor 21：独立效应乱序撤销 | `context::tests::cor21_independent_effects_revert_in_any_permutation`（4 排列：LIFO/正序/两交错乱序，每步断言 Thm 20(1) 中间态） | 完成（PR #9：不同键 `set` 满足 Def 19 独立性——变换可交换、逆互不干扰） |
-| Thm 63：依赖者先停、teardown 可读依赖 | `runtime::tests::withdrawal_cascade_disposes_dependents_first`（teardown 检查逆） | 真实引擎已验（PR #5）；property 化 PR #6 |
-| Thm 64：单转换不跨两次解析 | `runtime::tests::target_change_mid_reload_chains_unload`（guard 步界中断 + 惯性链） | 真实引擎已验（PR #5） |
-| Thm 66：Progress、guard 不死锁 | `interp::tests::drive_*`（oracle 自检）+ `tests/property.rs`（每个动作后 `is_quiet` 断言） | oracle 已验（PR #2）；真实引擎已验（PR #6） |
-| Thm 73 / Cor 62：Confluence、离场无残留 | `interp::tests::confluence_all_interleavings`（穷举交错）+ `tests/property.rs`（oracle 对比：活跃集/σγ/绑定总数逐步一致） | oracle 已验（PR #2）；真实引擎已验（PR #6） |
+| Thm 63：依赖者先停、teardown 可读依赖 | `runtime::tests::withdrawal_cascade_disposes_dependents_first`（teardown 检查逆） | 真实引擎已验（PR #5）；停用**结果**经 property（活跃集一致）覆盖，teardown 可读的**顺序性**由集成测试直接验证（M0 走查：表述厘清；oracle 两态模型不携带转换内顺序） |
+| Thm 64：单转换不跨两次解析 | `runtime::tests::target_change_mid_reload_chains_unload`（目标中途变化 → 惯性链卸载） | 真实引擎已验（PR #5）；M0 走查：括号"guard 步界中断"属 §4.3.2 效应层（`execute_interrupts_at_step_boundary`），Thm 64 为解析层惯性——两层级测试分开对应 |
+| Thm 66：Progress、guard 不死锁 | `interp::tests::drive_*`（oracle 自检）+ `tests/property.rs`（每个动作后 `is_quiet` 断言） | oracle 已验（PR #2）；真实引擎已验（PR #6）；M0 走查：到达静止已验，定量上界 `(K+4)(V+1)` 未断言（记录为覆盖缺口） |
+| Thm 73 / Cor 62：Confluence、离场无残留 | `interp::tests::confluence_all_interleavings`（穷举交错）+ `tests/property.rs`（oracle 对比：活跃集/σγ/绑定总数逐步一致）+ **`thm73_canonical_form_static_assembly`**（M0 走查补：动态历史 == 静态装配，up to names） | oracle 已验（PR #2）；真实引擎已验（PR #6）；**Thm 73(1) canonical form 补测（M0 走查）** |
 | Def 26：通知分类正确性 | `notify::tests::classification_matrix`（8 组合分类矩阵） | 完成（PR #4） |
 
 ## 已知偏差
@@ -55,7 +55,7 @@
 | 2026-08-15 / PR #2 | 参考解释器把抽象效应函数 `e` 规范化建模为「激活恰好安装 `provide` 全键、停用清空」 | Def 43/69（论文在 Def 69 假设下使用相同模型） | 公开差异声明（oracle 选择，性质保持） | 记录 |
 | 2026-08-15 / PR #2 | `step_lifecycle` 固定按 fiber id 升序取首个可启用规则；论文的规则不规定调度 | §4.2（规则对任何序列成立） | 公开差异声明（oracle 确定性需要） | 记录 |
 | 2026-08-15 / PR #3 | 效应迭代器为同步版；论文 Algorithm 1 的 `await iter.next()` 由 PR #5 接入 tokio 时提供（引擎逻辑不变） | Def 51, Alg 1 | 公开差异声明（阶段实现选择） | 记录 |
-| 2026-08-15 / PR #3 | `ctx.dispose ← dispose ∘ ctx.dispose` 于注册时执行；论文伪代码置于 dispose 内部（armed 幂等保证可观察等价） | Alg 1 第 17 行 | 公开差异声明（实现选择） | 记录 |
+| 2026-08-15 / PR #3 | **M0 走查更正**：`ctx.dispose ← dispose ∘ ctx.dispose` 在**注册期**执行——论文 Alg 1 第 17 行同样位于 `effect` 函数体内（注册期组合），原行"论文伪代码置于 dispose 内部"表述失准；且累加器入栈已细化为**每步逆产出时**（M-A 行，应用序 LIFO） | Alg 1 第 17 行 | 公开差异声明（表述更正：与论文一致） | 记录 |
 | 2026-08-15 / PR #2 审查 | `Symbol` 的 `Ord`/`Hash` 为进程内分配序：跨进程不可比较、迭代序跨运行不保证；跨边界（wasm）以名称字符串为媒介，不使用 id | Def 22（键为原子） | 公开差异声明（文档已修正：进程内确定性） | 记录 |
 | 2026-08-15 / PR #2 审查 | O-Insert 的供给不相交检查覆盖 `dom(Fγ)` 全部 fiber（含已退役未移除者）：退役组件的供给名在 remove 前保持占用 | §4.2 O-Insert 前提 `∀m ∈ dom(Fγ)`（与论文一致，无偏差；补充说明） | 无偏差（注释 + 记录） | 记录 |
 | 2026-08-15 / PR #3 审查 | **修复（M-A）**：原实现按「效应级注册完成时」入栈累加器，嵌套效应（外层迭代步骤间注册的内层效应）撤销顺序错误（外层整组先撤）；改为**每步逆产出时入栈**（应用序 LIFO，嵌套正确交错），与论文 "prepending each new inverse therefore yields LIFO recovery" 及 track 模型（`φ ∘ g`）一致 | Alg 1 前导句、Def 3、Thm 16 | 修正（含嵌套回归测试） | 已修复 |
@@ -67,7 +67,7 @@
 | 2026-08-15 / PR #4 | `Store` 错误携带 realm 而非用户键（`AlreadyBound(realm)` 等）——realm 与键在未隔离时相同，隔离场景以 realm 为准（Def 29 前置条件沿 `ρ` 转译） | Def 23/29 | 实现说明 | 记录 |
 | 2026-08-15 / PR #4 审查 | **修复（M1）**：notify 改为**快照迭代**（先克隆反应器列表）——反应器内注册新反应器不再 RefCell panic（原实现 borrow 跨循环存活）；反应器内同步 set 的递归广播语义已文档化并加守卫测试（PR #5 以 refresh 惯性切断） | Alg 3 | 修正（含 2 个重入测试） | 已修复 |
 | 2026-08-15 / PR #4 审查 | **修复（m4）**：`InterceptMeta` 移除 `Send + Sync` 约束（单线程 `Rc` 宿主，ADR-0002，约束无实际需要） | — | 修正 | 已修复 |
-| 2026-08-15 / PR #4 审查 | 分类衔接留白（m1）：`classify` 需前后快照而 `notify` 只广播键；快照/变更日志机制由 PR #5 提供（届时确定 `notify` 携带 `prev` 的形态）——已文档化 | Def 26, Alg 3 | 公开差异声明（PR #5 设计点） | 记录 |
+| 2026-08-15 / PR #4 审查 | 分类衔接留白（m1）：`classify` 需前后快照而 `notify` 只广播键；**M0 走查更新**：PR #5 后引擎以 `refresh` 幂等实现分类效果（activating → target 变化 → reload；deactivating → target 变化 → unload；neutral → target 不变 → 无操作），`classify` 仍为独立验证的纯函数、系统内无生产调用点——原"PR #5 提供快照/变更日志"的预期未落地（refresh 幂等替代） | Def 26, Alg 3 | 公开差异声明（引擎经 refresh 幂等隐式分类） | 记录 |
 | 2026-08-15 / PR #4 审查 | 错误载体区分（m2）：`Context::set` 报用户键、`Store::bind` 报 realm——已文档化 | Def 23/29 | 实现说明 | 记录 |
 | 2026-08-15 / PR #4 审查 | **PR #5 async 化必改项（m3）**：`set` 前置检查与绑定之间的 TOCTOU 窗口（同步单线程下不可达）；async 化后 `expect` 须改为可传播错误——已在代码注释标注 | Def 23, Alg 2 | 记录（PR #5 必改项） | 记录 |
 | 2026-08-15 / PR #4 审查 | 反应器注册表只增不减（m5）：fiber 卸载路径需要移除句柄；PR #5 提供 `ReactorId` 或改注册表——已文档化 | Alg 5 第 26 行 | 记录（PR #5 设计点） | 记录 |
@@ -100,9 +100,26 @@
 | 2026-08-16 / PR #8 审查 | **修复（m2）**：`HasChildren` panic 消息如实化（"条目下存在子代 fiber……叶子约束"）+ 模块文档注明**叶子约束**（不得经 `Loader::fiber(id)?.ctx()` 实例化子组件，嵌套随 group/include 在 M2 落地） | §4.2（`remove_fiber` 前提） | 修正（消息 + 文档） | 已修复 |
 | 2026-08-16 / PR #8 审查 | **修复（m3）**：补 `disabled_period_changes_take_effect_on_reenable`——disabled 期间 component/revision 变更不落记录（保持旧值），enabled 后以新 entry 实例化（最终一致）——固化路径防未来重构破坏 | §5.2.1 | 修正（测试固化） | 已修复 |
 | 2026-08-16 / PR #8 审查 | `desired` 重复 id：last-wins（后项覆盖，可能浪费一次实例化）——已文档化，调用方应保证唯一 | — | 实现说明 | 记录 |
-| 2026-08-16 / PR #9 | Cor 21 落地：`cor21_independent_effects_revert_in_any_permutation`——不同键 `set` 作为两两独立效应族（Def 19：变换只动自己的键→可交换；逆只撤自己的键→互不干扰），4 种排列（LIFO/正序/两交错乱序）撤销均回到 γ₀，每步断言 Thm 20(1) 中间态（只撤自己的贡献）；§3.1 效应论收尾 | Cor 21, Thm 20, Def 19 | 完成（纯测试固化；LIFO 仅 Thm 16 无需独立性，其余排列由独立性买来） | 记录 |
+| 2026-08-16 / PR #9 | Cor 21 落地：`cor21_independent_effects_revert_in_any_permutation`——不同键 `set` 作为两两独立效应族（Def 19 clause(1)：变换只动自己的键→可交换），**穷举全部 4! = 24 种排列**（LIFO/正序/乱序）撤销均回到 γ₀，每步断言 Thm 20(1) 中间态（只撤自己的贡献）；§3.1 效应论收尾。**M0 走查更正**：Def 19 clause(2)（逆不被外来变换干扰）因测试用状态无关逆（`unbind` 捕获 realm，不读当前状态）**退化未测**——原"两 clause 均覆盖"表述与事实不符 | Cor 21, Thm 20, Def 19 | 完成（穷举 24 排列）；clause(2) 退化声明见走查行 | 记录 |
+| 2026-08-16 / M0 走查 | **实现缺口（公开差异）**：Def 30/31 的 interception 完整形态（Σinter = 每键 provider 函数 `σ(k): ℳ→𝒱`；`get(k,μ) = σ(k)(μ⊕ₖι(k))`）未实现——当前 `intercept` 仅累积元数据到 `ι` 表（§5.1.2 的实现描述部分）、`get` 直读 store 从不咨询 `ι`，无 provider 函数概念与生产消费点；§5.1.2 的"@@intercept is consulted only when a binding is accessed"无对应 | Def 30/31, §5.1.2 | 公开差异声明（实现缺口；拦截元数据累积与右偏合并已实现；求值形态列入 M1 首批任务） | 记录 |
+| 2026-08-16 / M0 走查 | **实现缺口（公开差异）**：§5.1.4 Algorithm 6 的 Proxy 访问层整节未实现——沿 fiber 链解析（committed/inject/root）的 `ctx[key]` 属性访问、规格强制（`INACTIVE_ACCESS`/`UNDECLARED_ACCESS`）无对应物；`ctx.get` 为裸 store 查找（与论文一致地"从不失败"），但"读视图而非 store 的规格强制访问"缺席 | §5.1.4, Alg 6 | 公开差异声明（实现缺口；DX 层后续，列入 M1 首批任务） | 记录 |
+| 2026-08-16 / M0 走查 | `Disposer = Box<dyn FnOnce>` 为命令式载体，替代论文 `g: Γ→Γ` 纯函数——变换幺半群 `𝔐(e)`（Def 17–19 的独立性形式定义）在代码中无可表达结构，独立性退化为一阶约定（"逆只撤自己的键"）；语义保证（Thm 7/16/20/21）经命令式测试成立 | Def 8/17–19 | 公开差异声明（结构性；wasm 边界句柄化时按论文形态对齐） | 记录 |
+| 2026-08-16 / M0 走查 | `Step` 无「无逆步骤」变体（Alg 1 的 `if value` 无对应）；实际对齐 Def 51 三元组（`g` 恒存在）更贴切——`Yielded`/`Finished` 恒携带逆 | Def 51, Alg 1 | 实现说明（与 Def 51 一致，Alg 1 的 `Maybe` 分支为一般化） | 记录 |
+| 2026-08-16 / M0 走查 | Thm 7（单组件累加器恢复）无独立测试——与 Thm 16 合并声明（`accumulator_reverts_all_effects_lifo` 兼作两者）；声音不变量在终态断言 | Thm 7/16 | 实现说明（合并覆盖声明） | 记录 |
+| 2026-08-16 / M0 走查 | Def 33–42 观测等价 ≃ 无对应物——`InterpState` 的 `PartialEq` 是结构相等而非商结构；≃ 为理论构造（导出独立性），非运行时实体 | Def 33–42 | 公开差异声明（理论构造不落运行时） | 记录 |
+| 2026-08-16 / M0 走查 | O-Insert 的 `π ∈ dom(Fγ) ∪ {root}` 前提未在引擎侧执行——`RegistryError::UnknownParent` 仅由 property harness 合成，`register` 不校验父存在性（依赖 `HasChildren` 移除前提维持父存活不变式） | §4.2 O-Insert | 公开差异声明（防御深度缺口；不变式由移除前提维系） | 记录 |
+| 2026-08-16 / M0 走查 | `is_quiet` 的 `Inactive(_)` 分支只判 `target.is_none()`，未实现 Def 49 式 (45) 的 `ζ≠⊥ ∨ target=⊥` 析取——当前 ζ 恒 None（L-Raise 未实现）掩盖；**L-Raise 落地时必改** | Def 49 式 (45), §4.3.4 | 记录（L-Raise 必改项） | 记录 |
+| 2026-08-16 / M0 走查 | Def 47 注册：引擎在 `register` 时**立即非可逆地 O-Insert**，逆仅含 refresh→retire；论文把 O-Insert 建模为可逆效应本身（逆 = O-Retire）——可观察等价（retire 恒被累加器持有），oracle 侧 `Fiber.registered` 已记录，引擎侧结构差异补记 | Def 47 | 实现说明（可观察等价） | 记录 |
+| 2026-08-16 / M0 走查 | Def 48 纪律 clause(2)（读仅限声明依赖）无运行时执行——越界**写**有 panic 检查（已记录），读任意 realm 无 confine 检查（论文为组件义务，非证明前置） | Def 48 | 公开差异声明（义务不检查） | 记录 |
+| 2026-08-16 / M0 走查 | `Fiber::target` 存完整 `Option<View>` 而非 §4.2 所述 hash（论文：`fiber.committed` 存 map、`fiber.target` 存 hash）——语义等价（hash 为优化），§5.1.3 实现细节 | §4.2, §5.1.3 | 实现说明（优化取舍） | 记录 |
+| 2026-08-16 / M0 走查 | §5.1.2 isolate 默认 realm 生成未实现——`Context::isolate` 要求显式 realm 参数（Def 29 本体一致；"freshly generated symbol by default"为 §5.1.2 描述性便利） | §5.1.2 | 公开差异声明（显式 realm 为 API 设计） | 记录 |
+| 2026-08-16 / M0 走查 | Alg 3 的 `return affected` + Alg 5 的 `await all(...)` 显式等待语义无对应——同步核心以递归级联隐式完成（notify 返回 `()`，转换同步跑完）——语义等价，机制不同 | Alg 3/5 | 公开差异声明（同步适配） | 记录 |
+| 2026-08-16 / M0 走查 | Thm 59（Preservation 四条款守卫不变式）与 Thm 61（Recovery exactness 全局交错）无直接测试——经 Thm 66/73 property 与 §3.1 局部 LIFO 测试间接覆盖 | Thm 59/61 | 记录（覆盖缺口；列入 M1 首批任务） | 记录 |
+| 2026-08-16 / M0 走查 | **修复（F4）**：Thm 73(1) canonical form 补测 `thm73_canonical_form_static_assembly`——动态历史（乱序注册+退役+移除+重装）与静态装配（按 ⊲ 序一次性装入）静止态按 (inject, provide) 签名比较一致（up to names）——"动态历史无痕迹 = 静态装配"招牌承诺落地 | Thm 73(1), §4.4.5, Lemma 56 | 修正（含测试） | 已修复 |
+| 2026-08-16 / M0 走查 | **修复（PR #9 审查 nit1）**：Cor 21 测试由 4 种代表排列强化为**穷举全部 24 种排列**（字典序迭代器） | Cor 21 | 修正（测试强化） | 已修复 |
 
 ## 里程碑走查记录
 
 | 里程碑 | 日期 | 覆盖章节 | 结论 | 未决偏差 |
 |---|---|---|---|---|
+| M0 原生闭环 | 2026-08-16 | §3.1–3.3、§4.1–4.4、§5.1（§5.1.1–5.1.3 主体；§5.1.4 见未决） | **门禁判定：通过（含处置清单）**——核心演算语义逐规则一致：可逆效应（execute/LIFO/armed/累加器）、共效应（满足谓词/三类分类/realm 键控/isolate 派生/notify 快照）、fiber 演算（组件三元组/七元组/registry 派生量/target/静止/O-Insert-Retire-Remove/L-Reload-Unload/L-Leave/惯性/步界中断）均有测试闭环（Thm 7/16/21/63/64/66/73/Cor 62 + oracle×引擎 2000 用例 + Cor 21 穷举 24 排列）；**本次走查修正**：Thm 73(1) canonical form 补测、Cor 21 全排列强化、3 处表述失准更正（Alg 1 第 17 行 dispose 组合时机、classify 衔接留白、Thm 63/64 表述）、映射表补 `Runtime::satisfied`（σ⊧d 与 γ⊧d=σγ⊧d 语义区分） | 处置清单（下里程碑首批任务）：① interception provider 函数形态（Def 30/31，实现缺口）② §5.1.4 Proxy 访问层（Alg 6，实现缺口）③ Thm 59/61 直接测试 ④ Thm 66 定量上界 `(K+4)(V+1)` 断言 ⑤ L-Raise 落地时 `is_quiet` 补 ζ 析取 ⑥ 命令式 Disposer 结构（wasm 句柄化时按论文形态对齐） |
