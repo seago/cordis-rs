@@ -122,6 +122,7 @@
 | 2026-08-16 / M0 走查 | Thm 59（Preservation 四条款守卫不变式）与 Thm 61（Recovery exactness 全局交错）无直接测试——经 Thm 66/73 property 与 §3.1 局部 LIFO 测试间接覆盖 | Thm 59/61 | 记录（覆盖缺口；列入 M1 首批任务） | 记录 |
 | 2026-08-16 / M0 走查 | **修复（F4）**：Thm 73(1) canonical form 补测 `thm73_canonical_form_static_assembly`——动态历史（乱序注册+退役+移除+重装）与静态装配（按 ⊲ 序一次性装入）静止态按 (inject, provide) 签名比较一致（up to names）——"动态历史无痕迹 = 静态装配"招牌承诺落地 | Thm 73(1), §4.4.5, Lemma 56 | 修正（含测试） | 已修复 |
 | 2026-08-16 / M0 走查 | **修复（PR #9 审查 nit1）**：Cor 21 测试由 4 种代表排列强化为**穷举全部 24 种排列**（字典序迭代器） | Cor 21 | 修正（测试强化） | 已修复 |
+| 2026-08-16 / M0 审查 | **修复（REVIEW-M0 风险提示）**：`Context::intercept`/`intercept_of` 为公开 API 但语义半成品（`get` 不消费 `ι`）——rustdoc 补**半成品警示**（"读路径消费由 M1 落地，此前按'拦截已生效'使用将静默无效果"） | Def 30/31 | 修正（rustdoc 警示） | 已修复 |
 
 ## 里程碑走查记录
 

@@ -213,6 +213,12 @@ impl Context {
     ///
     /// 同一键的多次拦截必须使用同一元数据类型 `M`（类型冲突 panic，
     /// panic = bug 策略，见 [`crate::effect`] 模块文档）。
+    ///
+    /// **⚠ 半成品警示（M0 审查 REVIEW-M0）**：当前仅**累积元数据**——读路径
+    /// （[`Context::get`]）不消费 `ι`，拦截对绑定值读取无任何效果。论文
+    /// Def 30/31 的 provider 函数形态（`get(k,μ) = σ(k)(μ⊕ₖι(k))`）由 M1
+    /// 落地（THEORY-MAP「里程碑走查记录」处置清单①）。在此前以"拦截已
+    /// 生效"为前提使用本 API 将得到静默无效果行为。
     pub fn intercept<M: InterceptMeta>(self: &Rc<Self>, key: Symbol, meta: M) -> Rc<Context> {
         let mut table = clone_intercept(&self.intercept);
         let merged = match table.get(&key) {
@@ -247,6 +253,10 @@ impl Context {
     }
 
     /// 读取 `k` 处合并后的拦截元数据（未安装或类型不符返回 `None`）。
+    ///
+    /// **⚠ 半成品警示（M0 审查 REVIEW-M0）**：同 [`Context::intercept`]——
+    /// 元数据可读回，但读路径（[`Context::get`]）不消费 `ι`；provider 函数
+    /// 求值形态（Def 30/31）由 M1 落地。
     pub fn intercept_of<M: InterceptMeta + Clone>(&self, key: Symbol) -> Option<M> {
         self.intercept
             .borrow()
