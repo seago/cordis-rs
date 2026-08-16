@@ -17,8 +17,8 @@
 | `effectΓ(𝑒)` / `ctx.effect` | Def 12, Alg 1 | `Context::effect` | 单元 | 完成（PR #3：armed + 组合入累加器） |
 | `get` / `set`（共效应操作） | Def 23, Alg 2 | `Context::get` / `set`（`Store` 表操作，realm 键控） | 单元 | 完成（PR #4：可逆 + 双侧 notify） |
 | `isolate` | Def 28/29 | `Context::isolate`（派生实现，Def 27） | 单元 | 完成（PR #4） |
-| `intercept` | Def 30/31 | `Context::intercept` / `intercept_of`（`InterceptMeta` 右偏合并） | 单元 | 完成（PR #4） |
-| `notify`（分类通知） | Def 26, Alg 3 | `notify::classify` + `Context::notify` → `Runtime::notify_fibers`（fiber 反应器内置） | 单元 | 完成（PR #4 分类 + PR #5 fiber 反应器） |
+| `intercept` | Def 30/31 | `Context::intercept` / `intercept_of`（`InterceptMeta` 右偏合并） | 单元 | 完成（PR #4，**仅元数据累积侧**；provider 函数求值形态未实现，M0 走查实现缺口——见已知偏差） |
+| `notify`（分类通知） | Def 26, Alg 3 | `notify::classify` + `Context::notify` → `Runtime::notify_fibers`（fiber 反应器内置） | 单元 | 完成（PR #4 分类 + PR #5 fiber 反应器）；M0 走查注明：`classify` 为纯函数（矩阵测试）但**未接入运行时**——分类效果由 refresh 幂等隐式承担 |
 | 组件 `(d, p, e)` | Def 43 | `cordis_core::component::Component` + `cordis_macro::component`（声明式 DX） | 单元 + 示例 | 完成（PR #5 引擎 / PR #7 DX 层） |
 | fiber `⟨d, p, e, π, σ, τ, θ⟩` | Def 44 | `cordis_core::fiber::Fiber`（`σ` 由绑定 provider + ctx 累加器隐含） | 单元 | 完成（PR #5） |
 | `n: 𝔑`（fiber 名） | Def 44/45 | `cordis_core::fiber::FiberId` | 单元 | 完成（PR #2/#5） |
@@ -113,6 +113,7 @@
 | 2026-08-16 / M0 走查 | Def 33–42 观测等价 ≃ 无对应物——`InterpState` 的 `PartialEq` 是结构相等而非商结构；≃ 为理论构造（导出独立性），非运行时实体 | Def 33–42 | 公开差异声明（理论构造不落运行时） | 记录 |
 | 2026-08-16 / M0 走查 | O-Insert 的 `π ∈ dom(Fγ) ∪ {root}` 前提未在引擎侧执行——`RegistryError::UnknownParent` 仅由 property harness 合成，`register` 不校验父存在性（依赖 `HasChildren` 移除前提维持父存活不变式） | §4.2 O-Insert | 公开差异声明（防御深度缺口；不变式由移除前提维系） | 记录 |
 | 2026-08-16 / M0 走查 | `is_quiet` 的 `Inactive(_)` 分支只判 `target.is_none()`，未实现 Def 49 式 (45) 的 `ζ≠⊥ ∨ target=⊥` 析取——当前 ζ 恒 None（L-Raise 未实现）掩盖；**L-Raise 落地时必改** | Def 49 式 (45), §4.3.4 | 记录（L-Raise 必改项） | 记录 |
+| 2026-08-16 / M0 走查 | **实现缺口（公开差异）**：Table 2 的 **L-Raise 整条未落地**——`FiberError` 无生产者、`FiberState` 的 `outcome`/ζ 恒 None、组件 apply panic 直接传播（panic = bug）而无「error recorded + target=⊥」回记；§4.3.4 失败模型（`𝔈fail`、`Either(Ξ,…)`）整体留待 async 阶段 | §4.3.4, Table 2 | 公开差异声明（实现缺口；随 async 化落地，届时同步修正 `is_quiet` 的 ζ 分支） | 记录 |
 | 2026-08-16 / M0 走查 | Def 47 注册：引擎在 `register` 时**立即非可逆地 O-Insert**，逆仅含 refresh→retire；论文把 O-Insert 建模为可逆效应本身（逆 = O-Retire）——可观察等价（retire 恒被累加器持有），oracle 侧 `Fiber.registered` 已记录，引擎侧结构差异补记 | Def 47 | 实现说明（可观察等价） | 记录 |
 | 2026-08-16 / M0 走查 | Def 48 纪律 clause(2)（读仅限声明依赖）无运行时执行——越界**写**有 panic 检查（已记录），读任意 realm 无 confine 检查（论文为组件义务，非证明前置） | Def 48 | 公开差异声明（义务不检查） | 记录 |
 | 2026-08-16 / M0 走查 | `Fiber::target` 存完整 `Option<View>` 而非 §4.2 所述 hash（论文：`fiber.committed` 存 map、`fiber.target` 存 hash）——语义等价（hash 为优化），§5.1.3 实现细节 | §4.2, §5.1.3 | 实现说明（优化取舍） | 记录 |
