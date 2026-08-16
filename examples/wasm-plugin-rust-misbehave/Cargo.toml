@@ -1,0 +1,19 @@
+[package]
+name = "wasm-plugin-rust-misbehave"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/seago/cordis-rs"
+rust-version = "1.95"
+description = "Cordis Rust guest 示例（Wasm 组件，M1）：违规组件——step 时写未声明供给键（沙箱隔离测试用，走查记录⑧）"
+
+[lints.rust]
+unsafe_code = "allow"  # wit-bindgen 生成的 ABI 胶水使用 unsafe（仅 wasm target 编译）
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.60.0"
+
+[workspace]

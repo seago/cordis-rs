@@ -7,8 +7,10 @@
 //!   (4) `installed_n ∧ k ∈ d_n ∧ ω_n(k) = m ⇒ installed_m`。
 //! - **Thm 61（Recovery exactness）**：成对独立步序列中，fiber 的累加器
 //!   "撤回自己的贡献、不动他人"（式 (56)：`g^u_n(γ^u) ≈ (Ψ_tl ∘ ⋯ ∘ Ψ_t1)(γ^b)`）
-//!   ——测试以多 fiber 交错动作 + 中间退役，断言最终状态 == 其余 fiber
-//!   单独推进的状态（观测等价）。
+//!   ——测试以多 fiber 交错动作 + 中间退役，**逐键断言**各 fiber 的贡献
+//!   存续/撤销（绑定表按 realm 键控于 fiber 派生上下文、退役沿该 fiber
+//!   累加器 LIFO 撤销，故逐键检查是式 (56) 的观测等价代理；审查 nit3：
+//!   不构造第二套对照状态，断言即代理本身）。
 //!
 //! 间接覆盖（property.rs：Thm 66/73 + oracle×引擎）之上的**直接**回归测试。
 
@@ -153,12 +155,14 @@ fn assert_well_formed(runtime: &Runtime, registry: &Registry) {
         .map(|(_, f)| f)
         .collect();
 
-    // 条款 (1)：π_n ∈ dom(Fγ) ∪ {root}。
+    // 条款 (1)：π_n ∈ dom(Fγ) ∪ {root}（审查 nit2：以运行时 registry
+    // 为准，而非测试侧 shadow 列表——避免"父已移除但 id 仍在 shadow
+    // 列表"的假阳性）。
     for f in &members {
         if let Some(parent) = f.parent() {
             assert!(
-                registry.iter().any(|(id, _)| *id == parent),
-                "条款 (1)：fiber {:?} 的父 {:?} 在注册表中",
+                runtime.fiber(parent).is_some(),
+                "条款 (1)：fiber {:?} 的父 {:?} ∈ dom(Fγ)",
                 f.id(),
                 parent
             );
@@ -270,7 +274,8 @@ fn thm59_wellformedness_preserved_throughout_orchestration() {
     assert!(active(&b) && active(&c), "b、c 激活（依赖链 a→b→c）");
     assert_well_formed(&runtime, &registry);
 
-    // 3. 独立提供者 d（k3）。
+    // 3. 独立提供者 d（k3）；子 fiber ch 挂在 b 的 ctx 下（Def 47 注册，
+    //    审查 nit1：行使条款 (1) 的"非 root 父"分支）。
     let d = use_at(
         &root,
         MultiProvider {
@@ -279,18 +284,36 @@ fn thm59_wellformedness_preserved_throughout_orchestration() {
     )
     .expect("d 实例化");
     registry.push((d.id(), d.clone()));
+    let ch = b
+        .ctx()
+        .use_component(
+            Rc::new(MultiProvider {
+                provide: spec(&["k4"]),
+            }),
+            Rc::new(()),
+        )
+        .expect("ch 实例化（b 的子 fiber）");
+    registry.push((ch.id(), ch.clone()));
+    assert_eq!(ch.parent(), Some(b.id()), "ch 的父是 b（非 root）");
+    assert!(active(&ch), "ch 激活");
     assert_well_formed(&runtime, &registry);
 
     // 4. 退役 b → c 级联停用（k1 无提供者）。四条款仍成立（Inactive 不参与
     //    条款 3/4；条款 2 覆盖退役未移除者：b 的 k1 供给名仍占用）。
     b.retire();
     assert!(inactive(&b) && inactive(&c), "退役 b → c 级联停用");
+    assert!(
+        inactive(&ch),
+        "退役 b → 注册子代 ch 被 O-Retire（Def 47 注册逆）"
+    );
     assert!(active(&a) && active(&d), "a、d 不受影响");
     assert_well_formed(&runtime, &registry);
 
-    // 5. 移除 c、b（释放 k1 供给名；O-Remove 前提：先退役），重连 b2、c2。
+    // 5. 移除 c、ch、b（释放供给名；O-Remove 前提：先退役；HasChildren：
+    //    先移除子代 ch 再移除父 b），重连 b2、c2。
     c.retire();
     runtime.remove_fiber(c.id()).expect("移除 c");
+    runtime.remove_fiber(ch.id()).expect("移除 ch");
     runtime.remove_fiber(b.id()).expect("移除 b");
     let b2 = use_at(
         &root,

@@ -228,6 +228,11 @@ impl InstanceState {
 /// Wasm 组件（Def 43 的 (d, p, e) 跨边界形态）：接入 cordis-core。
 ///
 /// 经 [`WasmComponent::load`] 从组件二进制创建（实例化 + constructor）。
+///
+/// **释放语义（§6.4 走查锚点）**：本类型无 `impl Drop`——`InstanceState`
+/// （内含 wasmtime `Store`）由 `Rc` 归零时原生释放，与论文 §6.4 的
+/// "released when a native embedder drops it (e.g., Wasmtime)" 逐字一致；
+/// loader 移除条目 → 退役级联 → `Rc` 释放即模块撤回。
 pub struct WasmComponent {
     state: Rc<RefCell<InstanceState>>,
 }

@@ -46,6 +46,8 @@ jobs:
           cargo build --manifest-path examples/wasm-plugin-rust-consumer/Cargo.toml --target wasm32-wasip2
           # 沙箱隔离门禁（PR #14 门禁 2/3）：恶意 guest 同样预构建。
           cargo build --manifest-path examples/wasm-plugin-rust-panic/Cargo.toml --target wasm32-wasip2
+          # 走查记录⑧ 直证（PR #17）：违规 guest（越界 set）同样预构建。
+          cargo build --manifest-path examples/wasm-plugin-rust-misbehave/Cargo.toml --target wasm32-wasip2
 
       # Go guest（PR #14 门禁 3/3 双语言验收）：标准 go → wasip1 核心模块
       # → 预览1 适配器组件化（tools/componentize + vendored 适配器）。
