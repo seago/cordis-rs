@@ -211,7 +211,9 @@ dependencies = [
 name = "cordis-hmr"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "cordis-core",
+ "cordis-loader",
 ]
 
 [[package]]

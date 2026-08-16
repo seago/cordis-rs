@@ -5,10 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Cordis 热模块替换引擎：三阶段事务性重载（论文 §5.2.2）"
+description = "Cordis 热模块替换引擎（论文 §5.2.2：Algorithm 8/9/10 事务性重载 + 回滚）"
 
 [lints]
 workspace = true
 
 [dependencies]
+anyhow = "1"
 cordis-core = { path = "../cordis-core" }
+cordis-loader = { path = "../cordis-loader" }
