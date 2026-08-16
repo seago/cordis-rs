@@ -46,6 +46,9 @@ impl FiberError {
     /// `reload` 的 `catch_unwind` 将其识别为"组件失败"（可恢复：记录
     /// outcome + 恢复已完成步骤），而非宿主 bug（后者 resume_unwind）。
     ///
+    /// **依赖 `panic = unwind`（审查 nit5）**：`panic = abort` profile 下
+    /// `catch_unwind` 永不捕获、raise 直接终止进程（本项目未设 abort）。
+    ///
     /// 生产者：wasm 桥接层（guest trap / 越界 set / 绑定冲突）与显式
     /// raise 的组件迭代器。
     pub fn raise(self) -> ! {
@@ -66,7 +69,9 @@ impl std::error::Error for FiberError {}
 /// - `Reloading`/`Unloading` 携带 `ω`（转换承诺的视图）；`i`（剩余迭代器）
 ///   在同步核心中活在转换调用栈上，`g`（累加器）由 `ctx` 累加器承载
 ///   （Table 2：`fiber.dispose` = 累加器）；
-/// - `ζ`（错误结果）：当前恒 `None`（L-Raise 随 async 接入）。
+/// - `ζ`（错误结果）：`Inactive(Some(ζ))` 为 L-Raise 失败终态（M2-PR1
+///   落地）；同步核心中 `Unloading.outcome` 恒 `None`（ζ 直落 Inactive，
+///   卸载结果中间形态随 async 化贯通，审查 nit3）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FiberState {
     /// `Inactive(ζ)`：未安装。

@@ -376,9 +376,25 @@ impl WasmTaskIter {
             // （isolate 映射）由核心承担，与 typed `set` 对称。
             let key = Symbol::intern(&set.key);
             let value: Box<dyn std::any::Any + Send + Sync> = Box::new(set.value);
-            // M2-PR1（L-Raise）：guest 侧写入失败（绑定冲突 = AlreadyBound；
-            // 越界写未声明键 = 核心 Def 43/48 纪律 panic）不再是宿主 panic
-            // ——统一转为 FiberError raise（不可信输入 → 失败 outcome）。
+            // M2-PR1（L-Raise）+ 审查 nit4（REVIEW-32a913d）：越界写经
+            // **供给纪律预检**直接 raise——不进入核心 set_dyn（避免
+            // catch_unwind 捕获面覆盖 notify 级联中的宿主 bug panic）；
+            // set_dyn 仅剩 AlreadyBound（Err）与防御性纪律捕获。
+            let fid = self.ctx.fiber().expect("wasm 迭代器运行于 fiber ctx");
+            let allowed = self
+                .ctx
+                .runtime()
+                .fiber(fid)
+                .is_some_and(|f| f.provide().contains(key));
+            if !allowed {
+                FiberError::new(format!(
+                    "组件 {fid:?} 越界写入未声明的键 {key}（Def 43/48 纪律）"
+                ))
+                .raise();
+            }
+            // 注（审查 nit4）：catch_unwind 捕获面仍含 set_dyn 内部的
+            // notify 级联（绑定后广播）——宿主 reactor panic 会被误判为
+            // 组件失败（已知边界；同步核心 reactor 可信，现实触发概率低）。
             let disposer = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.ctx.set_dyn(key, value)
             })) {
@@ -410,6 +426,9 @@ impl EffectIter for WasmTaskIter {
         // M2-PR1（L-Raise）：guest trap（wasmtime 错误）不再是宿主 panic
         // ——以 FiberError 载荷 raise，核心 reload 捕获后记录为 fiber 的
         // 失败 outcome（§4.3.4 𝔈fail）。
+        // 注（审查 nit6，REVIEW-32a913d）：wasmtime 错误未区分 guest trap
+        // 与宿主侧驱动错误（后者罕见）——一律转组件失败（粒度过度属已知
+        // 边界，如需精确可在 Err 分支判别 Trap）。
         let step = {
             let state = self.state.borrow();
             state
