@@ -12,6 +12,10 @@
 //! `FiberState` 的 `Reloading`/`Unloading` 标记实现——转换在途时 refresh
 //! 推迟，转换完成时按目标自链（§4.3.3）。异步化（PR #6/async 阶段）时
 //! 转换移入任务、`i` 移入状态（THEORY-MAP 已知偏差）。
+//!
+//! **级联深度边界（审查 m3）**：依赖链深度 N 的激活/停用级联产生 N 层
+//! 嵌套调用栈（每层含 reload/unload 全流程）——超深链（数百层）有栈溢出
+//! 风险，属同步核心的已知边界；async 化（转换入任务）后自然缓解。
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -26,6 +30,11 @@ use crate::store::Store;
 use crate::symbol::Symbol;
 
 /// 通知反应器（Algorithm 3 的筛选/refresh 由反应器承担）。
+///
+/// 载荷语义（审查 M1/m1 统一）：`keys` 为**已解析的 realm 符号**（经通知方
+/// 上下文的 `ρ` 解析，Def 28）——`set` 的绑定/撤销与 fiber 激活/停用
+/// 均按 realm 广播；反应器须以 realm 语义筛选（fiber 反应器按
+/// `f.ctx.resolve_realm(inject_key) == payload_realm` 匹配）。
 pub type Reactor = Rc<dyn Fn(&Context, &[Symbol])>;
 
 /// 注册表操作错误（对应 O-Insert / O-Remove 前提）。
@@ -74,7 +83,7 @@ impl Runtime {
             .reactors
             .borrow_mut()
             .push(Rc::new(|ctx: &Context, keys: &[Symbol]| {
-                ctx.runtime().notify_fibers(ctx, keys)
+                ctx.runtime().notify_fibers(keys)
             }));
         runtime
     }
@@ -151,7 +160,7 @@ impl Runtime {
         let apply: Box<dyn Fn() -> Box<dyn EffectIter>> = {
             let component = Rc::clone(&component);
             let fiber_ctx = Rc::clone(&fiber_ctx);
-            Box::new(move || component.apply(Rc::clone(&fiber_ctx), config.as_ref() as &dyn Any))
+            Box::new(move || component.apply(Rc::clone(&fiber_ctx), config.as_ref()))
         };
         let fiber = Rc::new(Fiber {
             id,
@@ -183,6 +192,12 @@ impl Runtime {
     }
 
     /// O-Remove：`τ_n = ⊤ ∧ θ_n = Inactive ∧ ∀m. π_m ≠ n ⇒ γ ⇒ γ∖n`。
+    ///
+    /// **幽灵 fiber（审查 m2）**：仅从 registry 移除条目；fiber 对象仍被
+    /// 父上下文的注册回调闭包持有，直至父 `dispose_all` 才释放。功能上
+    /// 安全（`retire` 幂等、`refresh` 对已移除 fiber 无操作），但"移除后
+    /// 对象仍存活"是预期语义——调用方不得在移除后依赖 `Runtime::fiber`
+    /// 查询结果（返回 `None`）。
     pub fn remove_fiber(&self, id: FiberId) -> Result<(), RegistryError> {
         let fiber = self
             .fibers
@@ -213,18 +228,20 @@ impl Runtime {
         }
     }
 
-    /// Algorithm 3：binding 变更后重估受影响 fiber——`inject ∩ keys ≠ ∅`
-    /// 且 realm 匹配（`fiber.ctx[@@isolate][key] = ctx[@@isolate][key]`）
-    /// 的 fiber 进入 refresh（幂等：target 未变则无操作）。
-    pub(crate) fn notify_fibers(&self, ctx: &Context, keys: &[Symbol]) {
+    /// Algorithm 3：binding 变更后重估受影响 fiber。
+    ///
+    /// 载荷为**已解析的 realm**（审查 M1 统一）；匹配按 realm 语义：
+    /// fiber 的某个注入键 `ik` 经其自身 `ρ` 解析到载荷 realm 即受影响
+    /// （等价于论文的 `key ∈ fiber.inject ∧ fiber.ctx[@@isolate][key] =
+    /// ctx[@@isolate][key]`）。refresh 幂等：target 未变则无操作。
+    pub(crate) fn notify_fibers(&self, keys: &[Symbol]) {
         let affected: Vec<Rc<Fiber>> = {
             let fibers = self.fibers.borrow();
             fibers
                 .values()
                 .filter(|f| {
-                    keys.iter().any(|k| {
-                        f.inject.contains(*k) && f.ctx.resolve_realm(*k) == ctx.resolve_realm(*k)
-                    })
+                    keys.iter()
+                        .any(|r| f.inject.iter().any(|ik| f.ctx.resolve_realm(ik) == *r))
                 })
                 .cloned()
                 .collect()
@@ -779,5 +796,56 @@ mod tests {
         a.retire();
         assert!(runtime.is_quiet(), "级联后回到静止");
         assert!(matches!(&*b.state(), FiberState::Inactive(_)));
+    }
+
+    #[test]
+    fn isolated_provider_notifies_dependents() {
+        // 审查 M1 回归：隔离场景（isolate(db, realm)）下，激活/停用通知
+        // 按 **realm** 语义匹配——依赖者必须收到提供者的级联通知。
+        let runtime = Rc::new(Runtime::new());
+        let root = runtime.context();
+        let realm = Symbol::intern("realm-db");
+        // 提供者与依赖者都从「db → realm」隔离的上下文中实例化
+        // （fiber.ctx 继承 ρ，绑定落在 realm）。
+        let ctx_a = root.isolate(sym("db"), realm);
+        let ctx_b = root.isolate(sym("db"), realm);
+        let a = ctx_a.use_component(provider("pg"), Box::new(())).unwrap();
+        let b = ctx_b.use_component(consumer(), Box::new(())).unwrap();
+        assert!(
+            matches!(&*b.state(), FiberState::Active { .. }),
+            "隔离提供者的激活必须通知到依赖者"
+        );
+        assert!(
+            root.get::<DbKey>().is_err(),
+            "根上下文解析到自身 realm，不可见"
+        );
+
+        // 停用级联同样按 realm 传播。
+        a.retire();
+        assert!(matches!(&*a.state(), FiberState::Inactive(_)));
+        assert!(
+            matches!(&*b.state(), FiberState::Inactive(_)),
+            "隔离提供者的停用必须级联依赖者"
+        );
+        assert!(runtime.is_quiet());
+    }
+
+    #[test]
+    fn cross_isolation_blocks_dependency() {
+        // 审查 M1 负例：依赖者隔离到**不同** realm → 不满足、不被通知。
+        let runtime = Rc::new(Runtime::new());
+        let root = runtime.context();
+        let ctx_a = root.isolate(sym("db"), Symbol::intern("realm-a"));
+        let ctx_c = root.isolate(sym("db"), Symbol::intern("realm-b"));
+        let a = ctx_a.use_component(provider("pg"), Box::new(())).unwrap();
+        let c = ctx_c.use_component(consumer(), Box::new(())).unwrap();
+        assert!(matches!(&*a.state(), FiberState::Active { .. }));
+        assert!(
+            matches!(&*c.state(), FiberState::Inactive(_)),
+            "不同 realm 的绑定不可见（Def 28/29 隔离语义）"
+        );
+        a.retire();
+        assert!(matches!(&*c.state(), FiberState::Inactive(_)));
+        assert!(runtime.is_quiet());
     }
 }

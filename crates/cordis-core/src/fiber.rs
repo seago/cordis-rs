@@ -134,6 +134,10 @@ impl Fiber {
     }
 
     /// 生命周期状态 `θ`。
+    ///
+    /// **借用警告（审查 m4）**：持有返回的 `Ref` 期间调用 [`Fiber::retire`]
+    /// （内部 `refresh` → `borrow_mut(state)`）会 `RefCell` panic——读取借用
+    /// 须在触发生命周期操作前释放。
     pub fn state(&self) -> Ref<'_, FiberState> {
         self.state.borrow()
     }

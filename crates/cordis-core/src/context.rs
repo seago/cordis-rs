@@ -176,7 +176,8 @@ impl Context {
                     .borrow_mut()
                     .bind::<K>(realm, value, ctx.fiber)
                     .expect("前置条件已检查（ρ(k) ∉ dom(σ)）");
-                ctx.notify(&[key]);
+                // 载荷为 **realm**（已解析；审查 M1 统一——依赖者按 realm 匹配）。
+                ctx.notify(&[realm]);
                 let ctx = Rc::clone(&ctx);
                 Box::new(move || {
                     ctx.runtime
@@ -184,7 +185,7 @@ impl Context {
                         .borrow_mut()
                         .unbind::<K>(realm)
                         .expect("绑定由本效应安装");
-                    ctx.notify(&[key]);
+                    ctx.notify(&[realm]);
                 }) as Disposer
             })))
         }))
@@ -261,8 +262,11 @@ impl Context {
     }
 
     /// `notify(ctx, keys)`（Algorithm 3）：把 binding 变更传播给反应器
-    /// （fiber 反应器已内置——按 `fiber.inject` 与 realm 匹配筛选并驱动
-    /// refresh；用户反应器按注册顺序随后调用）。
+    /// （fiber 反应器已内置——按 realm 语义筛选并驱动 refresh；用户反应器
+    /// 按注册顺序随后调用）。
+    ///
+    /// **载荷语义（审查 M1/m1 统一）**：`keys` 为**已解析的 realm 符号**
+    /// （经本上下文 `ρ` 解析）——`set` 与 fiber 激活/停用均按 realm 广播。
     ///
     /// **重入纪律（审查 M1）**：以**快照迭代**调用反应器——反应器内注册
     /// 新反应器安全（本轮不触发）；但反应器内**同步触发新的共效应变更**
