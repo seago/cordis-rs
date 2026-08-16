@@ -79,6 +79,9 @@ impl Parse for ComponentArgs {
 ///
 /// 用户实现 `apply_impl` 时的义务（与手写 `Component` 相同）：只写入
 /// `provide` 声明的键（Def 43/48 纪律，运行时检查）、迭代器有限终止。
+///
+/// 注意（审查 nit2）：同一参数重复出现时**后者覆盖前者**
+/// （`inject = [A], inject = [B]` 等价于 `inject = [B]`）。
 #[proc_macro_attribute]
 pub fn component(args: TokenStream, item: TokenStream) -> TokenStream {
     let args = syn::parse_macro_input!(args as ComponentArgs);
