@@ -42,8 +42,8 @@
 | Cor 21：独立效应乱序撤销 | | 未开始（PR #3 后续，§3.3.2 就绪后） |
 | Thm 63：依赖者先停、teardown 可读依赖 | `runtime::tests::withdrawal_cascade_disposes_dependents_first`（teardown 检查逆） | 真实引擎已验（PR #5）；property 化 PR #6 |
 | Thm 64：单转换不跨两次解析 | `runtime::tests::target_change_mid_reload_chains_unload`（guard 步界中断 + 惯性链） | 真实引擎已验（PR #5） |
-| Thm 66：Progress、guard 不死锁 | `interp::tests::drive_*`（参考解释器自检） | 参考实现已验（PR #2）；真实引擎 PR #6 |
-| Thm 73 / Cor 62：Confluence、离场无残留 | `interp::tests::confluence_all_interleavings`（穷举交错） | 参考实现已验（PR #2）；真实引擎 PR #6 |
+| Thm 66：Progress、guard 不死锁 | `interp::tests::drive_*`（oracle 自检）+ `tests/property.rs`（每个动作后 `is_quiet` 断言） | oracle 已验（PR #2）；真实引擎已验（PR #6） |
+| Thm 73 / Cor 62：Confluence、离场无残留 | `interp::tests::confluence_all_interleavings`（穷举交错）+ `tests/property.rs`（oracle 对比：活跃集/σγ/绑定总数逐步一致） | oracle 已验（PR #2）；真实引擎已验（PR #6） |
 | Def 26：通知分类正确性 | `notify::tests::classification_matrix`（8 组合分类矩阵） | 完成（PR #4） |
 
 ## 已知偏差
@@ -81,6 +81,8 @@
 | 2026-08-16 / PR #5 审查 | 幽灵 fiber 文档化（m2）：`remove_fiber` 仅移除 registry 条目，fiber 对象仍被父 ctx 注册回调持有至父 `dispose_all`——预期语义已注明 | Def 47 | 实现说明 | 记录 |
 | 2026-08-16 / PR #5 审查 | 级联栈深度边界（m3）：依赖链深度 N → N 层嵌套调用栈（同步核心已知边界），async 化自然缓解——runtime 模块文档已注明 | §4.3 | 实现说明 | 记录 |
 | 2026-08-16 / PR #5 审查 | `Fiber::state()` 借用警告（m4）：持 Ref 期间调 `retire` 会 RefCell panic——doc 已注明（与 `store()` 同纪律） | — | 实现说明 | 记录 |
+| 2026-08-16 / PR #6 | 元理论 property suites 落地：`tests/property.rs` 以 oracle（Def 69 规范组件 + 随机编排 ≤12 步 × 2000 用例）对比真实引擎——Thm 66（动作后必静止）、Thm 73（活跃集/σγ 逐步一致）、Cor 62（绑定总数 == σγ，无残留）；动作错误一致性（供给冲突/未知 fiber/移除前提同侧报错）亦断言 | §4.4 | 完成（oracle × 引擎闭环） | 记录 |
+| 2026-08-16 / PR #6 | `Runtime` 补充公开只读 API（`active_fibers`/`provided`/`store`）供 oracle 对比与监控——无语义变更 | — | 实现说明 | 记录 |
 
 ## 里程碑走查记录
 

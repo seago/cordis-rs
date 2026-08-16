@@ -9,3 +9,7 @@ description = "Cordis 宿主运行时核心：可逆效应、反应式共效应�
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# 元理论 property suites（tests/property.rs，PLAN §6）：oracle 对比 + 随机编排
+proptest = "1"

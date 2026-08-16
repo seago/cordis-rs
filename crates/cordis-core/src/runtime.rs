@@ -18,14 +18,15 @@
 //! 风险，属同步核心的已知边界；async 化（转换入任务）后自然缓解。
 
 use std::any::Any;
-use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap};
+use std::cell::{Cell, Ref, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
 use crate::component::Component;
 use crate::context::Context;
 use crate::effect::{Disposer, EffectIter, execute, once};
 use crate::fiber::{Fiber, FiberId, FiberState, View};
+use crate::keyset::KeySet;
 use crate::store::Store;
 use crate::symbol::Symbol;
 
@@ -116,6 +117,39 @@ impl Runtime {
     /// registry 是否为空。
     pub fn is_empty(&self) -> bool {
         self.fibers.borrow().is_empty()
+    }
+
+    /// 活跃 fiber 集（Def 46 静止判定的安装集；供监控与 oracle 对比测试）。
+    pub fn active_fibers(&self) -> BTreeSet<FiberId> {
+        self.fibers
+            .borrow()
+            .values()
+            .filter(|f| matches!(&*f.state.borrow(), FiberState::Active { .. }))
+            .map(|f| f.id)
+            .collect()
+    }
+
+    /// `σγ`（Def 45 式 (40)）：活跃提供者安装的绑定 realm 集合
+    /// （仅 Active fiber 的绑定计入）。
+    pub fn provided(&self) -> KeySet {
+        let store = self.store.borrow();
+        store
+            .symbols()
+            .filter(|r| {
+                store
+                    .binding(*r)
+                    .and_then(|b| b.provider)
+                    .is_some_and(|p| self.is_active(p))
+            })
+            .collect()
+    }
+
+    /// 共效应表 `σ` 的只读快照（绑定 realm 集合等；供监控与测试）。
+    ///
+    /// **借用警告**：持有返回的 `Ref` 期间调用 [`Context::set`]（borrow_mut）
+    /// 会 `RefCell` panic——读取借用须在变更前释放。
+    pub fn store(&self) -> Ref<'_, Store> {
+        self.store.borrow()
     }
 
     /// 静止判定 `quiet(γ)`（Def 46 式 (42)）：每个 fiber 都处于其目标
