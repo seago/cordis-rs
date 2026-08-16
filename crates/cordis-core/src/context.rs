@@ -305,6 +305,18 @@ impl Context {
         })
     }
 
+    /// 派生一个空上下文（M2-PR3）：继承 `ρ`、`ι` 与 fiber 归属，空累加器
+    /// ——注解应用等需要"隔离派生"（不污染父上下文）的场景。
+    pub fn derive(self: &Rc<Self>) -> Rc<Context> {
+        Rc::new(Context {
+            runtime: Rc::clone(&self.runtime),
+            realms: RefCell::new(self.realms.borrow().clone()),
+            intercept: RefCell::new(clone_intercept(&self.intercept)),
+            dispose: RefCell::new(Vec::new()),
+            fiber: self.fiber,
+        })
+    }
+
     /// 派生一个归属给定 fiber 的上下文（Algorithm 4 第 8 行的 `fiber.ctx`）：
     /// 继承 `ρ`、`ι`，空累加器。
     pub(crate) fn derive_for_fiber(self: &Rc<Self>, id: FiberId) -> Rc<Context> {
@@ -338,9 +350,14 @@ impl Context {
     /// 本实现中 provider 函数 `σ(k)` 为**常量函数**（返回绑定值）——
     /// 求值结果 = 绑定值（[`Context::get`] 不变），本 API 暴露合并后的
     /// 元数据（provider 函数形态的价值核心实现随 typed world 评估，
-    /// 处置⑨）。值类型不符（组件声明与读取类型不同）→ panic（与
-    /// [`Context::intercept`] 的类型纪律一致）。
-    pub fn get_meta<M: InterceptMeta + Clone>(self: &Rc<Self>, key: Symbol) -> Option<M> {
+    /// 处置⑨）。
+    ///
+    /// **两侧类型纪律不对称（审查 nit2，REVIEW-6e0fd1e）**：**声明侧**
+    /// 类型不符（组件声明与读取类型不同）→ panic（与
+    /// [`Context::intercept`] 的类型纪律一致，声明是显式编程行为）；
+    /// **携带侧**（[`Context::intercept_of`]）类型不符 → `None`（继承自
+    /// 外部/注解的元数据可能来自任何类型，读方以 `None` 表示不可读）。
+    pub fn get_meta<M: InterceptMeta + Clone>(&self, key: Symbol) -> Option<M> {
         let declared = self.declared_metadata_of::<M>(key);
         let carried = self.intercept_of::<M>(key);
         match (declared, carried) {
@@ -374,7 +391,7 @@ impl Context {
     /// Def 31 精确形态）不同，不产生新上下文、**不触发 reload**（元数据
     /// 仅读时咨询）。可逆性由调用方承担（loader/HMR 回滚时自行恢复旧值；
     /// 组件退役不撤销就地拦截）。
-    pub fn intercept_in_place<M: InterceptMeta>(self: &Rc<Self>, key: Symbol, meta: M) {
+    pub fn intercept_in_place<M: InterceptMeta>(&self, key: Symbol, meta: M) {
         let mut table = self.intercept.borrow_mut();
         let merged = match table.get(&key) {
             None => meta,
@@ -386,6 +403,35 @@ impl Context {
             }
         };
         table.insert(key, Box::new(merged));
+    }
+
+    /// **设置（替换）本上下文 `k` 处的拦截元数据（M2-PR3 loader 分派）**：
+    /// 条目注解为权威——重放幂等（与 [`Context::intercept_in_place`] 的
+    /// 合并语义互补；合并会因集合型元数据重复增长）。无既有元数据时等价
+    /// `intercept_in_place`。不触发 reload。
+    pub fn intercept_set<M: InterceptMeta>(&self, key: Symbol, meta: M) {
+        let mut table = self.intercept.borrow_mut();
+        if let Some(existing) = table.get(&key) {
+            let _ = (existing.as_ref() as &dyn Any)
+                .downcast_ref::<M>()
+                .expect("拦截元数据类型冲突：同一 key 的多次拦截必须使用同一类型");
+        }
+        table.insert(key, Box::new(meta));
+    }
+
+    /// **清除本上下文 `k` 处的拦截元数据（M2-PR3 loader 分派）**：移除条目
+    /// 注解时回退到继承值（继承值在派生时已拷贝——清除后该键回到无元数据
+    /// 状态）。不触发 reload。
+    pub fn intercept_clear(&self, key: Symbol) {
+        self.intercept.borrow_mut().remove(&key);
+    }
+
+    /// **替换（类型擦除版，M2-PR3 loader 分派）**：直接存入 `Box<dyn
+    /// InterceptMeta>`——条目注解为权威（replace 语义，不做类型冲突检查
+    /// 与合并）；与 [`Context::intercept_set`]（typed，检查 + 替换）互补。
+    /// 不触发 reload。
+    pub fn intercept_set_boxed(&self, key: Symbol, meta: Box<dyn InterceptMeta>) {
+        self.intercept.borrow_mut().insert(key, meta);
     }
 
     /// 满足谓词 `γ ⊧ d`（Def 24，经 `ρ` 解析）：`∀k ∈ d. ρ(k) ∈ dom(σ)`。

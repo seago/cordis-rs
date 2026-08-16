@@ -1,55 +1,158 @@
-//! Cordis 声明式组件加载器（论文 §5.2.1，PR #8 最小版）。
+//! Cordis 声明式组件加载器（论文 §5.2.1）。
 //!
 //! 编排器把期望的系统组成描述为持久化配置（条目列表），加载器把配置的
 //! 变化翻译为对应的 fiber 操作（§5.2.1："the loader translates changes to
 //! this specification into the corresponding imperative fiber operations"）。
 //!
-//! **最小范围（PR #8）**：覆盖 Def 74 条目的 `id` / `config`（经 `revision`
-//! 检测变更）/ `disabled` 三字段，以及组件名（`url` 的原生版，变更即重建）。
-//! 协调是**增量的**（§5.2.1 reconciliation）：新增条目实例化、消失条目卸载、
-//! `disabled` 切换卸载/重载、`config`/组件变更重建——已加载且未变化的
-//! 条目不做任何操作（幂等）。
+//! **Def 74 全字段（M2-PR3，PR #19）**：`id`（协调键）/ `component`（`url`
+//! 的原生版，变更即重建）/ `isolate`（local/global 托管 realm 注解，实例化
+//! 期应用；**变更 = 重建**——Algorithm 7 的 realm 重指派随 M2-PR4）/
+//! `intercept`（键 → 元数据注解，**就地更新、不触发 reload**——§5.2.1 的
+//! "intercept — updated in place"）/ `config`（经 `revision` 检测变更、
+//! 重建）/ `disabled`（卸载/重载）。
 //!
-//! **未覆盖（M2）**：`isolate` / `intercept` 注解、嵌套 group/include、
-//! 托管 realm（Algorithm 7）、组件级 config diff（论文交由组件自决）。
-//! 条目当前全部实例化在 root 上下文。
+//! **配置树（M2-PR3）**：`Entry::group` / `Entry::include` 分支条目（`children`）
+//! ——组持有者 fiber 上实例化子条目（`π` = 组 fiber，Def 47），子列表按
+//! `id` 做 **keyed diff**（§5.2.1："updating a surviving child re-enters this
+//! same per-field dispatch, so group reconciliation and entry update recurse
+//! together down the tree"）；组退役/移除 → 级联拆除整棵子树（自底向上）。
+//! `include` 与 `group` 结构相同（外部配置嫁接；文件解析由编排方承担）。
 //!
-//! **叶子约束（审查 m2）**：loader 管理的条目是**叶子**——不得经
-//! `Loader::fiber(id)?.ctx()` 在条目下实例化子组件；否则条目移除/重建时
-//! `Runtime::remove_fiber` 的 `HasChildren` 前提不满足（panic = bug）。
-//! 嵌套条目随 group/include 在 M2 落地。
-//!
-//! **两阶段协调（审查 m1）**：`apply` 先做卸载侧（释放供给名）再做
+//! **两阶段协调（审查 m1）**：`apply` 每层先做卸载侧（释放供给名）再做
 //! 实例化侧——同供给键的替换可在单次 `apply` 完成。
+//!
+//! **已知边界（M2-PR3 记录）**：① 双向写回未实现——条目为权威记录，
+//! 组件不能自行改配置/禁自身（§5.2.1 "the binding runs in both directions"
+//! 的组件→条目方向缺席）；② isolate 变更走重建而非 Algorithm 7 realm
+//! 重指派（M2-PR4）；③ 组条目自身的 isolate 注解不应用（组无声明键）；
+//! ④ **失败 fiber 静默加载**（审查 nit7，REVIEW-32a913d）：L-Raise 后
+//! `use_component` 对组件失败返回 `Ok(fiber)`（`Inactive(Some(ζ))`）——
+//! loader 不检查失败态，静默记为"已加载"；调用方需自行 `fiber.state()`
+//! 判失败（loader 上报失败态 / HMR 回滚区分"加载失败"与"组件运行失败"
+//! 为 M2 后续任务）。
 
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt;
 use std::rc::Rc;
 
-use cordis_core::{Component, Context, Fiber, Runtime};
+use cordis_core::context::InterceptMeta;
+use cordis_core::effect::{EffectIter, once};
+use cordis_core::keyset::KeySet;
+use cordis_core::symbol::Symbol;
+use cordis_core::{Component, Context, Disposer, Fiber, Runtime};
 
-/// 配置条目（Def 74 的 PR #8 最小版）：声明一个 fiber。
-#[derive(Debug, Clone)]
+/// 隔离注解（Def 74 的 `isolate`；§5.2.1 托管 realm 的两种作用域）。
+///
+/// - [`IsolateAnnotation::Local`]（`true`）：local realm——按条目 `id` 打标
+///   的私有 realm，条目随迁携带；
+/// - [`IsolateAnnotation::Global`]（字符串）：global realm——所有命名相同
+///   字符串的条目共享该 realm（移动条目改变的是共享关系而非所属 realm）。
+///
+/// 应用于条目组件全部声明键（`inject ∪ provide`）的 realm 解析。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IsolateAnnotation {
+    /// `true`：local realm（按条目 id 打标）。
+    Local,
+    /// 字符串：global realm（命名共享）。
+    Global(String),
+}
+
+/// 拦截注解集（Def 74 的 `intercept`：键 → 元数据，读时咨询）。
+///
+/// 类型擦除存储（`Box<dyn InterceptMeta>`）；[`InterceptMeta::clone_box`]
+/// 支持深拷贝（条目克隆/重建复用）。
+#[derive(Default)]
+pub struct Intercepts(HashMap<Symbol, Box<dyn InterceptMeta>>);
+
+impl Clone for Intercepts {
+    fn clone(&self) -> Self {
+        Intercepts(self.0.iter().map(|(k, v)| (*k, v.clone_box())).collect())
+    }
+}
+
+impl Intercepts {
+    /// 空注解集。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 设置 `key` 处的注解元数据。
+    pub fn insert<M: InterceptMeta>(&mut self, key: Symbol, meta: M) {
+        self.0.insert(key, Box::new(meta));
+    }
+
+    /// 迭代全部 `(键, 元数据)`。
+    pub fn iter(&self) -> impl Iterator<Item = (Symbol, &dyn InterceptMeta)> {
+        self.0
+            .iter()
+            .map(|(k, v)| (*k, v.as_ref() as &dyn InterceptMeta))
+    }
+
+    /// 已注解的键。
+    pub fn keys(&self) -> impl Iterator<Item = Symbol> + '_ {
+        self.0.keys().copied()
+    }
+
+    /// 是否无注解。
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// `key` 是否有注解。
+    pub fn contains_key(&self, key: Symbol) -> bool {
+        self.0.contains_key(&key)
+    }
+}
+
+impl fmt::Debug for Intercepts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_set().entries(self.0.keys()).finish()
+    }
+}
+
+/// 配置条目（Def 74 全字段，M2-PR3）：声明一个 fiber（叶子）或一组
+/// 子条目（分支 = group/include）。
+#[derive(Clone)]
 pub struct Entry {
     /// 稳定标识——协调键（组内子列表变化时据此 diff）。
     pub id: String,
     /// 组件名（`url` 的原生版）：经 [`Loader::register_component`] 注册；
-    /// 变更即重建条目（论文的 `id, url → rebuild`）。
+    /// 变更即重建条目（论文的 `id, url → rebuild`）。分支条目为空串。
     pub component: String,
+    /// 隔离注解（Def 74 的 `isolate`）。
+    pub isolate: Option<IsolateAnnotation>,
+    /// 拦截注解（Def 74 的 `intercept`：键 → 元数据，就地更新不重建）。
+    pub intercept: Intercepts,
     /// 配置（绑定进 `apply` 形成效应函数，Algorithm 4 第 9 行）。
     /// 以 [`Rc`] 持有以便重建时复用；**变更检测依赖 [`Entry::revision`]**
     /// （配置值本身不可比较）。
     pub config: Rc<dyn Any>,
-    /// 配置修订号：调用方在 `config` 变更时递增（论文的组件级 diff 由
-    /// 协调键承担，M2 再细化）。
+    /// 配置修订号：调用方在 `config` 变更时递增。
     pub revision: u64,
     /// 是否被管理性关闭（`disabled`）。
     pub disabled: bool,
+    /// 子条目（分支：group/include；非空即分支）。
+    pub children: Vec<Entry>,
+}
+
+impl fmt::Debug for Entry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Entry")
+            .field("id", &self.id)
+            .field("component", &self.component)
+            .field("isolate", &self.isolate)
+            .field("intercept", &self.intercept)
+            .field("revision", &self.revision)
+            .field("disabled", &self.disabled)
+            .field("children", &self.children)
+            .finish()
+    }
 }
 
 impl Entry {
-    /// 构造条目。
+    /// 构造叶子条目。
     pub fn new(
         id: impl Into<String>,
         component: impl Into<String>,
@@ -60,22 +163,68 @@ impl Entry {
         Self {
             id: id.into(),
             component: component.into(),
+            isolate: None,
+            intercept: Intercepts::new(),
             config,
             revision,
             disabled,
+            children: Vec::new(),
         }
+    }
+
+    /// 分支条目：子条目组（@cordisjs/group 等价——子列表即组的配置，
+    /// 按 `id` keyed diff）。
+    pub fn group(id: impl Into<String>, children: Vec<Entry>) -> Self {
+        Self {
+            id: id.into(),
+            component: String::new(),
+            isolate: None,
+            intercept: Intercepts::new(),
+            config: Rc::new(()),
+            revision: 0,
+            disabled: false,
+            children,
+        }
+    }
+
+    /// 分支条目：外部配置嫁接（@cordisjs/include 等价——与 `group` 结构
+    /// 相同；外部配置文件的解析由编排方承担，此处直接嫁接条目）。
+    pub fn include(id: impl Into<String>, children: Vec<Entry>) -> Self {
+        Self::group(id, children)
+    }
+
+    /// 设置隔离注解。
+    pub fn with_isolate(mut self, isolate: IsolateAnnotation) -> Self {
+        self.isolate = Some(isolate);
+        self
+    }
+
+    /// 设置拦截注解。
+    pub fn with_intercept<M: InterceptMeta>(mut self, key: Symbol, meta: M) -> Self {
+        self.intercept.insert(key, meta);
+        self
+    }
+
+    /// 是否为分支（group/include）。
+    pub fn is_group(&self) -> bool {
+        !self.children.is_empty()
     }
 }
 
-/// 已加载条目的运行时状态。
+/// 已加载条目的运行时状态（含子树）。
 #[derive(Clone)]
 struct LoadedEntry {
     component: String,
     config: Rc<dyn Any>,
     revision: u64,
     disabled: bool,
-    /// 实例化的 fiber（`disabled` 或尚未满足依赖时为 `None`）。
+    isolate: Option<IsolateAnnotation>,
+    intercept: Intercepts,
+    /// 实例化的 fiber（组 = 持有者 fiber；`disabled` 或尚未满足依赖时为
+    /// `None`）。
     fiber: Option<Rc<Fiber>>,
+    /// 子条目（组持有者 fiber 之下）。
+    children: HashMap<String, LoadedEntry>,
 }
 
 /// 声明式加载器：维护 `id → fiber` 的映射，把配置变化增量协调到运行时。
@@ -103,63 +252,57 @@ impl Loader {
         self.components.borrow_mut().insert(name.into(), component);
     }
 
-    /// 协调：以 `desired` 为权威记录，增量对齐（幂等）。
+    /// 协调：以 `desired` 为权威记录，增量对齐（幂等，递归整棵配置树）。
     ///
     /// - 新增条目 → 实例化（除非 `disabled`）；
-    /// - 消失条目 → 退役、卸载并移除 fiber（释放供给名）；
+    /// - 消失条目 → 拆除（退役、卸载并移除 fiber，释放供给名）；
     /// - `disabled` 切换 → 卸载 / 重载；
-    /// - `component` 或 `revision` 变更 → 重建（退役旧 fiber、以新配置
-    ///   重新实例化）。
+    /// - `component` / `revision` / `isolate` 变更 → 重建（M2-PR3：
+    ///   isolate 变更走重建，Algorithm 7 realm 重指派随 M2-PR4）；
+    /// - `intercept` 变更 → **就地**更新（`intercept_set`/`intercept_clear`，
+    ///   不触发 reload——§5.2.1 "intercept — updated in place"）；
+    /// - 分支（group/include）子列表 → 按 `id` keyed diff 递归。
     ///
-    /// **两阶段执行**（审查 m1）：先做卸载侧（移除消失条目、卸载
-    /// `disabled` 置位与需重建条目的旧 fiber，释放供给名），再做实例化
-    /// 侧（新增 / `disabled` 清除 / 重建）——保证**同供给键的替换**
-    /// （desired 用条目 Y 替换提供同一键的 X）可在单次 `apply` 完成，
-    /// 否则 Y 实例化时命中 X 的供给检查而 `ProvisionClash`。
+    /// **两阶段执行**（审查 m1，每层递归同样适用）：先做卸载侧（移除消失
+    /// 条目、卸载 `disabled` 置位与需重建条目的旧 fiber，释放供给名），
+    /// 再做实例化侧——保证**同供给键的替换**（desired 用条目 Y 替换提供
+    /// 同一键的 X）可在单次 `apply` 完成，否则 Y 实例化时命中 X 的供给
+    /// 检查而 `ProvisionClash`。
     ///
     /// 组件名未注册或供给冲突（两个**同时存在**的条目提供同一键）→ panic
     /// （配置错误，panic = bug）。
     ///
     /// `desired` 内重复 `id` 未定义（按 last-wins 处理，可能浪费一次
-    /// 实例化）；调用方应保证 `id` 唯一。
+    /// 实例化）；调用方应保证 `id` 在整棵树内唯一。
     pub fn apply(&self, desired: &[Entry]) {
-        // 阶段 1（卸载侧）：先释放供给名，为阶段 2 的同供给替换腾位。
-        let current: Vec<String> = self.entries.borrow().keys().cloned().collect();
-        for id in current {
-            let Some(entry) = desired.iter().rev().find(|e| e.id == id) else {
-                self.remove(&id);
-                continue;
-            };
-            let Some(loaded) = self.entries.borrow().get(&id).cloned() else {
-                continue;
-            };
-            let disabling = !loaded.disabled && entry.disabled;
-            let rebuilding = !entry.disabled
-                && (loaded.component != entry.component || loaded.revision != entry.revision);
-            if disabling || rebuilding {
-                self.unload_fiber(&id);
-            }
-        }
-
-        // 阶段 2（实例化侧）：新增 / disabled 清除 / 重建条目实例化；
-        // 未变条目零操作（幂等）。
-        for entry in desired {
-            let loaded = self.entries.borrow().get(&entry.id).cloned();
-            match loaded {
-                None => self.load(entry),
-                Some(loaded) => self.reconcile(entry, &loaded),
-            }
-        }
+        self.apply_into(
+            desired,
+            Rc::clone(&self.root),
+            &mut self.entries.borrow_mut(),
+        );
     }
 
-    /// 条目当前 fiber（未加载 / 已卸载 / 未满足依赖时为 `None`）。
+    /// 条目当前 fiber（组 = 持有者 fiber；未加载 / 已卸载 / 未满足依赖时为
+    /// `None`）。整棵树递归查找。
     pub fn fiber(&self, id: &str) -> Option<Rc<Fiber>> {
-        self.entries.borrow().get(id).and_then(|l| l.fiber.clone())
+        self.find_fiber(id, &self.entries.borrow())
     }
 
-    /// 已加载条目数。
+    fn find_fiber(&self, id: &str, map: &HashMap<String, LoadedEntry>) -> Option<Rc<Fiber>> {
+        if let Some(loaded) = map.get(id) {
+            return loaded.fiber.clone();
+        }
+        map.values().find_map(|l| self.find_fiber(id, &l.children))
+    }
+
+    /// 已加载条目数（整棵树）。
     pub fn len(&self) -> usize {
-        self.entries.borrow().len()
+        self.count(&self.entries.borrow())
+    }
+
+    fn count(&self, map: &HashMap<String, LoadedEntry>) -> usize {
+        map.values()
+            .fold(0, |acc, l| acc + 1 + self.count(&l.children))
     }
 
     /// 是否为空。
@@ -167,62 +310,172 @@ impl Loader {
         self.entries.borrow().is_empty()
     }
 
-    // ── 内部：协调原语 ────────────────────────────────────────────────
+    // ── 内部：递归协调 ────────────────────────────────────────────────
 
-    fn load(&self, entry: &Entry) {
-        let fiber = if entry.disabled {
-            None
-        } else {
-            Some(self.instantiate(entry))
-        };
-        self.entries.borrow_mut().insert(
-            entry.id.clone(),
-            LoadedEntry {
-                component: entry.component.clone(),
-                config: Rc::clone(&entry.config),
-                revision: entry.revision,
-                disabled: entry.disabled,
-                fiber,
-            },
-        );
+    /// 在 `parent_ctx` 下协调一层条目（顶层 = root；组内 = 组持有者 ctx）。
+    fn apply_into(
+        &self,
+        desired: &[Entry],
+        parent_ctx: Rc<Context>,
+        loaded: &mut HashMap<String, LoadedEntry>,
+    ) {
+        // 阶段 1（卸载侧）：先释放供给名，为阶段 2 的同供给替换腾位。
+        let current: Vec<String> = loaded.keys().cloned().collect();
+        for id in current {
+            let Some(entry) = desired.iter().rev().find(|e| e.id == id) else {
+                self.unload_from(&id, loaded);
+                continue;
+            };
+            let Some(l) = loaded.get(&id).cloned() else {
+                continue;
+            };
+            let disabling = !l.disabled && entry.disabled;
+            let rebuilding = !entry.disabled
+                && (l.component != entry.component
+                    || l.revision != entry.revision
+                    || l.isolate != entry.isolate);
+            if disabling || rebuilding {
+                self.unload_from(&id, loaded);
+            }
+        }
+
+        // 阶段 2（实例化侧）：新增 / disabled 清除 / 重建；未变条目零操作。
+        for entry in desired {
+            match loaded.get(&entry.id).cloned() {
+                None => {
+                    let fresh = self.make_loaded(entry, &parent_ctx);
+                    loaded.insert(entry.id.clone(), fresh);
+                }
+                Some(l) => self.reconcile_into(entry, &l, &parent_ctx, loaded),
+            }
+        }
     }
 
-    fn reconcile(&self, entry: &Entry, loaded: &LoadedEntry) {
-        // 逐字段最小扰动（§5.2.1 的 per-field dispatch）。
+    /// 逐字段最小扰动（§5.2.1 的 per-field dispatch），递归子树。
+    fn reconcile_into(
+        &self,
+        entry: &Entry,
+        loaded: &LoadedEntry,
+        parent_ctx: &Rc<Context>,
+        map: &mut HashMap<String, LoadedEntry>,
+    ) {
         if loaded.disabled != entry.disabled {
             if entry.disabled {
-                // disabled 置位：退役并移除 fiber（绑定随之恢复）。
-                self.unload_fiber(&entry.id);
-                self.update(&entry.id, entry, None);
+                // disabled 置位：拆除整棵子树（组 → 子代级联）。
+                self.unload_from(&entry.id, map);
+                if let Some(l) = map.get_mut(&entry.id) {
+                    l.disabled = true;
+                }
             } else {
-                // disabled 清除：以保留的配置重新实例化。
-                let fiber = self.instantiate(entry);
-                self.update(&entry.id, entry, Some(fiber));
+                // disabled 清除：以 desired 重新实例化（叶子或整棵分支）。
+                let fresh = self.make_loaded(entry, parent_ctx);
+                map.insert(entry.id.clone(), fresh);
             }
             return;
         }
         if entry.disabled {
             return; // 禁用且状态未变
         }
-        if loaded.component != entry.component || loaded.revision != entry.revision {
-            // 组件（url 原生版）/ 配置变更：重建条目。
-            self.unload_fiber(&entry.id);
-            let fiber = self.instantiate(entry);
-            self.update(&entry.id, entry, Some(fiber));
+
+        if entry.is_group() {
+            // 组自身 isolate 变更 → 整棵重建（M2-PR3 边界；Algorithm 7 随
+            // M2-PR4）；否则：组拦截注解就地更新 + 子列表 keyed diff。
+            if loaded.isolate != entry.isolate {
+                self.unload_from(&entry.id, map);
+                let fresh = self.make_loaded(entry, parent_ctx);
+                map.insert(entry.id.clone(), fresh);
+                return;
+            }
+            let holder = map
+                .get(&entry.id)
+                .and_then(|l| l.fiber.clone())
+                .expect("组已启用则有持有者 fiber");
+            if let Some(l) = map.get_mut(&entry.id) {
+                if let Some(fiber) = &l.fiber {
+                    self.apply_intercept(fiber.ctx(), &l.intercept, &entry.intercept);
+                }
+                l.intercept = entry.intercept.clone();
+                l.config = Rc::clone(&entry.config);
+                l.revision = entry.revision;
+            }
+            // 子列表 keyed diff（两阶段递归；幸存子条目不重建）。
+            let holder_ctx = holder.ctx().clone();
+            let children = &mut map.get_mut(&entry.id).expect("组条目存在").children;
+            self.apply_into(&entry.children, holder_ctx, children);
+            return;
+        }
+
+        // 叶子：component / revision / isolate 变更 → 重建。
+        if loaded.component != entry.component
+            || loaded.revision != entry.revision
+            || loaded.isolate != entry.isolate
+        {
+            self.unload_from(&entry.id, map);
+            let fiber = self.instantiate_leaf(entry, parent_ctx);
+            if let Some(l) = map.get_mut(&entry.id) {
+                l.component = entry.component.clone();
+                l.config = Rc::clone(&entry.config);
+                l.revision = entry.revision;
+                l.isolate = entry.isolate.clone();
+                l.intercept = entry.intercept.clone();
+                l.fiber = Some(fiber);
+            }
+            return;
+        }
+        // 仅拦截注解变化：就地应用（不重建）。
+        if let Some(l) = map.get_mut(&entry.id) {
+            if let Some(fiber) = &l.fiber {
+                self.apply_intercept(fiber.ctx(), &l.intercept, &entry.intercept);
+            }
+            l.intercept = entry.intercept.clone();
+            l.config = Rc::clone(&entry.config);
         }
     }
 
-    fn update(&self, id: &str, entry: &Entry, fiber: Option<Rc<Fiber>>) {
-        if let Some(loaded) = self.entries.borrow_mut().get_mut(id) {
-            loaded.component = entry.component.clone();
-            loaded.config = Rc::clone(&entry.config);
-            loaded.revision = entry.revision;
-            loaded.disabled = entry.disabled;
-            loaded.fiber = fiber;
+    /// 构造（并加载）条目：叶子实例化组件；分支实例化持有者 + 递归子条目。
+    fn make_loaded(&self, entry: &Entry, parent_ctx: &Rc<Context>) -> LoadedEntry {
+        if entry.is_group() {
+            let mut children = HashMap::new();
+            let fiber = if entry.disabled {
+                None
+            } else {
+                let holder = self.instantiate_group(entry, parent_ctx);
+                self.apply_into(&entry.children, holder.ctx().clone(), &mut children);
+                Some(holder)
+            };
+            LoadedEntry {
+                component: entry.component.clone(),
+                config: Rc::clone(&entry.config),
+                revision: entry.revision,
+                disabled: entry.disabled,
+                isolate: entry.isolate.clone(),
+                intercept: entry.intercept.clone(),
+                fiber,
+                children,
+            }
+        } else {
+            let fiber = if entry.disabled {
+                None
+            } else {
+                Some(self.instantiate_leaf(entry, parent_ctx))
+            };
+            LoadedEntry {
+                component: entry.component.clone(),
+                config: Rc::clone(&entry.config),
+                revision: entry.revision,
+                disabled: entry.disabled,
+                isolate: entry.isolate.clone(),
+                intercept: entry.intercept.clone(),
+                fiber,
+                children: HashMap::new(),
+            }
         }
     }
 
-    fn instantiate(&self, entry: &Entry) -> Rc<Fiber> {
+    /// 叶子实例化：注解 ctx（isolate 派生 + intercept 派生）上注册组件；
+    /// 若父为 fiber（组内），在父 ctx 注册级联退役（Def 47 注册逆——
+    /// 父退役 → O-Retire 本 fiber）。
+    fn instantiate_leaf(&self, entry: &Entry, parent_ctx: &Rc<Context>) -> Rc<Fiber> {
         let component = self
             .components
             .borrow()
@@ -234,39 +487,134 @@ impl Loader {
                     entry.component
                 )
             });
-        self.root
+        let keys: KeySet = component
+            .inject()
+            .iter()
+            .chain(component.provide().iter())
+            .collect();
+        let ctx = self.annotated_ctx(parent_ctx, entry, &keys);
+        let fiber = ctx
             .use_component(component, Rc::clone(&entry.config))
-            .unwrap_or_else(|err| panic!("条目 `{}` 实例化失败：{err:?}（配置错误）", entry.id))
+            .unwrap_or_else(|err| panic!("条目 `{}` 实例化失败：{err:?}（配置错误）", entry.id));
+        // 级联：父 fiber 退役 → 子代 O-Retire（Def 47；经父 ctx 累加器）。
+        if parent_ctx.fiber().is_some() {
+            drop(parent_ctx.effect(|| -> Box<dyn EffectIter> {
+                let f = Rc::clone(&fiber);
+                Box::new(once(Box::new(move || {
+                    Box::new(move || f.retire()) as Disposer
+                })))
+            }));
+        }
+        fiber
     }
 
-    fn unload_fiber(&self, id: &str) {
-        let fiber = self
-            .entries
-            .borrow_mut()
-            .get_mut(id)
-            .and_then(|l| l.fiber.take());
-        if let Some(fiber) = fiber {
-            fiber.retire(); // 同步卸载（级联依赖者）
-            self.runtime.remove_fiber(fiber.id()).unwrap_or_else(|err| {
-                panic!(
-                    "条目 `{id}` 移除失败：{err:?}——条目下存在子代 fiber（loader 管理的 \
-                         条目为叶子：不得经 `Loader::fiber(id)?.ctx()` 实例化子组件；嵌套 \
-                         条目随 group/include 在 M2 落地）"
-                )
-            });
+    /// 组持有者实例化：无注入/供给的空组件（组的角色 = 子条目的父 fiber，
+    /// Def 47 注册）；组拦截注解派生应用（isolate 无声明键可应用，M2-PR3
+    /// 边界）。
+    fn instantiate_group(&self, entry: &Entry, parent_ctx: &Rc<Context>) -> Rc<Fiber> {
+        let ctx = parent_ctx.derive();
+        for (key, meta) in entry.intercept.iter() {
+            ctx.intercept_set_boxed(key, meta.clone_box());
+        }
+        let holder = ctx
+            .use_component(Rc::new(GroupHolder), Rc::clone(&entry.config))
+            .unwrap_or_else(|err| panic!("组条目 `{}` 实例化失败：{err:?}（配置错误）", entry.id));
+        // 组持有者也注册级联（组在组内时）。
+        if parent_ctx.fiber().is_some() {
+            drop(parent_ctx.effect(|| -> Box<dyn EffectIter> {
+                let f = Rc::clone(&holder);
+                Box::new(once(Box::new(move || {
+                    Box::new(move || f.retire()) as Disposer
+                })))
+            }));
+        }
+        holder
+    }
+
+    /// 注解 ctx：派生（隔离父上下文）→ isolate（派生）→ intercept
+    /// （类型擦除替换，条目注解为权威）。
+    fn annotated_ctx(&self, parent: &Rc<Context>, entry: &Entry, keys: &KeySet) -> Rc<Context> {
+        let mut ctx = parent.derive();
+        if let Some(iso) = &entry.isolate {
+            for key in keys.iter() {
+                let realm = match iso {
+                    IsolateAnnotation::Local => {
+                        Symbol::intern(&format!("local:{}:{}", entry.id, key.as_str()))
+                    }
+                    IsolateAnnotation::Global(name) => {
+                        Symbol::intern(&format!("global:{name}:{}", key.as_str()))
+                    }
+                };
+                ctx = ctx.isolate(key, realm);
+            }
+        }
+        for (key, meta) in entry.intercept.iter() {
+            ctx.intercept_set_boxed(key, meta.clone_box());
+        }
+        ctx
+    }
+
+    /// 拦截注解就地差异应用（不重建）：desired 键 → `intercept_set_boxed`
+    /// （替换、重放幂等）；消失键 → `intercept_clear`。
+    fn apply_intercept(&self, ctx: &Rc<Context>, previous: &Intercepts, desired: &Intercepts) {
+        for (key, meta) in desired.iter() {
+            ctx.intercept_set_boxed(key, meta.clone_box());
+        }
+        for key in previous.keys() {
+            if !desired.contains_key(key) {
+                ctx.intercept_clear(key);
+            }
         }
     }
 
-    fn remove(&self, id: &str) {
-        self.unload_fiber(id);
-        self.entries.borrow_mut().remove(id);
+    /// 拆除条目（退役 + 移除出 registry）——组先退役持有者（级联 O-Retire
+    /// 子代），再自底向上移除子代（O-Remove 的 HasChildren 前提），最后
+    /// 移除持有者。
+    fn unload_from(&self, id: &str, map: &mut HashMap<String, LoadedEntry>) {
+        if let Some(mut loaded) = map.remove(id) {
+            self.teardown(&mut loaded);
+        }
+    }
+
+    fn teardown(&self, loaded: &mut LoadedEntry) {
+        let fiber = loaded.fiber.take();
+        let fid = fiber.as_ref().map(|f| f.id());
+        if let Some(fiber) = &fiber {
+            fiber.retire(); // 同步卸载（级联依赖者；组 → 子代经 ctx 累加器）
+        }
+        let children = std::mem::take(&mut loaded.children);
+        for (_, mut child) in children {
+            self.teardown(&mut child);
+        }
+        if let Some(fid) = fid {
+            self.runtime
+                .remove_fiber(fid)
+                .unwrap_or_else(|err| panic!("条目移除失败：{err:?}（子树拆除顺序错误 = bug）"));
+        }
+    }
+}
+
+/// 组持有者组件：无注入/供给、无效应——角色 = 子条目的父 fiber（Def 47
+/// 注册的承载者）。
+struct GroupHolder;
+
+impl Component for GroupHolder {
+    fn inject(&self) -> KeySet {
+        KeySet::new()
+    }
+    fn provide(&self) -> KeySet {
+        KeySet::new()
+    }
+    fn apply(&self, _ctx: Rc<Context>, _config: &dyn Any) -> Box<dyn EffectIter> {
+        Box::new(once(Box::new(|| Box::new(|| {}) as Disposer)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cordis_core::{EffectIter, FiberState, Key, KeySet, Symbol, once};
+    use cordis_core::{EffectIter, FiberState, InterceptMeta, Key, KeySet, Symbol, once};
+    use std::collections::BTreeSet;
 
     struct ValKey;
     impl Key for ValKey {
@@ -561,5 +909,284 @@ mod tests {
     fn unknown_component_panics() {
         let (loader, _runtime) = loader();
         loader.apply(&[entry("x", "ghost", "cfg", 1, false)]);
+    }
+    // ── M2-PR3：intercept / isolate / group / include ─────────────────
+
+    /// 拦截测试元数据（⊕：paths 取并、read_only 右偏）。
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct PathMeta {
+        paths: BTreeSet<String>,
+        read_only: bool,
+    }
+
+    impl InterceptMeta for PathMeta {
+        fn merge(existing: &Self, new: &Self) -> Self {
+            let mut paths = existing.paths.clone();
+            paths.extend(new.paths.iter().cloned());
+            PathMeta {
+                paths,
+                read_only: new.read_only,
+            }
+        }
+        fn clone_box(&self) -> Box<dyn InterceptMeta> {
+            Box::new(self.clone())
+        }
+    }
+
+    fn path_meta(paths: &[&str], read_only: bool) -> PathMeta {
+        PathMeta {
+            paths: paths.iter().map(|s| s.to_string()).collect(),
+            read_only,
+        }
+    }
+
+    struct FsKey;
+    impl Key for FsKey {
+        type Value = String;
+        const SYMBOL: &'static str = "fs";
+    }
+
+    /// 提供 `sum` 的提供者（与 val_provider 供给不相交，可同组共存）。
+    fn sum_provider() -> Rc<TestComponent> {
+        Rc::new(TestComponent {
+            inject: spec(&[]),
+            provide: spec(&["sum"]),
+            effects: Box::new(|ctx, config| {
+                let value = config
+                    .downcast_ref::<String>()
+                    .expect("sum_provider 的 config 为 String")
+                    .clone();
+                Box::new(once(Box::new(move || {
+                    ctx.set::<SumKey>(value).expect("绑定 sum")
+                })))
+            }),
+        })
+    }
+
+    /// fs 提供者（供注入 fs 的消费者激活）。
+    fn fs_provider() -> Rc<TestComponent> {
+        Rc::new(TestComponent {
+            inject: spec(&[]),
+            provide: spec(&["fs"]),
+            effects: Box::new(|ctx, _config| {
+                Box::new(once(Box::new(move || {
+                    ctx.set::<FsKey>("fs-value".into()).expect("绑定 fs")
+                })))
+            }),
+        })
+    }
+
+    /// 注入 fs 且声明 PathMeta 的消费者（Def 30 的 𝔇inter）。
+    struct MetaConsumer;
+
+    impl Component for MetaConsumer {
+        fn inject(&self) -> KeySet {
+            spec(&["fs"])
+        }
+        fn provide(&self) -> KeySet {
+            KeySet::new()
+        }
+        fn apply(&self, _ctx: Rc<Context>, _config: &dyn Any) -> Box<dyn EffectIter> {
+            Box::new(once(Box::new(|| Box::new(|| {}) as Disposer)))
+        }
+        fn declared_metadata(&self, key: Symbol) -> Option<Box<dyn InterceptMeta>> {
+            if key == Symbol::intern("fs") {
+                Some(Box::new(path_meta(&["/declared"], false)))
+            } else {
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn intercept_annotation_applied_in_place_without_rebuild() {
+        let (loader, _runtime) = loader();
+        loader.register_component("fs", fs_provider());
+        loader.register_component("consumer", Rc::new(MetaConsumer));
+
+        let base = Entry::new("c", "consumer", Rc::new(()), 0, false);
+        loader.apply(&[base
+            .clone()
+            .with_intercept(Symbol::intern("fs"), path_meta(&["/anno"], true))]);
+        let fiber = loader.fiber("c").expect("consumer 激活");
+        let first_id = fiber.id();
+        // 组件声明 ⊕ 条目注解（右偏：ι 优先）。
+        assert_eq!(
+            fiber.ctx().get_meta::<PathMeta>(Symbol::intern("fs")),
+            Some(path_meta(&["/declared", "/anno"], true))
+        );
+
+        // 注解更新：就地应用（不重建——fiber id 不变）。
+        loader.apply(&[base
+            .clone()
+            .with_intercept(Symbol::intern("fs"), path_meta(&["/anno2"], false))]);
+        assert_eq!(
+            loader.fiber("c").expect("仍在").id(),
+            first_id,
+            "注解更新不重建"
+        );
+        assert_eq!(
+            loader
+                .fiber("c")
+                .unwrap()
+                .ctx()
+                .get_meta::<PathMeta>(Symbol::intern("fs")),
+            Some(path_meta(&["/declared", "/anno2"], false))
+        );
+
+        // 注解移除：intercept_clear → 回退到组件声明。
+        loader.apply(std::slice::from_ref(&base));
+        assert_eq!(
+            loader
+                .fiber("c")
+                .unwrap()
+                .ctx()
+                .get_meta::<PathMeta>(Symbol::intern("fs")),
+            Some(path_meta(&["/declared"], false))
+        );
+    }
+
+    #[test]
+    fn isolate_local_creates_private_realms() {
+        // Local：提供者与消费者各自私有 realm——消费者看不到绑定。
+        {
+            let (loader, runtime) = loader();
+            loader.register_component("db", val_provider());
+            loader.register_component("cons", sum_consumer());
+            loader.apply(&[
+                Entry::new("p", "db", Rc::new("v".to_string()), 0, false)
+                    .with_isolate(IsolateAnnotation::Local),
+                Entry::new("c", "cons", Rc::new(()), 0, false)
+                    .with_isolate(IsolateAnnotation::Local),
+            ]);
+            assert!(loader.fiber("p").is_some(), "提供者激活");
+            let c = loader
+                .fiber("c")
+                .expect("消费者 fiber 存在（未满足依赖 → Inactive）");
+            assert!(
+                matches!(&*c.state(), FiberState::Inactive(_)),
+                "跨条目 Local realm：消费者看不到提供者的绑定（Inactive）"
+            );
+            assert!(runtime.is_quiet(), "静止（消费者 Inactive）");
+        }
+        // Global：命名共享——提供者与消费者在同一 realm，消费者激活。
+        {
+            let (loader, runtime) = loader();
+            loader.register_component("db", val_provider());
+            loader.register_component("cons", sum_consumer());
+            loader.apply(&[
+                Entry::new("p", "db", Rc::new("v".to_string()), 0, false)
+                    .with_isolate(IsolateAnnotation::Global("db".into())),
+                Entry::new("c", "cons", Rc::new(()), 0, false)
+                    .with_isolate(IsolateAnnotation::Global("db".into())),
+            ]);
+            assert!(loader.fiber("p").is_some(), "提供者激活");
+            assert!(loader.fiber("c").is_some(), "Global realm 共享：消费者激活");
+            assert!(runtime.is_quiet(), "静止");
+        }
+    }
+
+    #[test]
+    fn group_keyed_diff_preserves_surviving_children() {
+        let (loader, runtime) = loader();
+        loader.register_component("db", val_provider());
+        loader.register_component("sum", sum_provider());
+        let child = |id: &str, component: &str, value: &str| {
+            Entry::new(id, component, Rc::new(value.to_string()), 0, false)
+        };
+
+        let g = Entry::group("g", vec![child("a", "db", "1"), child("b", "sum", "2")]);
+        loader.apply(&[g]);
+        let _a = loader.fiber("a").expect("a 激活");
+        let b = loader.fiber("b").expect("b 激活");
+        let b_id = b.id();
+
+        // 子列表 keyed diff：a 移除、c 新增、b 幸存（fiber 不变）。
+        let g2 = Entry::group("g", vec![child("b", "sum", "2"), child("c", "db", "3")]);
+        loader.apply(&[g2]);
+        assert!(loader.fiber("a").is_none(), "a 已移除");
+        assert!(loader.fiber("c").is_some(), "c 已新增");
+        assert_eq!(
+            loader.fiber("b").expect("b 幸存").id(),
+            b_id,
+            "幸存子条目不重建"
+        );
+        assert!(runtime.is_quiet(), "静止");
+    }
+
+    #[test]
+    fn group_teardown_removes_subtree() {
+        let (loader, runtime) = loader();
+        loader.register_component("db", val_provider());
+        loader.register_component("sum", sum_provider());
+        let child = |id: &str, component: &str, value: &str| {
+            Entry::new(id, component, Rc::new(value.to_string()), 0, false)
+        };
+        loader.apply(&[Entry::group(
+            "g",
+            vec![child("a", "db", "1"), child("b", "sum", "2")],
+        )]);
+        assert!(loader.fiber("a").is_some() && loader.fiber("b").is_some());
+
+        // 移除组 → 整棵子树拆除（子代 fiber 也移出 registry）。
+        loader.apply(&[]);
+        assert!(loader.fiber("g").is_none());
+        assert!(loader.fiber("a").is_none() && loader.fiber("b").is_none());
+        assert_eq!(runtime.len(), 0, "registry 无残留 fiber");
+        assert!(runtime.is_quiet(), "静止");
+        assert!(runtime.store().symbols().next().is_none(), "绑定全清");
+    }
+
+    #[test]
+    fn disabled_group_teardown_and_reenable() {
+        let (loader, runtime) = loader();
+        loader.register_component("db", val_provider());
+        let child =
+            |id: &str, value: &str| Entry::new(id, "db", Rc::new(value.to_string()), 0, false);
+        loader.apply(&[Entry::group("g", vec![child("a", "1")])]);
+        assert!(loader.fiber("a").is_some());
+
+        let mut g = Entry::group("g", vec![child("a", "1")]);
+        g.disabled = true;
+        loader.apply(&[g]);
+        assert!(loader.fiber("g").is_none());
+        assert!(loader.fiber("a").is_none(), "组禁用 → 子代拆除");
+        assert_eq!(runtime.len(), 0, "registry 无残留");
+
+        loader.apply(&[Entry::group("g", vec![child("a", "1")])]);
+        assert!(loader.fiber("a").is_some(), "重新启用 → 子代恢复");
+        assert!(runtime.is_quiet(), "静止");
+    }
+
+    #[test]
+    fn include_grafts_children() {
+        let (loader, _runtime) = loader();
+        loader.register_component("db", val_provider());
+        loader.register_component("sum", sum_provider());
+        // include = 外部配置嫁接（结构同 group）。
+        let external = vec![
+            Entry::new("x", "db", Rc::new("1".to_string()), 0, false),
+            Entry::new("y", "sum", Rc::new("2".to_string()), 0, false),
+        ];
+        loader.apply(&[Entry::include("ext", external)]);
+        assert!(loader.fiber("x").is_some());
+        assert!(loader.fiber("y").is_some());
+    }
+
+    #[test]
+    fn isolate_change_rebuilds_leaf() {
+        let (loader, _runtime) = loader();
+        loader.register_component("db", val_provider());
+        let base = Entry::new("p", "db", Rc::new("v".to_string()), 0, false);
+        loader.apply(&[base.clone().with_isolate(IsolateAnnotation::Local)]);
+        let first = loader.fiber("p").expect("激活").id();
+
+        // isolate 变更 → 重建（M2-PR3 边界：Algorithm 7 realm 重指派随
+        // M2-PR4）。
+        loader.apply(&[base
+            .clone()
+            .with_isolate(IsolateAnnotation::Global("db".into()))]);
+        let second = loader.fiber("p").expect("重建后激活").id();
+        assert_ne!(first, second, "isolate 变更 → 重建（新 fiber）");
     }
 }
