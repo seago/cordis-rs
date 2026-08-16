@@ -189,7 +189,7 @@
 | ② | §5.1.4 Proxy 访问层（Alg 6） | M0 清单② | M2 首批任务 |
 | ③ | Thm 59/61 直接测试 | M0 清单③ | **已落地**（PR #15：`tests/preservation_recovery.rs`——Thm 59 良构四条款逐动作断言 + Thm 61 交错/反向退役恢复精确性） |
 | ④ | Thm 66 定量上界 `(K+4)(V+1)` 断言 | M0 清单④ | **已落地**（PR #16：`tests/progress_bound.rs`——K=5、V=6 受控场景：效应步总数 ≤ (K+4)(V+1) 且 ≤ (K+1)×安装期数（紧界）、转换次数 ≤ (K+4)(V+1)、每阶段 `is_quiet`（Thm 66(1)）；引擎侧精确生命周期步计数需步计数器，记录为 M2 可选增强） |
-| ⑤ | L-Raise 失败模型 + `is_quiet` ζ 析取（含 ⑧ 处置） | M0 清单⑤ + 本次 ⑧ | M2（失败模型实现时） |
+| ⑤ | L-Raise 失败模型 + `is_quiet` ζ 析取（含 ⑧ 处置） | M0 清单⑤ + 本次 ⑧ | M2（失败模型实现时）：协议违反（越界 set / inverse.run）从 `panic!` 转 `FiberError` → fiber `outcome=Some(err)` + `target=⊥`（§4.3.4 𝔈fail）；**并补 L-Raise 时代直证测试**（越界 set → 错误 outcome、宿主存活、fiber 进入失败态——§6.3 审计建议） |
 | ⑥ | 命令式 Disposer 结构对齐（wasm 句柄化已部分对齐） | M0 清单⑥ | 记录（M2 评估） |
 | ⑦ | §6.2 broker 示例（可表达性演示） | 本次新增 | M3 案例素材 |
 | ⑧ | 恶意 guest 触发宿主 panic（越界 set → 核心 panic!）的边界——**已直证**（PR #17：`guest_undeclared_set_panic_is_caught_and_host_survives`，`wasm-plugin-rust-misbehave` 示例：step 写未声明键 → catch_unwind 捕获、宿主存活）；语义上仍应随 ⑤（L-Raise 失败模型）转为错误 outcome | 本次新增（§6.3 补查风险点） | 直证测试已落地；语义处置随 ⑤ |
