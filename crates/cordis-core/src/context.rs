@@ -432,6 +432,49 @@ mod tests {
         );
     }
 
+    /// 应用 4 个两两独立的 `set` 效应并按 `order` 排列撤销，断言回到 γ₀。
+    ///
+    /// 独立性（Def 19）：不同键的 `set` 效应——变换只动自己的键（可交换），
+    /// 逆只撤自己的键（互不干扰）；每步撤销后断言剩余绑定数，检验
+    /// Thm 20(1) 的中间态语义（`g_j` 在 δ_u 运行只撤回自己的贡献）。
+    fn assert_permutation_reverts(order: &[usize; 4]) {
+        let ctx = Context::new();
+        let mut inverses: Vec<Option<Disposer>> = vec![
+            Some(bind_effect::<KeyA>(&ctx, String::from("va"))),
+            Some(bind_effect::<KeyB>(&ctx, 7)),
+            Some(bind_effect::<KeyK1>(&ctx, 1)),
+            Some(bind_effect::<KeyK2>(&ctx, 2)),
+        ];
+        assert_eq!(ctx.store().symbols().count(), 4, "δ₄：全部已应用");
+        let mut undone = 0;
+        for &i in order {
+            let d = inverses[i - 1].take().expect("每个逆恰好调用一次");
+            d();
+            undone += 1;
+            assert_eq!(
+                ctx.store().symbols().count(),
+                4 - undone,
+                "排列 {order:?}：第 {undone} 步逆只撤自己的贡献（Thm 20(1)）"
+            );
+        }
+        assert!(
+            ctx.store().symbols().next().is_none(),
+            "排列 {order:?} 撤销后回到 γ₀（Cor 21）"
+        );
+    }
+
+    #[test]
+    fn cor21_independent_effects_revert_in_any_permutation() {
+        // Cor 21：设 e₁,…,eₙ 两两独立、自 γ₀ 依次应用，g₁,…,gₙ 为各步逆；
+        // 在 δₙ 处以 {1..n} 的任意排列应用这 n 个逆都回到 γ₀。
+        // LIFO 只是其中一种排列（Thm 16 无需独立性假设）；
+        // 独立性（Def 19）买来的是**其余所有排列**。
+        assert_permutation_reverts(&[4, 3, 2, 1]); // LIFO（Thm 16 的排列）
+        assert_permutation_reverts(&[1, 2, 3, 4]); // 正序（非 LIFO）
+        assert_permutation_reverts(&[3, 1, 4, 2]); // 交错乱序
+        assert_permutation_reverts(&[2, 4, 1, 3]); // 另一交错乱序
+    }
+
     #[test]
     fn accumulator_reverts_all_effects_lifo() {
         // 累加器（dispose_all）按 LIFO 恢复全部注册效应（Thm 16(2)）。
