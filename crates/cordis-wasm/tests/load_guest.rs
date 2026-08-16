@@ -56,9 +56,7 @@ fn guest_activates_and_binds_via_host_context() -> anyhow::Result<()> {
     // 迭代终止：再 step 返回 None。
     assert!(task.call_step(&mut store, task_any)?.is_none(), "迭代终止");
 
-    // 逆撤销（Def 8 / PLAN §4.4 句柄化）：run() → 绑定恢复。
-    let inverse = step.inverse;
-    store.data_mut().run_inverse(inverse.rep());
-    assert!(store.data().bindings().get("db").is_none(), "逆撤销绑定");
+    // 逆撤销路径由 tests/bridge_core.rs 覆盖（WasmComponent 接入核心
+    // Runtime：rep → 核心逆，retire 级联清除）。
     Ok(())
 }

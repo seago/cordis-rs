@@ -15,6 +15,5 @@ cordis-core = { path = "../cordis-core" }
 wasmtime = "47.0.3"
 wasmtime-wasi = "47.0.3"
 wit-bindgen = "0.60.0"
-
-[dev-dependencies]
 anyhow = "1"
+

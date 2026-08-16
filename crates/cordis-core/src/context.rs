@@ -191,6 +191,56 @@ impl Context {
         }))
     }
 
+    /// 符号级动态 `set`（wasm 桥接入口，ADR-0004 值语义）：在 `realm` 处
+    /// 绑定**已装箱**的值（跨边界值类型由 wit 世界统一，见
+    /// `cordis_wasm`）。语义与 [`Context::set`] 一致（Def 43/48 纪律、
+    /// notify、逆 = 撤销绑定），仅值类型擦除。
+    ///
+    /// 类型纪律：同一 realm 的绑定值类型由调用方约定（wasm 组件经桥接
+    /// 使用统一的外部值类型）；下游以不匹配的类型读取报 `TypeMismatch`。
+    pub fn set_dyn(
+        self: &Rc<Self>,
+        realm: Symbol,
+        value: Box<dyn Any + Send + Sync>,
+    ) -> Result<Disposer, StoreError> {
+        // Def 43/48 纪律：组件只写自己声明的供给（供给按 realm 判定——
+        // 声明即键符号，跨边界等价）。
+        if let Some(fid) = self.fiber {
+            let allowed = self
+                .runtime
+                .fibers
+                .borrow()
+                .get(&fid)
+                .is_some_and(|f| f.provide.contains(realm));
+            if !allowed {
+                panic!("组件 {fid:?} 越界写入未声明的 realm {realm}（Def 43/48 纪律）");
+            }
+        }
+        if self.runtime.store.borrow().contains(realm) {
+            return Err(StoreError::AlreadyBound(realm));
+        }
+        Ok(self.effect(|| -> Box<dyn EffectIter> {
+            let ctx = Rc::clone(self);
+            Box::new(once(Box::new(move || {
+                ctx.runtime
+                    .store
+                    .borrow_mut()
+                    .bind_value(realm, value, ctx.fiber)
+                    .expect("前置条件已检查（realm ∉ dom(σ)）");
+                ctx.notify(&[realm]);
+                let ctx = Rc::clone(&ctx);
+                Box::new(move || {
+                    ctx.runtime
+                        .store
+                        .borrow_mut()
+                        .unbind_value(realm)
+                        .expect("绑定由本效应安装");
+                    ctx.notify(&[realm]);
+                }) as Disposer
+            })))
+        }))
+    }
+
     /// `isolate(k, r)`（Def 29）：**派生实现**（Def 27）——返回新上下文，
     /// 把 `k` 的 realm 覆写为 `r`，继承其余 `ρ`、`ι` 与 fiber 归属；
     /// 不写共享表、无需逆。同一键在不同 realm 下解析到独立绑定

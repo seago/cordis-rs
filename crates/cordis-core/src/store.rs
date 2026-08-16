@@ -85,6 +85,36 @@ impl Store {
         Ok(())
     }
 
+    /// 符号级动态绑定（wasm 桥接，ADR-0004 值语义）：值已装箱、类型
+    /// 纪律由调用方约定（跨边界值类型由 wit 世界统一）。前置条件
+    /// `realm ∉ dom(σ)`；类型一致性由调用方保证（同一 realm 反复绑定
+    /// 须为同一外部类型，否则下游 [`Store::get`] 报 `TypeMismatch`）。
+    pub(crate) fn bind_value(
+        &mut self,
+        realm: Symbol,
+        value: Box<dyn Any + Send + Sync>,
+        provider: Option<FiberId>,
+    ) -> Result<(), StoreError> {
+        if self.bindings.contains_key(&realm) {
+            return Err(StoreError::AlreadyBound(realm));
+        }
+        self.bindings.insert(realm, Binding { value, provider });
+        Ok(())
+    }
+
+    /// 符号级动态撤销（wasm 桥接的逆）：移除 `realm` 处绑定并返回原值。
+    /// 前置条件 `realm ∈ dom(σ)`。
+    pub(crate) fn unbind_value(
+        &mut self,
+        realm: Symbol,
+    ) -> Result<Box<dyn Any + Send + Sync>, StoreError> {
+        let binding = self
+            .bindings
+            .remove(&realm)
+            .ok_or(StoreError::NotBound(realm))?;
+        Ok(binding.value)
+    }
+
     /// 符号级查询绑定（含提供者；供 `σγ` 推导，Def 45）。
     pub(crate) fn binding(&self, realm: Symbol) -> Option<&Binding> {
         self.bindings.get(&realm)
