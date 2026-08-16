@@ -9,6 +9,7 @@ members = [
     "crates/cordis-native",
     "crates/cordis-wasm",
     "examples/hello-plugin",
+    "tools/componentize",
 ]
 
 [workspace.package]

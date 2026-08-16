@@ -24,6 +24,13 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-wasip2
 
+      # Go guest 需要 go >= 1.24（go:wasmexport / wasmimport 括号语法）
+      # 与 `go 1.25` 指令；固定版本避免 runner 镜像漂移。
+      - name: Install Go toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
@@ -37,6 +44,15 @@ jobs:
         run: |
           cargo build --manifest-path examples/wasm-plugin-rust/Cargo.toml --target wasm32-wasip2
           cargo build --manifest-path examples/wasm-plugin-rust-consumer/Cargo.toml --target wasm32-wasip2
+          # 沙箱隔离门禁（PR #14 门禁 2/3）：恶意 guest 同样预构建。
+          cargo build --manifest-path examples/wasm-plugin-rust-panic/Cargo.toml --target wasm32-wasip2
+
+      # Go guest（PR #14 门禁 3/3 双语言验收）：标准 go → wasip1 核心模块
+      # → 预览1 适配器组件化（tools/componentize + vendored 适配器）。
+      - name: build wasm guest (Go)
+        run: |
+          go version
+          examples/wasm-plugin-go/build.sh
 
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

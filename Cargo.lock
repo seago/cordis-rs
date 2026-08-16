@@ -184,6 +184,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "componentize"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "wit-component 0.256.0",
+ "wit-parser 0.256.0",
+]
+
+[[package]]
 name = "cordis"
 version = "0.1.0"
 dependencies = [
@@ -1898,6 +1907,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm-metadata"
+version = "0.256.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6187f9fce741db43bea48f1ec42174897d763b8cdea7df726f2dd05561848d7"
+dependencies = [
+ "anyhow",
+ "indexmap",
+ "wasm-encoder 0.256.0",
+ "wasmparser 0.256.0",
+]
+
+[[package]]
 name = "wasmparser"
 version = "0.252.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1929,6 +1950,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60bd825ffedc6cba8a642924ba7ae424afbc47811cffbcb7b92031ec24e59b4c"
 dependencies = [
  "bitflags",
+ "hashbrown 0.17.1",
  "indexmap",
  "semver",
 ]
@@ -2547,9 +2569,9 @@ dependencies = [
  "indexmap",
  "prettyplease",
  "syn 2.0.119",
- "wasm-metadata",
+ "wasm-metadata 0.254.0",
  "wit-bindgen-core",
- "wit-component",
+ "wit-component 0.254.0",
 ]
 
 [[package]]
@@ -2582,9 +2604,28 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "wasm-encoder 0.254.0",
- "wasm-metadata",
+ "wasm-metadata 0.254.0",
  "wasmparser 0.254.0",
  "wit-parser 0.254.0",
+]
+
+[[package]]
+name = "wit-component"
+version = "0.256.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d537ec182eed18f560184b870287cf443c4eccc315af178db3eae8811c3b6c"
+dependencies = [
+ "anyhow",
+ "bitflags",
+ "indexmap",
+ "log",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "wasm-encoder 0.256.0",
+ "wasm-metadata 0.256.0",
+ "wasmparser 0.256.0",
+ "wit-parser 0.256.0",
 ]
 
 [[package]]
@@ -2623,6 +2664,25 @@ dependencies = [
  "serde_json",
  "unicode-ident",
  "wasmparser 0.254.0",
+]
+
+[[package]]
+name = "wit-parser"
+version = "0.256.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa073dadefba859cb03f689a0c2e3efc51f883bf86b907eaa9709bfd9e3a00a9"
+dependencies = [
+ "anyhow",
+ "hashbrown 0.17.1",
+ "id-arena",
+ "indexmap",
+ "log",
+ "semver",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "unicode-ident",
+ "wasmparser 0.256.0",
 ]
 
 [[package]]
