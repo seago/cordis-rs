@@ -43,6 +43,17 @@ pub enum AccessError {
     Undeclared,
 }
 
+impl std::fmt::Display for AccessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AccessError::Inactive => write!(f, "INACTIVE_ACCESS：声明键未提交（组件未加载）"),
+            AccessError::Undeclared => write!(f, "UNDECLARED_ACCESS：沿链无该键声明"),
+        }
+    }
+}
+
+impl std::error::Error for AccessError {}
+
 /// 拦截元数据（Def 30 的 `ℳ k`，带幺半群 `⊕k`）。
 ///
 /// 实现须给出右偏合并：`merge(existing, new)` 中 `new`（后拦截的元数据）
@@ -188,6 +199,10 @@ impl Context {
                 // 引用逃逸。
                 let realm = fiber.ctx.resolve_realm(key);
                 let store = self.runtime.store.borrow();
+                // 注（REVIEW-e8bd96e nit3）：store 读失败（NotBound /
+                // TypeMismatch）统一映射 `Inactive`——承诺视图授权但绑定
+                // 已撤销（teardown 窗口）或类型不匹配（编程错误）都被折
+                // 损为"未加载"；类型不匹配的精确判别留待 typed world。
                 store.get::<K>(realm).map_err(|_| AccessError::Inactive)?;
                 return Ok(Ref::map(store, |s| {
                     s.get::<K>(realm).expect("checked above")

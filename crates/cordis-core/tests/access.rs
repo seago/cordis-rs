@@ -124,26 +124,51 @@ fn resolve_raises_undeclared_access() {
     );
 }
 
-/// 链上行：子 fiber 访问父 fiber 承诺视图内的键（父提供）。
+/// 链上行：访问 fiber 自身无该键声明（注入为空、committed 为空），沿
+/// `fiber.parent` 上行到**祖先**（声明并已加载该键）授权（REVIEW-e8bd96e
+/// major1 修正——原测试在子自身 committed 短路，未行使爬升）。
 #[test]
 fn resolve_climbs_fiber_chain() {
     let runtime = Rc::new(Runtime::new());
     let root = runtime.context();
-    // 父组件提供 db（提供者 = 父 fiber 的 ctx 下实例化）。
-    let parent = root
+    // 祖先链：root → DbProvider（提供 db）+ Parent（注入 db、已加载）；
+    // Child（无任何注入）挂在 Parent 的 ctx 下。
+    let _p = root
         .use_component(Rc::new(DbProvider), Rc::new(()))
-        .expect("父提供者");
-    // 子组件（挂在父 ctx 下）注入 db。
+        .expect("db 提供者");
+    let parent = root
+        .use_component(Rc::new(Consumer), Rc::new(()))
+        .expect("父（注入 db、已加载）");
+    assert!(
+        matches!(&*parent.state(), cordis_core::FiberState::Active { .. }),
+        "父激活"
+    );
     let child = parent
         .ctx()
-        .use_component(Rc::new(Consumer), Rc::new(()))
-        .expect("子消费者");
+        .use_component(Rc::new(NoInject), Rc::new(()))
+        .expect("子（无注入）");
     assert!(
         matches!(&*child.state(), cordis_core::FiberState::Active { .. }),
-        "子激活（父提供 db）"
+        "子激活"
     );
 
-    // 子经 resolve 沿链（自身 committed → 父 committed）读到 db。
+    // 子经 resolve 沿链：自身 committed 空（无注入）→ 无声明 → 爬升到
+    // 父（committed 绑定 db）→ 授权。
     let value = child.ctx().resolve::<DbKey>().expect("沿链授权");
-    assert_eq!(&*value, "pg");
+    assert_eq!(&*value, "pg", "子经父的承诺视图读到 db");
+}
+
+/// 无注入组件（链上行测试用：自身 committed 空、无声明）。
+struct NoInject;
+
+impl Component for NoInject {
+    fn inject(&self) -> KeySet {
+        KeySet::new()
+    }
+    fn provide(&self) -> KeySet {
+        KeySet::new()
+    }
+    fn apply(&self, _ctx: Rc<Context>, _config: &dyn std::any::Any) -> Box<dyn EffectIter> {
+        Box::new(once_finished(|| Box::new(|| {}) as Disposer))
+    }
 }
