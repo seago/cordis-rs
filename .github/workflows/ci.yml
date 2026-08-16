@@ -22,6 +22,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: wasm32-wasip2
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -38,3 +39,8 @@ jobs:
       # 审查 m2：M0 验收示例的端到端断言纳入门禁（cargo test 只编译不运行 bin）。
       - name: run hello-plugin (M0 验收)
         run: cargo run --quiet -p hello-plugin
+
+      # M1：先构建 wasm guest 组件（独立 crate，非 workspace 成员），
+      # 供 cordis-wasm 的加载测试使用（tests/load_guest.rs 按约定路径查找）。
+      - name: build wasm guest (M1)
+        run: cargo build --manifest-path examples/wasm-plugin-rust/Cargo.toml --target wasm32-wasip2

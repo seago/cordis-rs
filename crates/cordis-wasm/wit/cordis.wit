@@ -1,0 +1,39 @@
+package cordis:core@0.1.0;
+
+interface context {
+    /// 跨边界值（v1 标量集；case 名避开 WIT 关键字）。
+    variant value {
+        flag(bool),
+        count(u64),
+        offset(s64),
+        text(string),
+        blob(list<u8>),
+    }
+    resource inverse {
+        run: func();
+    }
+    get: func(key: string) -> option<value>;
+    set: func(key: string, value: value) -> result<inverse, string>;
+}
+
+interface plugin {
+    use context.{inverse};
+    resource task {
+        step: func() -> option<effect-step>;
+    }
+    record effect-step {
+        inverse: inverse,
+        done: bool,
+    }
+    resource component {
+        constructor();
+        inject: func() -> list<string>;
+        provide: func() -> list<string>;
+        start: func() -> task;
+    }
+}
+
+world cordis {
+    import context;
+    export plugin;
+}

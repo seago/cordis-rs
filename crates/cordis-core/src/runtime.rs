@@ -1,9 +1,9 @@
 //! 运行时：fiber registry `Fγ` + 生命周期状态机（§5.1.3，Algorithm 3/4/5）。
 //!
-//! - [`Runtime::register`]：Algorithm 4 的 `use`（组件实例化，Def 47）；
-//! - [`Runtime::refresh`] / [`Runtime::reload`] / [`Runtime::unload`]：
+//! - `Runtime::register`：Algorithm 4 的 `use`（组件实例化，Def 47）；
+//! - `Runtime::refresh` / `Runtime::reload` / `Runtime::unload`：
 //!   Algorithm 5 的惯性状态机（§4.3.3）；
-//! - [`Runtime::notify_fibers`]：Algorithm 3 的通知传播（内置注册为
+//! - `Runtime::notify_fibers`：Algorithm 3 的通知传播（内置注册为
 //!   运行时首个反应器）；
 //! - [`Runtime::remove_fiber`]：O-Remove。
 //!
