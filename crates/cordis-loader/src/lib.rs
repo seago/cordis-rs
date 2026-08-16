@@ -6,7 +6,7 @@
 //!
 //! **Def 74 全字段（M2-PR3，PR #19）**：`id`（协调键）/ `component`（`url`
 //! 的原生版，变更即重建）/ `isolate`（local/global 托管 realm 注解，实例化
-//! 期应用；**变更 = 重建**——Algorithm 7 的 realm 重指派随 M2-PR4）/
+//! 期应用；**变更 = Algorithm 7 realm 重指派**（M2-PR4，不重建）/
 //! `intercept`（键 → 元数据注解，**就地更新、不触发 reload**——§5.2.1 的
 //! "intercept — updated in place"）/ `config`（经 `revision` 检测变更、
 //! 重建）/ `disabled`（卸载/重载）。
@@ -29,7 +29,11 @@
 //! `use_component` 对组件失败返回 `Ok(fiber)`（`Inactive(Some(ζ))`）——
 //! loader 不检查失败态，静默记为"已加载"；调用方需自行 `fiber.state()`
 //! 判失败（loader 上报失败态 / HMR 回滚区分"加载失败"与"组件运行失败"
-//! 为 M2 后续任务）。
+//! 为 M2 后续任务）；
+//! ⑤ **移除条目拦截注解不回退父（组）继承拦截值**（REVIEW-24bfab5
+//! major1）：`Context` 派生族对 `ι` 为扁平拷贝（无父链），子条目覆写
+//! 组拦截后移除自身注解 → 该键回到无元数据状态（仅剩组件声明），而非
+//! 组继承值——条目注解为权威的既定语义。
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -260,10 +264,11 @@ impl Loader {
     /// - 新增条目 → 实例化（除非 `disabled`）；
     /// - 消失条目 → 拆除（退役、卸载并移除 fiber，释放供给名）；
     /// - `disabled` 切换 → 卸载 / 重载；
-    /// - `component` / `revision` / `isolate` 变更 → 重建（M2-PR3：
-    ///   isolate 变更走重建，Algorithm 7 realm 重指派随 M2-PR4）；
-    /// - `intercept` 变更 → **就地**更新（`intercept_set`/`intercept_clear`，
-    ///   不触发 reload——§5.2.1 "intercept — updated in place"）；
+    /// - `component` / `revision` 变更 → 重建；`isolate` 变更 →
+    ///   Algorithm 7 realm 重指派（M2-PR4，就地不重建）；
+    /// - `intercept` 变更 → **就地**更新（`intercept_set_boxed`/
+    ///   `intercept_clear`，不触发 reload——§5.2.1 "intercept — updated
+    ///   in place"）；
     /// - 分支（group/include）子列表 → 按 `id` keyed diff 递归。
     ///
     /// **两阶段执行**（审查 m1，每层递归同样适用）：先做卸载侧（移除消失
@@ -283,6 +288,11 @@ impl Loader {
             Rc::clone(&self.root),
             &mut self.entries.borrow_mut(),
         );
+    }
+
+    /// 注册名对应的组件实例（HMR 备份/恢复用，M2-PR5）。
+    pub fn component_of(&self, name: &str) -> Option<Rc<dyn Component>> {
+        self.components.borrow().get(name).cloned()
     }
 
     /// 条目当前 fiber（组 = 持有者 fiber；未加载 / 已卸载 / 未满足依赖时为
@@ -384,6 +394,8 @@ impl Loader {
             // 组自身 isolate 变更 → 整棵重建（M2-PR3 边界；Algorithm 7 随
             // M2-PR4）；否则：组拦截注解就地更新 + 子列表 keyed diff。
             if loaded.isolate != entry.isolate {
+                // 组条目 isolate 变更仍整棵重建（组无声明键，M2-PR3 边界；
+                // 叶子条目的 isolate 变更走 Algorithm 7 重指派）。
                 self.unload_from(&entry.id, map);
                 let fresh = self.make_loaded(entry, parent_ctx);
                 map.insert(entry.id.clone(), fresh);
@@ -398,6 +410,8 @@ impl Loader {
                     self.apply_intercept(fiber.ctx(), &l.intercept, &entry.intercept);
                 }
                 l.intercept = entry.intercept.clone();
+                // 防呆记录（REVIEW-24bfab5 nit7）：revision 变更已由阶段一
+                // 兜底整棵重建，此处为等价赋值；config 供记录。
                 l.config = Rc::clone(&entry.config);
                 l.revision = entry.revision;
             }
@@ -408,8 +422,10 @@ impl Loader {
             return;
         }
 
-        // 叶子：component / revision 变更 → 重建；isolate 变更 →
-        // **Algorithm 7 realm 重指派**（M2-PR4，替代重建）。
+        // 叶子：component / revision 变更 → 重建（防御性分支——阶段一
+        // 已对重建条件卸载，此处在 reconcile 路径实际不可达，REVIEW-
+        // 24bfab5 nit3）；isolate 变更 → **Algorithm 7 realm 重指派**
+        //（M2-PR4，替代重建）。
         if loaded.component != entry.component || loaded.revision != entry.revision {
             self.unload_from(&entry.id, map);
             let fresh = self.make_loaded(entry, parent_ctx);
@@ -521,6 +537,9 @@ impl Loader {
             .use_component(component, Rc::clone(&entry.config))
             .unwrap_or_else(|err| panic!("条目 `{}` 实例化失败：{err:?}（配置错误）", entry.id));
         // 级联：父 fiber 退役 → 子代 O-Retire（Def 47；经父 ctx 累加器）。
+        // 注（REVIEW-24bfab5 nit5）：`register` 的 retire 逆落在**派生 ctx**
+        //（annotated_ctx）的累加器上——孤儿（从不执行）；此处的**显式父
+        // ctx 效应**才是组退役级联的真正通道（retire 幂等，双路径安全）。
         if ctx.fiber().is_some() {
             drop(ctx.effect(|| -> Box<dyn EffectIter> {
                 let f = Rc::clone(&fiber);
@@ -534,7 +553,10 @@ impl Loader {
 
     /// 组持有者实例化：无注入/供给的空组件（组的角色 = 子条目的父 fiber，
     /// Def 47 注册）。
-    fn instantiate_group(&self, entry: &Entry, ctx: &Rc<Context>) -> Rc<Fiber> {
+    fn instantiate_group(&self, entry: &Entry, parent_ctx: &Rc<Context>) -> Rc<Fiber> {
+        // 组拦截注解经 annotated_ctx 应用（组 isolate 因 GroupHolder 空键
+        // 自然 no-op；REVIEW-24bfab5 nit4：复用而非手工复刻）。
+        let ctx = self.annotated_ctx(parent_ctx, entry, &KeySet::new());
         let holder = ctx
             .use_component(Rc::new(GroupHolder), Rc::clone(&entry.config))
             .unwrap_or_else(|err| panic!("组条目 `{}` 实例化失败：{err:?}（配置错误）", entry.id));
@@ -714,7 +736,8 @@ impl Loader {
         }
     }
 
-    /// 子树 fiber id 集合（条目 fiber + 递归子代）。
+    /// 条目子树 fiber id 集合（own 判定）：叶子 = 条目 fiber 自身；
+    /// 分支（组）= 持有者 fiber + 递归子代。
     fn collect_subtree_ids(&self, loaded: &LoadedEntry) -> std::collections::HashSet<FiberId> {
         let mut ids = std::collections::HashSet::new();
         self.collect_subtree_ids_into(loaded, &mut ids);
@@ -1467,5 +1490,125 @@ mod tests {
             "c 停用（依赖随 realm 迁移）"
         );
         assert!(runtime.is_quiet(), "静止");
+    }
+
+    /// Algorithm 7 边界（审查 major1，REVIEW-ef57804）：Local → Global 与
+    /// None（裸键 realm）→ Some 的迁移。
+    #[test]
+    fn isolate_change_boundaries_local_to_global() {
+        // Local → Global：绑定从 local:<id>:val 迁到 global:db:val。
+        let (loader, runtime) = loader();
+        loader.register_component("db", val_provider());
+        let local = Entry::new("p", "db", Rc::new("v".to_string()), 0, false)
+            .with_isolate(IsolateAnnotation::Local);
+        loader.apply(&[local]);
+        assert!(
+            runtime.store().contains(Symbol::intern("local:p:val")),
+            "绑定在 local realm"
+        );
+
+        loader.apply(&[Entry::new("p", "db", Rc::new("v".to_string()), 0, false)
+            .with_isolate(IsolateAnnotation::Global("db".into()))]);
+        let store = runtime.store();
+        assert!(
+            store.contains(Symbol::intern("global:db:val")),
+            "绑定迁到 global realm"
+        );
+        assert!(
+            !store.contains(Symbol::intern("local:p:val")),
+            "local realm 清空"
+        );
+        drop(store);
+        assert!(runtime.is_quiet(), "静止");
+    }
+
+    /// Algorithm 7 边界：None（裸键 realm）→ Some（Global）。
+    #[test]
+    fn isolate_change_boundaries_none_to_global() {
+        let (loader, runtime) = loader();
+        loader.register_component("db", val_provider());
+        loader.apply(&[Entry::new("p", "db", Rc::new("v".to_string()), 0, false)]);
+        assert!(
+            runtime.store().contains(Symbol::intern("val")),
+            "裸键 realm 绑定"
+        );
+
+        loader.apply(&[Entry::new("p", "db", Rc::new("v".to_string()), 0, false)
+            .with_isolate(IsolateAnnotation::Global("db".into()))]);
+        let store = runtime.store();
+        assert!(
+            store.contains(Symbol::intern("global:db:val")),
+            "绑定迁到 global realm"
+        );
+        assert!(!store.contains(Symbol::intern("val")), "裸键 realm 清空");
+        drop(store);
+        assert!(runtime.is_quiet(), "静止");
+    }
+
+    /// 组内同供给替换（REVIEW-24bfab5 nit6）：两阶段协调递归到组内——
+    /// 组内子条目用不同组件提供同一键的替换可在单次 apply 完成（不
+    /// ProvisionClash）。
+    #[test]
+    fn group_internal_same_supply_replacement() {
+        let (loader, runtime) = loader();
+        loader.register_component("db", val_provider());
+        loader.register_component("db2", val_provider());
+        let child = |id: &str, component: &str, value: &str| {
+            Entry::new(id, component, Rc::new(value.to_string()), 0, false)
+        };
+        loader.apply(&[Entry::group("g", vec![child("x", "db", "1")])]);
+        let x = loader.fiber("x").expect("x 激活").id();
+
+        // 组内把提供 val 的 x 换成 db2 组件（同供给键，单次 apply）。
+        loader.apply(&[Entry::group("g", vec![child("x", "db2", "1")])]);
+        let x2 = loader.fiber("x").expect("x 重建后激活").id();
+        assert_ne!(x, x2, "同供给替换 → 重建（新 fiber）");
+        assert!(runtime.is_quiet(), "静止");
+        assert!(
+            runtime.store().contains(Symbol::intern("val")),
+            "替换后绑定仍在（同键）"
+        );
+    }
+
+    /// major1 负向直证（REVIEW-24bfab5）：组子条目覆写组拦截注解后再移除
+    /// 自身注解 → 该键回到无元数据状态（不回退组继承值——扁平拷贝语义，
+    /// 已知边界⑤）。
+    #[test]
+    fn intercept_clear_does_not_restore_group_inherited_value() {
+        let (loader, _runtime) = loader();
+        loader.register_component("db", val_provider());
+        loader.register_component("cons", sum_consumer());
+        // 组 g 带 fs 拦截注解；子条目 a 覆写同一键。
+        let group_meta = path_meta(&["/group"], false);
+        let mut g = Entry::group(
+            "g",
+            vec![
+                Entry::new("a", "db", Rc::new("1".to_string()), 0, false)
+                    .with_intercept(Symbol::intern("fs"), path_meta(&["/child"], true)),
+            ],
+        );
+        g = g.with_intercept(Symbol::intern("fs"), group_meta.clone());
+        loader.apply(&[g]);
+        let a = loader.fiber("a").expect("a 激活");
+        // 子条目覆写组值（replace 语义：子注解权威）。
+        assert_eq!(
+            a.ctx().get_meta::<PathMeta>(Symbol::intern("fs")),
+            Some(path_meta(&["/child"], true)),
+            "子覆写组拦截"
+        );
+
+        // 移除子条目自身注解 → 该键无元数据（不回退 /group）。
+        let g2 = Entry::group(
+            "g",
+            vec![Entry::new("a", "db", Rc::new("1".to_string()), 0, false)],
+        )
+        .with_intercept(Symbol::intern("fs"), group_meta.clone());
+        loader.apply(&[g2]);
+        let a2 = loader.fiber("a").expect("a 仍在");
+        assert_eq!(
+            a2.ctx().get_meta::<PathMeta>(Symbol::intern("fs")),
+            None,
+            "移除注解 → 无元数据（不回退组继承值，扁平拷贝语义）"
+        );
     }
 }

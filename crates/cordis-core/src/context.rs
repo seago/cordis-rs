@@ -417,10 +417,13 @@ impl Context {
         table.insert(key, Box::new(merged));
     }
 
-    /// **设置（替换）本上下文 `k` 处的拦截元数据（M2-PR3 loader 分派）**：
-    /// 条目注解为权威——重放幂等（与 [`Context::intercept_in_place`] 的
-    /// 合并语义互补；合并会因集合型元数据重复增长）。无既有元数据时等价
-    /// `intercept_in_place`。不触发 reload。
+    /// **设置（替换）本上下文 `k` 处的拦截元数据**：条目注解为权威——
+    /// 重放幂等（与 [`Context::intercept_in_place`] 的合并语义互补）。
+    /// 无既有元数据时等价 `intercept_in_place`。不触发 reload。
+    ///
+    /// **预留 API（REVIEW-24bfab5 nit2）**：loader 分派统一走类型擦除版
+    /// [`Context::intercept_set_boxed`]（条目注解权威、无类型冲突检查）；
+    /// 本 typed 版供外部编排方使用（带类型冲突检查 + 替换）。
     pub fn intercept_set<M: InterceptMeta>(&self, key: Symbol, meta: M) {
         let mut table = self.intercept.borrow_mut();
         if let Some(existing) = table.get(&key) {
@@ -431,9 +434,11 @@ impl Context {
         table.insert(key, Box::new(meta));
     }
 
-    /// **清除本上下文 `k` 处的拦截元数据（M2-PR3 loader 分派）**：移除条目
-    /// 注解时回退到继承值（继承值在派生时已拷贝——清除后该键回到无元数据
-    /// 状态）。不触发 reload。
+    /// **清除本上下文 `k` 处的拦截元数据（M2-PR3 loader 分派）**：移除
+    /// 该键的元数据（回到无元数据状态）——**不回退父（组）继承值**
+    /// （REVIEW-24bfab5 major1：派生族对 `ι` 为扁平拷贝、无父链，被条目
+    /// 覆写后继承副本已丢失；"回退到继承值"不可实现，见 loader 模块
+    /// 文档已知边界⑤）。不触发 reload。
     pub fn intercept_clear(&self, key: Symbol) {
         self.intercept.borrow_mut().remove(&key);
     }
