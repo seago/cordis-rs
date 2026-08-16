@@ -23,8 +23,9 @@
 //!
 //! **已知边界（M2-PR3 记录）**：① 双向写回未实现——条目为权威记录，
 //! 组件不能自行改配置/禁自身（§5.2.1 "the binding runs in both directions"
-//! 的组件→条目方向缺席）；② isolate 变更走重建而非 Algorithm 7 realm
-//! 重指派（M2-PR4）；③ 组条目自身的 isolate 注解不应用（组无声明键）；
+//! 的组件→条目方向缺席）；② isolate 变更经 Algorithm 7 realm 重指派
+//!（M2-PR4，就地不重建）；③ 组条目自身的 isolate 注解不应用（组无声明键；
+//! 组 isolate 变更仍整棵重建）；
 //! ④ **失败 fiber 静默加载**（审查 nit7，REVIEW-32a913d）：L-Raise 后
 //! `use_component` 对组件失败返回 `Ok(fiber)`（`Inactive(Some(ζ))`）——
 //! loader 不检查失败态，静默记为"已加载"；调用方需自行 `fiber.state()`
