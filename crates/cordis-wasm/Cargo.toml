@@ -17,3 +17,6 @@ wasmtime-wasi = "47.0.3"
 wit-bindgen = "0.60.0"
 anyhow = "1"
 
+
+[dev-dependencies]
+cordis-loader = { path = "../cordis-loader" }
