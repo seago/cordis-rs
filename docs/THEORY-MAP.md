@@ -96,6 +96,10 @@
 | 2026-08-16 / PR #8 | 条目全部实例化于 root 上下文（根级、无子代）——`remove_fiber` 的 `HasChildren` 前提不受影响；嵌套实例化随 group/include（M2）落地 | Def 74, §4.2 | 公开差异声明（最小版取舍） | 记录 |
 | 2026-08-16 / PR #8 | 配置错误（未注册组件名 / 供给冲突）→ panic（panic = bug，与核心同策略）；幂等性以「不重建则 fiber id 不变」断言覆盖 | — | 实现说明 | 记录 |
 | 2026-08-16 / PR #8 | `Context::use_component` / `Runtime::register` 的 `config` 参数由 `Box<dyn Any>` 改为 `Rc<dyn Any>`——编排方（loader）重建条目需保留并复用配置（`Box` 不可克隆）；调用点随迁（native/示例/测试） | Def 47 | 实现说明（API 调整） | 记录 |
+| 2026-08-16 / PR #8 审查 | **修复（m1）**：`apply` 改**两阶段**——先卸载侧（移除消失条目、卸载 `disabled` 置位/需重建条目的旧 fiber，释放供给名）再实例化侧——同供给键替换（desired 用 Y 替换 X）可单次 `apply` 完成，否则 Y 实例化命中 X 的供给检查而 `ProvisionClash`；补回归测试 `same_supply_replacement_in_single_apply` | §5.2.1 per-field dispatch | 修正（含回归测试） | 已修复 |
+| 2026-08-16 / PR #8 审查 | **修复（m2）**：`HasChildren` panic 消息如实化（"条目下存在子代 fiber……叶子约束"）+ 模块文档注明**叶子约束**（不得经 `Loader::fiber(id)?.ctx()` 实例化子组件，嵌套随 group/include 在 M2 落地） | §4.2（`remove_fiber` 前提） | 修正（消息 + 文档） | 已修复 |
+| 2026-08-16 / PR #8 审查 | **修复（m3）**：补 `disabled_period_changes_take_effect_on_reenable`——disabled 期间 component/revision 变更不落记录（保持旧值），enabled 后以新 entry 实例化（最终一致）——固化路径防未来重构破坏 | §5.2.1 | 修正（测试固化） | 已修复 |
+| 2026-08-16 / PR #8 审查 | `desired` 重复 id：last-wins（后项覆盖，可能浪费一次实例化）——已文档化，调用方应保证唯一 | — | 实现说明 | 记录 |
 
 ## 里程碑走查记录
 
