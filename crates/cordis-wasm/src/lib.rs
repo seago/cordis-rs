@@ -37,12 +37,24 @@
 //!   notify）——进入核心累加器后与 `PushingIter` 共享 `StepGuard`
 //!   幂等（双路径安全，见 core 文档）。
 //!
+//! # 值类型与依赖方向（PR #13 审查 m2，REVIEW-1df64a1）
+//!
+//! 双后端共存（PR #13）要求原生组件与 wasm 组件**值类型统一**：双方
+//! 经 [`Context::set_dyn`]/[`get_dyn`] 使用 wit `Value` 装箱即可互通。
+//! 但 `Value` 类型定义在本 crate 的 wit 绑定中——**原生组件要与 wasm
+//! 组件互通须依赖本 crate（仅为一个值类型）**，依赖方向为
+//! "原生 → wasm"，与"wasm 依赖 core、core 无关后端"的既有分层不一致。
+//! 该边界已记录（THEORY-MAP PR #13 行）；生产化时把 `Value`（统一值
+//! 类型）下沉到 `cordis-core` 或独立 value crate（M2 或正式双后端
+//! 支持前处理）。
+//!
 //! # 进度
 //!
 //! - PR #10：wit 世界 v1 + 宿主加载/驱动原语 + Rust guest 示例端到端；
 //! - PR #11：`WasmComponent` 接入 cordis-core（set 转发 + 逆衔接）；
-//! - PR #12+：按 fiber 的 Linker（能力裁剪）、双后端共存、沙箱与
-//!   双语言 guest。
+//! - PR #12：wasm 依赖者消费（注入同步 + consumer guest）；
+//! - PR #13：双后端共存（同一 loader 加载原生与 wasm，值类型统一）；
+//! - PR #14+：沙箱隔离（guest 崩溃不伤宿主）、双语言 guest。
 
 #![deny(missing_docs)]
 
