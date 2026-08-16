@@ -244,6 +244,18 @@ impl Context {
         }))
     }
 
+    /// 符号级动态 `get`（wasm 桥接读侧，ADR-0004 值语义）：键 `key`
+    /// 经 `resolve_realm` 解析后返回类型擦除的绑定值（未绑定返回
+    /// `None`）。语义与 [`Context::get`] 对称（读注入依赖、隔离解析
+    /// 由核心承担），仅值类型擦除。
+    pub fn get_dyn(&self, key: Symbol) -> Option<Ref<'_, dyn Any + Send + Sync>> {
+        let realm = self.resolve_realm(key);
+        Ref::filter_map(self.runtime.store.borrow(), |s| {
+            s.binding(realm).map(|b| b.value.as_ref())
+        })
+        .ok()
+    }
+
     /// `isolate(k, r)`（Def 29）：**派生实现**（Def 27）——返回新上下文，
     /// 把 `k` 的 realm 覆写为 `r`，继承其余 `ρ`、`ι` 与 fiber 归属；
     /// 不写共享表、无需逆。同一键在不同 realm 下解析到独立绑定

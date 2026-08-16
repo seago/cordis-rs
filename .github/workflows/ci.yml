@@ -34,7 +34,9 @@ jobs:
       # 成员、独立 target 目录、rust-cache 不覆盖）——必须在 cargo test
       # **之前**构建，否则 cordis-wasm 的加载测试在干净环境必然失败。
       - name: build wasm guest (M1)
-        run: cargo build --manifest-path examples/wasm-plugin-rust/Cargo.toml --target wasm32-wasip2
+        run: |
+          cargo build --manifest-path examples/wasm-plugin-rust/Cargo.toml --target wasm32-wasip2
+          cargo build --manifest-path examples/wasm-plugin-rust-consumer/Cargo.toml --target wasm32-wasip2
 
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

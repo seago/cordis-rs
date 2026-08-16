@@ -120,6 +120,13 @@ impl Store {
         self.bindings.get(&realm)
     }
 
+    /// 符号级只读（wasm 桥接读侧，ADR-0004 值语义）：类型擦除的绑定值
+    /// 引用（未绑定返回 `None`）。借用自 `&self`（经 [`Store::get_value`]
+    /// 的调用方需持有 store 借用）。
+    pub fn get_value(&self, realm: Symbol) -> Option<&(dyn Any + Send + Sync)> {
+        self.bindings.get(&realm).map(|b| b.value.as_ref())
+    }
+
     /// 某 fiber 安装的全部绑定 realm（Algorithm 5 的 `provided(fiber)`）。
     pub(crate) fn realms_with_provider(&self, provider: FiberId) -> Vec<Symbol> {
         self.bindings

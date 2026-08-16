@@ -199,12 +199,14 @@ impl InstanceState {
     /// 经 rep 执行核心逆（迭代器产出的逆闭包调用）：
     /// 核心 unbind + notify，并清理绑定镜像。
     fn run_inverse(&self, rep: u32) {
-        if let Some((key, task)) = self
+        // 两步：先 take（借用立即结束），再执行——if-let 临时借用
+        // 存活到块尾会误伤后续借用（诊断结论）。
+        let taken = self
             .core_inverses
             .borrow_mut()
             .get_mut(rep as usize)
-            .and_then(|slot| slot.take())
-        {
+            .and_then(|slot| slot.take());
+        if let Some((key, task)) = taken {
             task();
             self.store.borrow_mut().data_mut().bindings.remove(&key);
         }
@@ -229,6 +231,7 @@ impl WasmComponent {
         let instance = wit::Cordis::instantiate(&mut store, &component, &linker)?;
         let comp = instance.cordis_core_plugin().component();
         let component_any = comp.call_constructor(&mut store)?;
+        // load 无 ctx：占位（apply 时填充）。
         Ok(Rc::new(Self {
             state: Rc::new(RefCell::new(InstanceState {
                 store: RefCell::new(store),
@@ -271,18 +274,25 @@ impl Component for WasmComponent {
     }
 
     fn apply(&self, ctx: Rc<Context>, _config: &dyn std::any::Any) -> Box<dyn EffectIter> {
-        let state = self.state.borrow();
-        let component_any = state.component_any;
-        let task_any = state
-            .instance
-            .cordis_core_plugin()
-            .component()
-            .call_start(&mut *state.store.borrow_mut(), component_any)
-            .expect("跨边界 start 调用");
+        // 作用域块：`Ref` 是 Drop 类型，借用活到块末——须在
+        // `ctx` 写入（borrow_mut）前结束。
+        let task_any = {
+            let state = self.state.borrow();
+            let component_any = state.component_any;
+            state
+                .instance
+                .cordis_core_plugin()
+                .component()
+                .call_start(&mut *state.store.borrow_mut(), component_any)
+                .expect("跨边界 start 调用")
+        };
+        // 注入键（step 前同步其值进镜像，PR #12）。
+        let inject = self.inject().iter().collect();
         Box::new(WasmTaskIter {
             state: Rc::clone(&self.state),
             task_any,
             ctx,
+            inject,
         })
     }
 }
@@ -293,13 +303,45 @@ impl Component for WasmComponent {
 /// `context::set`（pending）转发到核心 [`Context::set_dyn`]；核心逆按
 /// rep 存入实例的 `core_inverses`；本步逆 = 执行这些核心逆的闭包
 /// （进入核心累加器，LIFO 撤销）。
+///
+/// **注入依赖同步（PR #12）**：step 前把核心 store 中本组件 `inject`
+/// 键的值同步进镜像（[`Host::get`] 据此读取）——guest 消费依赖
+/// （论文 §6.3 桥接透明性）。值为 wasm wit `Value` 装箱（另一 wasm
+/// 组件提供）时可同步；原生组件提供的值（不同装箱类型）**不同步**
+/// （镜像无此键 = `get` 返回 none，M1 边界：跨类型值翻译未支持）。
 struct WasmTaskIter {
     state: Rc<RefCell<InstanceState>>,
     task_any: ResourceAny,
     ctx: Rc<Context>,
+    /// 本组件注入键（符号；step 前同步其值进镜像）。
+    inject: Vec<Symbol>,
 }
 
 impl WasmTaskIter {
+    /// 同步注入依赖：核心 store → 镜像（guest 的 get 可读）。
+    fn sync_injected(&self) {
+        let state = self.state.borrow();
+        let mut store = state.store.borrow_mut();
+        let mirror = &mut store.data_mut().bindings;
+        for key in &self.inject {
+            match self.ctx.get_dyn(*key) {
+                // 值是 wasm wit Value 装箱（另一 wasm 组件提供）。
+                Some(value) if value.is::<Value>() => {
+                    let value = value
+                        .downcast_ref::<Value>()
+                        .expect("is::<Value> 已检查")
+                        .clone();
+                    mirror.insert(key.as_str().to_string(), value);
+                }
+                // 原生组件提供的值（不同装箱类型）：M1 不支持跨类型
+                // 值翻译——镜像无此键（get 返回 none）。
+                _ => {
+                    mirror.remove(key.as_str());
+                }
+            }
+        }
+    }
+
     /// 转发本步 pending 的 set 到核心 store（ADR-0004 值装箱），
     /// 返回 `(rep, 键, 核心 Disposer)` 列表（镜像已由 [`Host::set`]
     /// 先行插入，逆执行时清理）。
@@ -325,6 +367,8 @@ impl WasmTaskIter {
 
 impl EffectIter for WasmTaskIter {
     fn next(&mut self) -> Step {
+        // 注入依赖同步（guest 的 get 读核心 store 的当前值）。
+        self.sync_injected();
         // 驱动 guest 一步（同步；guard 在核心 execute 的步界检查）。
         let step = {
             let state = self.state.borrow();
