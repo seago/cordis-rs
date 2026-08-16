@@ -179,7 +179,7 @@ impl Runtime {
         &self,
         ctx: &Rc<Context>,
         component: Rc<dyn Component>,
-        config: Box<dyn Any>,
+        config: Rc<dyn Any>,
     ) -> Result<Rc<Fiber>, RegistryError> {
         let provide = component.provide();
         if self
@@ -196,6 +196,7 @@ impl Runtime {
         let apply: Box<dyn Fn() -> Box<dyn EffectIter>> = {
             let component = Rc::clone(&component);
             let fiber_ctx = Rc::clone(&fiber_ctx);
+            let config = Rc::clone(&config);
             Box::new(move || component.apply(Rc::clone(&fiber_ctx), config.as_ref()))
         };
         let fiber = Rc::new(Fiber {
@@ -615,7 +616,7 @@ mod tests {
         // 无依赖组件：use 即激活（注册回调内 refresh → reload 同步完成）。
         let runtime = Rc::new(Runtime::new());
         let root = runtime.context();
-        let a = root.use_component(provider("pg"), Box::new(())).unwrap();
+        let a = root.use_component(provider("pg"), Rc::new(())).unwrap();
         assert!(matches!(&*a.state(), FiberState::Active { .. }));
         // 绑定已安装且携带提供者（σγ 推导依据）。
         let realm = sym("db");
@@ -636,12 +637,12 @@ mod tests {
         let runtime = Rc::new(Runtime::new());
         let root = runtime.context();
         // 顺序 1：先 B 后 A。
-        let b = root.use_component(consumer(), Box::new(())).unwrap();
+        let b = root.use_component(consumer(), Rc::new(())).unwrap();
         assert!(
             matches!(&*b.state(), FiberState::Inactive(_)),
             "依赖未满足时保持 Inactive"
         );
-        let a = root.use_component(provider("pg"), Box::new(())).unwrap();
+        let a = root.use_component(provider("pg"), Rc::new(())).unwrap();
         assert!(matches!(&*a.state(), FiberState::Active { .. }));
         assert!(
             matches!(&*b.state(), FiberState::Active { .. }),
@@ -656,9 +657,9 @@ mod tests {
         // 依赖仍可读（Teardown 检查逆在依赖者逆序恢复中先于提供者 dispose）。
         let runtime = Rc::new(Runtime::new());
         let root = runtime.context();
-        let a = root.use_component(provider("pg"), Box::new(())).unwrap();
+        let a = root.use_component(provider("pg"), Rc::new(())).unwrap();
         let b = root
-            .use_component(consumer_asserting_readable_teardown(), Box::new(()))
+            .use_component(consumer_asserting_readable_teardown(), Rc::new(()))
             .unwrap();
         assert!(matches!(&*b.state(), FiberState::Active { .. }));
 
@@ -693,14 +694,14 @@ mod tests {
             provide: spec(&["k1"]),
             effects: Box::new(move |ctx| {
                 let _child = ctx
-                    .use_component(Rc::clone(&child_comp2) as Rc<dyn Component>, Box::new(()))
+                    .use_component(Rc::clone(&child_comp2) as Rc<dyn Component>, Rc::new(()))
                     .unwrap();
                 Box::new(once(Box::new(move || {
                     ctx.set::<K1Key>(1).expect("绑定 parent")
                 })))
             }),
         });
-        let parent = root.use_component(parent_comp, Box::new(())).unwrap();
+        let parent = root.use_component(parent_comp, Rc::new(())).unwrap();
         let child = runtime
             .fibers
             .borrow()
@@ -763,7 +764,7 @@ mod tests {
                 }
             }
         }
-        let fiber = root.use_component(comp, Box::new(())).unwrap();
+        let fiber = root.use_component(comp, Rc::new(())).unwrap();
         assert!(
             matches!(&*fiber.state(), FiberState::Inactive(_)),
             "中途退役 → 链式卸载 → Inactive"
@@ -779,9 +780,9 @@ mod tests {
         // O-Insert 前提：供给不相交（单一来源纪律）。
         let runtime = Rc::new(Runtime::new());
         let root = runtime.context();
-        root.use_component(provider("pg"), Box::new(())).unwrap();
+        root.use_component(provider("pg"), Rc::new(())).unwrap();
         assert!(matches!(
-            root.use_component(provider("mysql"), Box::new(())),
+            root.use_component(provider("mysql"), Rc::new(())),
             Err(RegistryError::ProvisionClash)
         ));
     }
@@ -791,7 +792,7 @@ mod tests {
         // O-Remove 前提：退役 + Inactive + 无子代。
         let runtime = Rc::new(Runtime::new());
         let root = runtime.context();
-        let a = root.use_component(provider("pg"), Box::new(())).unwrap();
+        let a = root.use_component(provider("pg"), Rc::new(())).unwrap();
         assert_eq!(runtime.remove_fiber(a.id()), Err(RegistryError::NotRetired));
         a.retire();
         // 同步卸载已完成：退役后即可移除。
@@ -818,7 +819,7 @@ mod tests {
                 })))
             }),
         });
-        let _ = root.use_component(comp, Box::new(()));
+        let _ = root.use_component(comp, Rc::new(()));
     }
 
     #[test]
@@ -826,8 +827,8 @@ mod tests {
         let runtime = Rc::new(Runtime::new());
         let root = runtime.context();
         assert!(runtime.is_quiet(), "空 registry 恒静止");
-        let a = root.use_component(provider("pg"), Box::new(())).unwrap();
-        let b = root.use_component(consumer(), Box::new(())).unwrap();
+        let a = root.use_component(provider("pg"), Rc::new(())).unwrap();
+        let b = root.use_component(consumer(), Rc::new(())).unwrap();
         assert!(runtime.is_quiet());
         a.retire();
         assert!(runtime.is_quiet(), "级联后回到静止");
@@ -845,8 +846,8 @@ mod tests {
         // （fiber.ctx 继承 ρ，绑定落在 realm）。
         let ctx_a = root.isolate(sym("db"), realm);
         let ctx_b = root.isolate(sym("db"), realm);
-        let a = ctx_a.use_component(provider("pg"), Box::new(())).unwrap();
-        let b = ctx_b.use_component(consumer(), Box::new(())).unwrap();
+        let a = ctx_a.use_component(provider("pg"), Rc::new(())).unwrap();
+        let b = ctx_b.use_component(consumer(), Rc::new(())).unwrap();
         assert!(
             matches!(&*b.state(), FiberState::Active { .. }),
             "隔离提供者的激活必须通知到依赖者"
@@ -873,8 +874,8 @@ mod tests {
         let root = runtime.context();
         let ctx_a = root.isolate(sym("db"), Symbol::intern("realm-a"));
         let ctx_c = root.isolate(sym("db"), Symbol::intern("realm-b"));
-        let a = ctx_a.use_component(provider("pg"), Box::new(())).unwrap();
-        let c = ctx_c.use_component(consumer(), Box::new(())).unwrap();
+        let a = ctx_a.use_component(provider("pg"), Rc::new(())).unwrap();
+        let c = ctx_c.use_component(consumer(), Rc::new(())).unwrap();
         assert!(matches!(&*a.state(), FiberState::Active { .. }));
         assert!(
             matches!(&*c.state(), FiberState::Inactive(_)),

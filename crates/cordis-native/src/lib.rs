@@ -61,7 +61,7 @@ mod tests {
         let runtime = Rc::new(Runtime::new());
         let root = runtime.context();
         let fiber = root
-            .use_component(Rc::new(Greeter), Box::new(()))
+            .use_component(Rc::new(Greeter), Rc::new(()))
             .expect("实例化");
         assert!(
             matches!(&*fiber.state(), FiberState::Active { .. }),

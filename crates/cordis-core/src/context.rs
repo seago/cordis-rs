@@ -282,10 +282,13 @@ impl Context {
     ///
     /// 注册回调为 `self` 上的可逆效应（Def 47）：应用 = 启动子生命周期；
     /// 逆 = O-Retire——`self` 上下文卸载（如父组件卸载）时级联退役子。
+    ///
+    /// `config` 以 [`Rc`] 持有（PR #8 起）：配置可共享/复用——loader 等
+    /// 编排方在重建条目时需要保留配置（`Box` 不可克隆）。
     pub fn use_component(
         self: &Rc<Self>,
         component: Rc<dyn Component>,
-        config: Box<dyn Any>,
+        config: Rc<dyn Any>,
     ) -> Result<Rc<Fiber>, RegistryError> {
         self.runtime.register(self, component, config)
     }

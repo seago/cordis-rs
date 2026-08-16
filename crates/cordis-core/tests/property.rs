@@ -194,11 +194,11 @@ impl Harness {
                     provide: provide.iter().collect(),
                 });
                 let e_res = match parent_id {
-                    None => self.root.use_component(component, Box::new(())),
+                    None => self.root.use_component(component, Rc::new(())),
                     // Def 47：在父 fiber 的 ctx 上实例化（注册进父的累加器）。
                     Some(pid) => match self.runtime.fiber(pid) {
                         Some(parent_fiber) => {
-                            parent_fiber.ctx().use_component(component, Box::new(()))
+                            parent_fiber.ctx().use_component(component, Rc::new(()))
                         }
                         None => Err(RegistryError::UnknownParent),
                     },

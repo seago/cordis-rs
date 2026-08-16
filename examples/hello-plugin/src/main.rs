@@ -98,7 +98,7 @@ fn main() {
                 name: "primary".into(),
                 port: 8080,
             }),
-            Box::new(()),
+            Rc::new(()),
         )
         .expect("实例化 server");
     assert_active(&server, "server");
@@ -107,7 +107,7 @@ fn main() {
     // 2. 加载 auth（依赖 server 已满足 → 立即激活）。
     println!("> 加载 auth...");
     let auth = root
-        .use_component(Rc::new(AuthPlugin), Box::new(()))
+        .use_component(Rc::new(AuthPlugin), Rc::new(()))
         .expect("实例化 auth");
     assert_active(&auth, "auth");
     assert_eq!(
@@ -134,7 +134,7 @@ fn main() {
                 name: "secondary".into(),
                 port: 9090,
             }),
-            Box::new(()),
+            Rc::new(()),
         )
         .expect("实例化新 server");
     assert_active(&server2, "server（重连）");
