@@ -88,6 +88,9 @@
 | 2026-08-16 / PR #6 审查 | `Fiber::ctx` 公开访问器（`fiber.ctx`，Algorithm 4 第 8 行的文档化实体）——harness 父级实例化所需 | Def 44 | 实现说明 | 已修复 |
 | 2026-08-16 / PR #7 | DX 层落地：`cordis-macro` 的 `#[component(inject=[..], provide=[..])]`（生成 `inject`/`provide`，`apply` 委托 `apply_impl`）；`cordis` 门面 re-export 全部 API + 宏；`cordis-native` 提供 `with_ctx` 单步效应辅助 | Def 43 | 完成（宏生成代码引用 `::cordis::` 路径，依赖门面） | 记录 |
 | 2026-08-16 / PR #7 | M0 验收示例 `examples/hello-plugin`：server（提供）+ auth（注入），激活顺序 → 退役级联 → 移除后重连（auth 自动重连新 server）——全部断言通过 | §3.2.2, Thm 63 | 完成（端到端验证） | 记录 |
+| 2026-08-16 / PR #7 审查 | **修复（m1）**：门面 re-export 改 `pub use cordis_core::*`（glob）——`execute` 等逐一漏列问题不再复发（原列表缺 `execute`） | — | 修正（glob 全量导出） | 已修复 |
+| 2026-08-16 / PR #7 审查 | **修复（m2）**：CI 增加 `cargo run --quiet -p hello-plugin`——M0 验收断言纳入门禁（`cargo test` 只编译 bin 不运行） | — | 修正（CI 门禁） | 已修复 |
+| 2026-08-16 / PR #7 审查 | 宏重复参数覆盖语义文档化（nit2：后者覆盖前者） | — | 实现说明 | 记录 |
 
 ## 里程碑走查记录
 
