@@ -65,6 +65,7 @@ use std::rc::Rc;
 use cordis_core::component::Component;
 use cordis_core::context::Context;
 use cordis_core::effect::{EffectIter, Step};
+use cordis_core::fiber::FiberError;
 use cordis_core::keyset::KeySet;
 use cordis_core::symbol::Symbol;
 use wasmtime::component::{Component as WasmComponentType, HasSelf, Linker, Resource, ResourceAny};
@@ -375,9 +376,26 @@ impl WasmTaskIter {
             // （isolate 映射）由核心承担，与 typed `set` 对称。
             let key = Symbol::intern(&set.key);
             let value: Box<dyn std::any::Any + Send + Sync> = Box::new(set.value);
-            let disposer = self.ctx.set_dyn(key, value).unwrap_or_else(|err| {
-                panic!("wasm 组件绑定 {} 失败：{err:?}（配置错误）", set.key)
-            });
+            // M2-PR1（L-Raise）：guest 侧写入失败（绑定冲突 = AlreadyBound；
+            // 越界写未声明键 = 核心 Def 43/48 纪律 panic）不再是宿主 panic
+            // ——统一转为 FiberError raise（不可信输入 → 失败 outcome）。
+            let disposer = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.ctx.set_dyn(key, value)
+            })) {
+                Ok(Ok(disposer)) => disposer,
+                Ok(Err(err)) => {
+                    FiberError::new(format!("wasm 组件绑定 {} 失败：{err:?}", set.key)).raise()
+                }
+                Err(payload) => {
+                    // 核心纪律 panic（&'static str / String 载荷）。
+                    let msg = payload
+                        .downcast_ref::<&'static str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "wasm 组件违反核心纪律".into());
+                    FiberError::new(msg).raise()
+                }
+            };
             inverses.push((set.rep, (set.key, disposer)));
         }
         inverses
@@ -389,6 +407,9 @@ impl EffectIter for WasmTaskIter {
         // 注入依赖同步（guest 的 get 读核心 store 的当前值）。
         self.sync_injected();
         // 驱动 guest 一步（同步；guard 在核心 execute 的步界检查）。
+        // M2-PR1（L-Raise）：guest trap（wasmtime 错误）不再是宿主 panic
+        // ——以 FiberError 载荷 raise，核心 reload 捕获后记录为 fiber 的
+        // 失败 outcome（§4.3.4 𝔈fail）。
         let step = {
             let state = self.state.borrow();
             state
@@ -396,7 +417,9 @@ impl EffectIter for WasmTaskIter {
                 .cordis_core_plugin()
                 .task()
                 .call_step(&mut *state.store.borrow_mut(), self.task_any)
-                .expect("跨边界 step 调用")
+                .unwrap_or_else(|err| {
+                    FiberError::new(format!("wasm 组件 step 失败（trap）：{err}")).raise()
+                })
         };
         // 转发本步 pending 的 set 到核心 store。
         let forwarded = self.forward_pending();

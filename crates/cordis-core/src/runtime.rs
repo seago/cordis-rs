@@ -25,7 +25,7 @@ use std::rc::Rc;
 use crate::component::Component;
 use crate::context::Context;
 use crate::effect::{Disposer, EffectIter, execute, once};
-use crate::fiber::{Fiber, FiberId, FiberState, View};
+use crate::fiber::{Fiber, FiberError, FiberId, FiberState, View};
 use crate::keyset::KeySet;
 use crate::store::Store;
 use crate::symbol::Symbol;
@@ -156,11 +156,16 @@ impl Runtime {
 
     /// 静止判定 `quiet(γ)`（Def 46 式 (42)）：每个 fiber 都处于其目标
     /// （无转换在途）。
+    ///
+    /// **M2-PR1（L-Raise）**：`Inactive(Some(ζ))` 恒静止（Def 49 式 (45)
+    /// 的 `ζ ≠ ⊥ ∨ target = ⊥` 析取）——失败 fiber 不再"卡住"：错误
+    /// outcome 即目标达成。
     pub fn is_quiet(&self) -> bool {
         self.fibers.borrow().values().all(|f| {
             let target = self.compute_target(f);
             match &*f.state.borrow() {
-                FiberState::Inactive(_) => target.is_none(),
+                FiberState::Inactive(Some(_)) => true, // ζ ≠ ⊥：失败亦静止
+                FiberState::Inactive(None) => target.is_none(),
                 FiberState::Active { view } => target.as_ref() == Some(view),
                 _ => false, // 转换在途
             }
@@ -336,6 +341,11 @@ impl Runtime {
     /// - `committed ← resolve(inject)`（当前各键提供者）；
     /// - 驱动效应迭代器，guard 在每个步骤边界检查 `fiber.target == target0`
     ///   （§4.3.2 步界中断：目标变化即停止，仅已完成步骤被恢复）；
+    /// - **L-Raise（M2-PR1）**：迭代器以 [`FiberError::raise`] 抛出的失败
+    ///   载荷被 `catch_unwind` 识别——目标置 ⊥、经卸载路径恢复已完成步骤
+    ///   （已完成步骤的逆已在产出时入 ctx 累加器，StepGuard 幂等），
+    ///   终态 `Inactive(Some(ζ))`（§4.3.4 𝔈fail）；其余 panic 为宿主 bug
+    ///   （panic = bug），`resume_unwind` 原样重抛；
     /// - 完成检查（惯性链）：目标未变 → `Active` + 通知依赖者；否则链式卸载。
     fn reload(&self, fiber: &Rc<Fiber>) {
         let target0 = fiber
@@ -357,7 +367,23 @@ impl Runtime {
             move || fiber.target.borrow().as_ref() == Some(&guard_target)
         };
         let iter = (fiber.apply)();
-        let recover = execute(iter, guard);
+        let raised =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(iter, guard)));
+        let recover = match raised {
+            Ok(recover) => recover,
+            Err(payload) => {
+                // L-Raise：仅 FiberError 载荷 = 组件失败；其余 = 宿主 bug。
+                let err = match payload.downcast::<FiberError>() {
+                    Ok(err) => *err,
+                    Err(other) => std::panic::resume_unwind(other),
+                };
+                // 目标 ⊥（错误即终态；依赖者随之停用）+ 恢复已完成步骤。
+                *fiber.target.borrow_mut() = None;
+                self.unload(fiber);
+                *fiber.state.borrow_mut() = FiberState::Inactive(Some(err));
+                return;
+            }
+        };
         fiber.dispose.borrow_mut().push(recover);
 
         if fiber.target.borrow().as_ref() == Some(&target0) {

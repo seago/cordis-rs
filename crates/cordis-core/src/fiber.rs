@@ -29,8 +29,9 @@ pub type View = BTreeMap<Symbol, FiberId>;
 
 /// fiber 生命周期错误（Def 49 的 `ζ`）。
 ///
-/// 当前同步核心尚无生产者（效应失败路径随 L-Raise 接入 async 阶段）；
-/// 保留状态形状以对齐 Def 49。
+/// 生产者（M2-PR1 落地，L-Raise）：wasm 桥接层（guest trap / 越界 set /
+/// 绑定冲突）与显式 raise 的组件迭代器经 [`FiberError::raise`] 抛出，
+/// `reload` 捕获后记录为 fiber 的失败 outcome（§4.3.4 𝔈fail）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FiberError(String);
 
@@ -38,6 +39,16 @@ impl FiberError {
     /// 构造错误。
     pub fn new(message: impl Into<String>) -> Self {
         Self(message.into())
+    }
+
+    /// **L-Raise（§4.3.4，M2-PR1 落地）**：以本错误为 panic 载荷抛出——
+    /// `reload` 的 `catch_unwind` 将其识别为"组件失败"（可恢复：记录
+    /// outcome + 恢复已完成步骤），而非宿主 bug（后者 resume_unwind）。
+    ///
+    /// 生产者：wasm 桥接层（guest trap / 越界 set / 绑定冲突）与显式
+    /// raise 的组件迭代器。
+    pub fn raise(self) -> ! {
+        std::panic::panic_any(self)
     }
 }
 
