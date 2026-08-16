@@ -12,5 +12,8 @@ workspace = true
 
 [dependencies]
 anyhow = "1"
+# 0.256：与 wasmtime 47.0.3 的适配器（wasi-preview1-component-adapter-
+# provider 47.0.3）对齐。workspace 内 wit-bindgen 0.60 内嵌 0.254，
+# 形成 0.254/0.256 双版本并行——客观约束（适配器版本对齐），Cargo.lock 锁定。
 wit-component = "0.256"
 wit-parser = "0.256"

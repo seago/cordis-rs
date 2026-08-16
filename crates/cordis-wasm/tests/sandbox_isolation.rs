@@ -5,9 +5,9 @@
 //! - 宿主捕获错误后**进程存活**：后续可继续实例化其他组件、注册
 //!   新 fiber、驱动正常 guest——沙箱隔离验证（论文 §6.3）。
 
+use cordis_core::FiberState;
 use cordis_core::runtime::Runtime;
 use cordis_core::symbol::Symbol;
-use cordis_core::{FiberState};
 use cordis_wasm::WasmComponent;
 use std::rc::Rc;
 

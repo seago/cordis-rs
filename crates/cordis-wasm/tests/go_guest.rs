@@ -157,4 +157,5 @@ fn go_consumer_reads_native_provider_value() {
         "依赖消失 → Go consumer 级联停用"
     );
     assert!(runtime.store().symbols().next().is_none(), "绑定全清");
+    assert!(runtime.is_quiet(), "回到静止");
 }

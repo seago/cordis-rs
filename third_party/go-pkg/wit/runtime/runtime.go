@@ -111,7 +111,9 @@ var preinitHeap [preinitHeapSize]byte
 var preinitUsed uintptr
 
 // preinitAlloc 在静态缓冲上做 bump 分配；不触碰 GC 与任何导入。
+//
 // go:nosplit：预初始化窗口内避免 morestack 机制（栈检查需要运行时）。
+//
 //go:nosplit
 func preinitAlloc(size, align uintptr) unsafe.Pointer {
 	if size == 0 {

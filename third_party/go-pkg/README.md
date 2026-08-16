@@ -13,3 +13,7 @@
   - 补 `Handle.TakeHandle`（wit-bindgen 0.60 生成代码所需，上游尚无）。
 
 许可：Apache-2.0（见 LICENSE）。
+
+注：`wit/types` 的 `future/stream/tuple/unit` 与 `wit/async` 为上游完整
+拷贝——当前 cordis 世界（`crates/cordis-wasm/wit/cordis.wit`）仅用
+`option`/`result`，其余留待更丰富类型的未来世界（未引用即不编译）。

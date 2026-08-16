@@ -49,9 +49,12 @@ jobs:
 
       # Go guest（PR #14 门禁 3/3 双语言验收）：标准 go → wasip1 核心模块
       # → 预览1 适配器组件化（tools/componentize + vendored 适配器）。
+      # gofmt 门禁（审查 nit1）：fork 与应用侧 Go 代码须 gofmt 干净
+      #（生成代码由 wit-bindgen --format 排好，天然通过）。
       - name: build wasm guest (Go)
         run: |
           go version
+          test -z "$(gofmt -l third_party/go-pkg examples/wasm-plugin-go)"
           examples/wasm-plugin-go/build.sh
 
       - name: cargo clippy
