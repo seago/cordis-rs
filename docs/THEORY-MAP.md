@@ -146,6 +146,8 @@
 | 2026-08-17 / PR #20 审查 | **修复（major1 + nit1-3，REVIEW-ef57804）**：major1 isolate 边界迁移补测（Local→Global、None→Global——裸键 realm ↔ 托管 realm）；nit1 loader 三处"isolate 变更走重建"陈旧表述同步（模块头/已知边界②/apply doc）；nit2 `collect_subtree_ids` 措辞修正（叶子 = 自身，分支 = 子树）；nit3 组分支注释（组 isolate 变更仍整棵重建——组无声明键，M2-PR3 边界） | Alg 7 | 修正（全部落实） | 已修复 |
 | 2026-08-17 / PR #21 | **M2-PR5：cordis-hmr——Algorithm 8/9/10 事务性热重载（§5.2.2）**：新 crate `cordis-hmr`——模块分类不动点（`classify`：stashed/externals 种子、自 stashed 向下传播、环默认拒绝）、过期条目检测（`detect`/`get_dependencies`：依赖树 ∩ accepted、declined 边界）、事务性重载（`Hmr::reload`：备份缓存 → 注册新模块 + revision 递增重建**仅过期条目** → 失败检测（加载错误 / L-Raise fiber 失败态）→ 回滚恢复旧组件）；`ModuleGraph` trait（`HashMapGraph` 数据驱动 + `WasmLeafGraph`——M1 wasm 插件仅导入宿主 context 接口故为叶子；cargo metadata / wit import 解析为生产化适配器，M2 边界）；`ModuleLoader` trait（wasm 重读文件 / native 编排方提供新版本）；`Loader::component_of`（备份用）。**门禁用例直证**：改代码保存即生效（stashed → 新版本生效、其他组件不重建状态保留）+ 两个回滚用例（加载失败回滚 / 组件运行失败（L-Raise）回滚——不进入半重载）。测试：hmr.rs 6（分类传播/externals/环、detect/declined 边界、重载成功 + 双回滚） | §5.2.2, Alg 8/9/10 | 完成（PR #21：HMR 三阶段 + 事务回滚） | 记录 |
 | 2026-08-17 / PR #22 | **M2-PR6：Alg 6 Proxy 访问层（处置② 落地）+ 处置⑥⑨ 评估收尾**——`Context::resolve`（Algorithm 6 直译：沿 fiber 链向上，首个 committed 视图绑定 key 的 fiber 授权（返回承诺视图下解析的绑定值）；声明未提交 → `AccessError::Inactive`（INACTIVE_ACCESS）；至 root 无声明 → `Undeclared`（UNDECLARED_ACCESS）——**读视图非裸 store**，Thm 63 语义；与 `Context::get`（裸 store、从不失败）互补）；`AccessError` 导出；**处置⑥ 评估**：命令式 Disposer 保留（语义由命令式测试保证，wasm 逆句柄化已对齐，纯函数形态关闭为记录）；**处置⑨ 评估**：保持通用 context + 符号级动态解析（论文要求的运行时动态中介），typed world 列为 DX 增强（关闭为记录）。测试：`tests/access.rs` 4（授权访问 / INACTIVE / UNDECLARED / 链上行父子） | §5.1.4, Alg 6 | 完成（PR #22：处置② 落地 + ⑥⑨ 评估收尾） | 记录 |
+| 2026-08-17 / PR #21 审查 | **修复（major1 + nit1-5，REVIEW-4c6e7fc）**：major1 **事务 panic 安全**——`Hmr::reload` 整个事务 `catch_unwind` 包裹：任何 panic（配置错误 = ProvisionClash/未知组件，`apply` 以 panic 表达）**先回滚再重抛**（panic = bug + 永不半重载）；nit1 回滚 revision+2 启发式注释；nit2 stale url 去重（多条目共享组件名）；nit3 失败检测仅限过期条目（非过期条目既有失败 fiber 不误判）；nit4 补测：空 stashed 空操作、供给冲突 panic 回滚直证（catch_unwind 断言 + 系统一致）、多条目共享 url；nit5 模块 doc 语义耦合注明。测试 hmr 9 | Alg 10 | 修正（全部落实） | 已修复 |
+| 2026-08-17 / PR #22 审查 | **修复（major1 + nit1-3，REVIEW-e8bd96e）**：major1 链上行路径**真实行使**（新测试：访问 fiber 无注入、祖先声明并已加载——原测试在子自身 committed 短路）；nit1 **realm 漂移适应记录**：committed 视图仅存 key→provider 不含 realm，`resolve` 经授权 fiber **当前** ρ 重读——Algorithm 7 重指派瞬态窗口可能漂移（THEORY-MAP 适应记录）；nit2 `AccessError` 补 Display/Error；nit3 TypeMismatch→Inactive 折损注释（typed world 时精确判别） | §5.1.4, Alg 6 | 修正（全部落实） | 已修复 |
 | 2026-08-17 / PR #19 审查 | **修复（major1 + nit1-7，REVIEW-24bfab5）**：major1 `intercept_clear` 语义定案——**不回退父（组）继承值**（扁平拷贝无父链；doc 修正 + loader 已知边界⑤ + 组子覆写再移除负向直证）；nit1 apply doc 改 `intercept_set_boxed`；nit2 typed `intercept_set` 注明预留定位；nit3 叶子重建分支标注阶段一兜底（防御性）；nit4 `instantiate_group` 复用 `annotated_ctx`；nit5 级联双注册注释（register 逆落派生 ctx 为孤儿、显式父效应为级联通道）；nit6 组内同供给替换测试；nit7 组分支防呆记录注释 | §5.2.1 | 修正（全部落实） | 已修复 |
 | 2026-08-17 / PR #20 审查 | **适应记录（公开差异）**：Algorithm 7 的 delimiter 机制（`δk` 标签继承判定 own）以 loader 树子树成员关系等价替代——可观察语义一致（"绑定是否属本条目"），机制不同；ρ 表拷贝继承（论文持久化结构共享）使 patch 需遍历子树 ctx——同步核心适配 | Alg 7 | 公开差异声明（机制等价替代） | 记录 |
 | 2026-08-17 / PR #17 审查 | **修复（nit1-9，REVIEW-32a913d）**：nit1 负向判别直证（非 FiberError panic → resume_unwind 重抛，`should_panic` 测试）；nit2/3 `FiberState` ζ 文档更新 + `Unloading.outcome` 死字段说明（ζ 直落 Inactive，卸载中间形态随 async）；nit4 wasm 桥接**供给纪律预检**（越界写不进入核心 set_dyn，catch_unwind 面收窄）+ 已知边界注释；nit5 `raise` 依赖 panic=unwind 注明；nit6 call_step 错误分类边界注释；nit7 loader 失败 fiber 静默加载记录（M2 后续任务）；nit8 PLAN M2 行标注"首批任务前置、HMR 主目标未开始"；nit9 失败卸载路径测试（依赖者停用、绑定全清、静止） | §4.3.4 | 修正（全部落实） | 已修复 |
@@ -243,3 +245,12 @@
 | ⑩ | 双向写回（组件→条目方向） | M3 评估 |
 | ⑪ | 组条目 isolate 注解 | M3 或 typed world 时 |
 | ⑫ | cargo metadata / wit 模块图适配器 | M3 或按需 |
+
+### Algorithm 6 适应记录（REVIEW-e8bd96e nit1）
+
+`resolve` 的授权读取经授权 fiber 的**当前** `ρ` 解析 realm（committed 视图
+只存 `key → provider`、不含 realm 快照）——Algorithm 7 重指派（isolate
+变更）的瞬态窗口内，授权 fiber 的 ρ 已更新而绑定仍在迁移中，`resolve`
+可能读到旧 realm 的绑定或 NotBound（映射 `Inactive`）。同步引擎中重指派
+与访问不可并发（单线程、调用链内原子），漂移仅影响"重指派进行中的
+同步调用链"——记录为已知边界（精确判别留待 typed world / 快照 realm）。
