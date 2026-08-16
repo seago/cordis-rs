@@ -192,7 +192,7 @@ pub enum LifecycleState {
 | 论文结论 | 测试手段 |
 |---|---|
 | Thm 7/16：LIFO 恢复、声音不变量 | 单元测试（effect 序列 + 逆序恢复） |
-| Cor 21：独立效应乱序撤销 | 单元测试 |
+| Cor 21：独立效应乱序撤销 | 单元测试（任意排列撤销回到 γ₀；PR #9 已落地） |
 | Thm 63：依赖者先于提供者停用、teardown 期间依赖仍可读 | 集成测试（3 组件拓扑，断言撤离顺序） |
 | Thm 64：单个转换不跨两次解析 | 集成测试（转换中途改配置） |
 | Thm 66：Progress、撤离 guard 不死锁 | proptest + loom（随机拓扑） |
@@ -291,6 +291,7 @@ proptest! {
 6. tests：Thm 63/66/73 property suites（**在写更多功能前锁死正确性**）
 7. native + macro + 示例 `hello-plugin`
 8. loader 最小协调（id/config/disabled 三字段）
+9. Cor 21 独立效应乱序撤销测试（任意排列回到 γ₀；§3.1 收尾）
 
 ## 10. 风险清单与对策
 
@@ -307,7 +308,7 @@ proptest! {
 
 | 里程碑 | 状态 | 门禁 |
 |---|---|---|
-| M0 原生闭环 | **进行中**（PR #1–8 已完成：骨架、核心类型 + 参考解释器、可逆效应引擎、共效应操作 + 通知分类、fiber 生命周期状态机、oracle × 引擎元理论验证、DX 层 + hello-plugin 示例、**loader 最小协调（id/config/disabled + 增量幂等）**） | 定理测试全绿 + 走查无未解释偏差 |
+| M0 原生闭环 | **进行中**（PR #1–9 已完成：骨架、核心类型 + 参考解释器、可逆效应引擎、共效应操作 + 通知分类、fiber 生命周期状态机、oracle × 引擎元理论验证、DX 层 + hello-plugin 示例、loader 最小协调（id/config/disabled + 增量幂等）、**Cor 21 独立效应乱序撤销测试**） | 定理测试全绿 + 走查无未解释偏差 |
 | M1 Wasm 后端 | 未开始 | — |
 | M2 加载器 + HMR | 未开始 | — |
 | M3 案例验证 | 未开始 | — |

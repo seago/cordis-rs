@@ -39,7 +39,7 @@
 | 定理 / 结论 | 测试位置 | 状态 |
 |---|---|---|
 | Thm 7 / Thm 16：LIFO 恢复、声音不变量 | `effect::tests` / `context::tests`（`execute_runs_inverses_in_lifo`、`thm16_*`、`accumulator_reverts_all_effects_lifo`、**`nested_effect_reverts_in_application_order`**） | 完成（PR #3；嵌套顺序审查后修复） |
-| Cor 21：独立效应乱序撤销 | | 未开始（PR #3 后续，§3.3.2 就绪后） |
+| Cor 21：独立效应乱序撤销 | `context::tests::cor21_independent_effects_revert_in_any_permutation`（4 排列：LIFO/正序/两交错乱序，每步断言 Thm 20(1) 中间态） | 完成（PR #9：不同键 `set` 满足 Def 19 独立性——变换可交换、逆互不干扰） |
 | Thm 63：依赖者先停、teardown 可读依赖 | `runtime::tests::withdrawal_cascade_disposes_dependents_first`（teardown 检查逆） | 真实引擎已验（PR #5）；property 化 PR #6 |
 | Thm 64：单转换不跨两次解析 | `runtime::tests::target_change_mid_reload_chains_unload`（guard 步界中断 + 惯性链） | 真实引擎已验（PR #5） |
 | Thm 66：Progress、guard 不死锁 | `interp::tests::drive_*`（oracle 自检）+ `tests/property.rs`（每个动作后 `is_quiet` 断言） | oracle 已验（PR #2）；真实引擎已验（PR #6） |
@@ -100,6 +100,7 @@
 | 2026-08-16 / PR #8 审查 | **修复（m2）**：`HasChildren` panic 消息如实化（"条目下存在子代 fiber……叶子约束"）+ 模块文档注明**叶子约束**（不得经 `Loader::fiber(id)?.ctx()` 实例化子组件，嵌套随 group/include 在 M2 落地） | §4.2（`remove_fiber` 前提） | 修正（消息 + 文档） | 已修复 |
 | 2026-08-16 / PR #8 审查 | **修复（m3）**：补 `disabled_period_changes_take_effect_on_reenable`——disabled 期间 component/revision 变更不落记录（保持旧值），enabled 后以新 entry 实例化（最终一致）——固化路径防未来重构破坏 | §5.2.1 | 修正（测试固化） | 已修复 |
 | 2026-08-16 / PR #8 审查 | `desired` 重复 id：last-wins（后项覆盖，可能浪费一次实例化）——已文档化，调用方应保证唯一 | — | 实现说明 | 记录 |
+| 2026-08-16 / PR #9 | Cor 21 落地：`cor21_independent_effects_revert_in_any_permutation`——不同键 `set` 作为两两独立效应族（Def 19：变换只动自己的键→可交换；逆只撤自己的键→互不干扰），4 种排列（LIFO/正序/两交错乱序）撤销均回到 γ₀，每步断言 Thm 20(1) 中间态（只撤自己的贡献）；§3.1 效应论收尾 | Cor 21, Thm 20, Def 19 | 完成（纯测试固化；LIFO 仅 Thm 16 无需独立性，其余排列由独立性买来） | 记录 |
 
 ## 里程碑走查记录
 
