@@ -34,6 +34,15 @@ use crate::runtime::{RegistryError, Runtime};
 use crate::store::{Store, StoreError};
 use crate::symbol::Symbol;
 
+/// 上下文访问错误（Algorithm 6，M2-PR6 处置②）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccessError {
+    /// `key ∈ inject`（声明）但该 fiber 未提交视图（未加载）——`INACTIVE_ACCESS`。
+    Inactive,
+    /// 沿 fiber 链至 root 无任何声明——`UNDECLARED_ACCESS`。
+    Undeclared,
+}
+
 /// 拦截元数据（Def 30 的 `ℳ k`，带幺半群 `⊕k`）。
 ///
 /// 实现须给出右偏合并：`merge(existing, new)` 中 `new`（后拦截的元数据）
@@ -142,6 +151,53 @@ impl Context {
         Ok(Ref::map(store, |s| {
             s.get::<K>(realm).expect("checked above")
         }))
+    }
+
+    /// **Algorithm 6：Proxy 中介的上下文访问（M2-PR6，处置②）**——沿
+    /// fiber 链**向上**解析：首个 committed 视图绑定 `key` 的 fiber 授权
+    /// 该访问（返回其承诺视图下解析的绑定值）；遇到声明 `key` 而未提交
+    /// 的 fiber → [`AccessError::Inactive`]（未加载）；到达 root 无声明 →
+    /// [`AccessError::Undeclared`]。
+    ///
+    /// **读视图（committed）而非裸 store**——Thm 63 依赖此语义（依赖
+    /// 消失触发 teardown 的组件在承诺视图内仍可读该依赖）；与
+    /// [`Context::get`]（裸 store 查找、从不失败）互补。
+    ///
+    /// 链上行：`fiber → fiber.parent → … → root`（[`Fiber::parent`]）。
+    pub fn resolve<K: Key>(self: &Rc<Self>) -> Result<Ref<'_, K::Value>, AccessError> {
+        let key = Symbol::intern(K::SYMBOL);
+        let mut fid = self.fiber;
+        loop {
+            let Some(current) = fid else {
+                return Err(AccessError::Undeclared); // root
+            };
+            let fiber = self
+                .runtime
+                .fibers
+                .borrow()
+                .get(&current)
+                .cloned()
+                .ok_or(AccessError::Undeclared)?; // fiber 已移除
+            let committed = fiber.committed.borrow().clone();
+            if committed
+                .as_ref()
+                .is_some_and(|view| view.contains_key(&key))
+            {
+                // 授权：经该 fiber 的 ctx 解析 realm，读绑定——`Ref` 经
+                // `self`（调用方持有的 ctx）借用 store，避免本地 fiber
+                // 引用逃逸。
+                let realm = fiber.ctx.resolve_realm(key);
+                let store = self.runtime.store.borrow();
+                store.get::<K>(realm).map_err(|_| AccessError::Inactive)?;
+                return Ok(Ref::map(store, |s| {
+                    s.get::<K>(realm).expect("checked above")
+                }));
+            }
+            if fiber.inject.contains(key) {
+                return Err(AccessError::Inactive); // 声明未提交
+            }
+            fid = fiber.parent;
+        }
     }
 
     /// `set(k, v)`（Def 29 / Algorithm 2）：绑定于 `ρ(k)` 的 realm，**可逆**

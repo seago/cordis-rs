@@ -31,7 +31,7 @@ pub mod store;
 pub mod symbol;
 
 pub use component::Component;
-pub use context::{Context, InterceptMeta};
+pub use context::{AccessError, Context, InterceptMeta};
 pub use effect::{Disposer, EffectIter, Step, execute, once};
 pub use fiber::{Fiber, FiberError, FiberId, FiberState, View};
 pub use key::Key;
