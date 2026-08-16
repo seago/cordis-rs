@@ -19,7 +19,7 @@
 | `isolate` | Def 28/29 | `Context::isolate`（派生实现，Def 27） | 单元 | 完成（PR #4） |
 | `intercept` | Def 30/31 | `Context::intercept` / `intercept_of`（`InterceptMeta` 右偏合并） | 单元 | 完成（PR #4） |
 | `notify`（分类通知） | Def 26, Alg 3 | `notify::classify` + `Context::notify` → `Runtime::notify_fibers`（fiber 反应器内置） | 单元 | 完成（PR #4 分类 + PR #5 fiber 反应器） |
-| 组件 `(d, p, e)` | Def 43 | `cordis_core::component::Component` | 单元 | 完成（PR #5） |
+| 组件 `(d, p, e)` | Def 43 | `cordis_core::component::Component` + `cordis_macro::component`（声明式 DX） | 单元 + 示例 | 完成（PR #5 引擎 / PR #7 DX 层） |
 | fiber `⟨d, p, e, π, σ, τ, θ⟩` | Def 44 | `cordis_core::fiber::Fiber`（`σ` 由绑定 provider + ctx 累加器隐含） | 单元 | 完成（PR #5） |
 | `n: 𝔑`（fiber 名） | Def 44/45 | `cordis_core::fiber::FiberId` | 单元 | 完成（PR #2/#5） |
 | `dom(𝐹𝛾)`（registry） | Def 45 | `runtime::Runtime::fibers`（`Runtime::fiber`/`len`） | 单元 | 生产版完成（PR #5）；oracle 版仍为 `interp` |
@@ -86,6 +86,8 @@
 | 2026-08-16 / PR #6 审查 | **修复（m1）**：验证强度与文档一致——`proptest_config` 固定 2000 用例（原默认 256，文档声称 2000 不符） | — | 修正（随仓库固化） | 已修复 |
 | 2026-08-16 / PR #6 审查 | **修复（m2）**：动作空间补 parent 维度——oracle 建模 **Def 47 注册**（`Fiber.registered`：父卸载时注册子代被 O-Retire，interp `unload` 扩展 + 测试重构）；引擎侧经 `Fiber::ctx()` 在父 fiber 的 ctx 上实例化；`RegistryError` 补 `UnknownParent`（O-Insert π 前提）——`HasChildren` 移除前提与父级联退役进入随机覆盖 | Def 47, §4.2 | 修正（oracle 建模扩展 + harness parent 维度） | 已修复 |
 | 2026-08-16 / PR #6 审查 | `Fiber::ctx` 公开访问器（`fiber.ctx`，Algorithm 4 第 8 行的文档化实体）——harness 父级实例化所需 | Def 44 | 实现说明 | 已修复 |
+| 2026-08-16 / PR #7 | DX 层落地：`cordis-macro` 的 `#[component(inject=[..], provide=[..])]`（生成 `inject`/`provide`，`apply` 委托 `apply_impl`）；`cordis` 门面 re-export 全部 API + 宏；`cordis-native` 提供 `with_ctx` 单步效应辅助 | Def 43 | 完成（宏生成代码引用 `::cordis::` 路径，依赖门面） | 记录 |
+| 2026-08-16 / PR #7 | M0 验收示例 `examples/hello-plugin`：server（提供）+ auth（注入），激活顺序 → 退役级联 → 移除后重连（auth 自动重连新 server）——全部断言通过 | §3.2.2, Thm 63 | 完成（端到端验证） | 记录 |
 
 ## 里程碑走查记录
 

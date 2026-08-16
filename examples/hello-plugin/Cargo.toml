@@ -1,0 +1,15 @@
+[package]
+name = "hello-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Cordis 原生组件端到端示例：server + auth（激活 → 级联卸载 → 重连）"
+
+[lints]
+workspace = true
+
+[dependencies]
+cordis = { path = "../../crates/cordis" }
+cordis-native = { path = "../../crates/cordis-native" }

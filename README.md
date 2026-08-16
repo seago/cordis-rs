@@ -6,4 +6,8 @@
 - 论文符号 ↔ 代码映射与偏差记录：[docs/THEORY-MAP.md](docs/THEORY-MAP.md)
 - 论文原文：`paper/paper.pdf`
 
-运行示例见 `examples/`（随里程碑填充）。
+## 示例
+
+```sh
+cargo run -p hello-plugin   # server + auth：激活 → 级联卸载 → 重连（M0 验收）
+```

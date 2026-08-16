@@ -5,10 +5,15 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Cordis 过程宏：#[component]/#[inject]/#[provide]（DX 层，M0 后半）"
+description = "Cordis 过程宏：#[component] 生成 Component 实现（DX 层，PLAN §4.3）"
 
 [lints]
 workspace = true
 
+[lib]
+proc-macro = true
+
 [dependencies]
-cordis-core = { path = "../cordis-core" }
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

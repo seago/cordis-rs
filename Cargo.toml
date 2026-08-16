@@ -8,6 +8,7 @@ members = [
     "crates/cordis-macro",
     "crates/cordis-native",
     "crates/cordis-wasm",
+    "examples/hello-plugin",
 ]
 
 [workspace.package]

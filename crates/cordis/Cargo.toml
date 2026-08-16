@@ -12,3 +12,4 @@ workspace = true
 
 [dependencies]
 cordis-core = { path = "../cordis-core" }
+cordis-macro = { path = "../cordis-macro" }

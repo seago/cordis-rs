@@ -40,6 +40,7 @@ name = "cordis"
 version = "0.1.0"
 dependencies = [
  "cordis-core",
+ "cordis-macro",
 ]
 
 [[package]]
@@ -67,7 +68,9 @@ dependencies = [
 name = "cordis-macro"
 version = "0.1.0"
 dependencies = [
- "cordis-core",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -127,6 +130,14 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
+]
+
+[[package]]
+name = "hello-plugin"
+version = "0.1.0"
+dependencies = [
+ "cordis",
+ "cordis-native",
 ]
 
 [[package]]
