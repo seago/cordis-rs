@@ -20,3 +20,6 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 .DS_Store
+
+# DSH 本地状态目录（harness 生成，不入库）
+.dsh-repo/
