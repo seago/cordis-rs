@@ -123,6 +123,7 @@
 | 2026-08-16 / M0 走查 | **修复（F4）**：Thm 73(1) canonical form 补测 `thm73_canonical_form_static_assembly`——动态历史（乱序注册+退役+移除+重装）与静态装配（按 ⊲ 序一次性装入）静止态按 (inject, provide) 签名比较一致（up to names）——"动态历史无痕迹 = 静态装配"招牌承诺落地 | Thm 73(1), §4.4.5, Lemma 56 | 修正（含测试） | 已修复 |
 | 2026-08-16 / M0 走查 | **修复（PR #9 审查 nit1）**：Cor 21 测试由 4 种代表排列强化为**穷举全部 24 种排列**（字典序迭代器） | Cor 21 | 修正（测试强化） | 已修复 |
 | 2026-08-16 / M0 审查 | **修复（REVIEW-M0 风险提示）**：`Context::intercept`/`intercept_of` 为公开 API 但语义半成品（`get` 不消费 `ι`）——rustdoc 补**半成品警示**（"读路径消费由 M1 落地，此前按'拦截已生效'使用将静默无效果"） | Def 30/31 | 修正（rustdoc 警示） | 已修复 |
+| 2026-08-16 / PR #10 | Wasm 后端起步（M1）：wit 世界 v1（`cordis-wasm/wit/cordis.wit`：import context（get/set + `inverse` 资源句柄化）+ export plugin（`component` 资源 = Def 43 的 (d,p,e)、`task` 资源 = Def 51 𝔈iter 跨边界））；工具链定型——guest 以 **wasm32-wasip2** target 编译（rustc 直接产出组件二进制）+ **no_std + alloc**（能力面 = 仅 context 接口，论文 §6.3 import 面即能力面）；宿主 `Host` 实现 context/inverse/WasiView（wasip2 标准库引用 WASI p2，经 `wasmtime_wasi::p2` 提供）；端到端测试 `tests/load_guest.rs`（constructor → inject/provide 核对 → start/step 激活绑定 → 逆 run 撤销）；guest 示例 `examples/wasm-plugin-rust`（db 提供者）为独立 crate（wit-bindgen ABI 胶水用 unsafe，与 workspace `unsafe_code=deny` 冲突） | Def 8/43/51, §6.3, Alg 4/5 | 完成（PR #10：加载/驱动原语闭环；逆句柄表） | 记录 |
 
 ## 里程碑走查记录
 
