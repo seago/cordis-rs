@@ -324,18 +324,20 @@ impl WasmTaskIter {
         let mut store = state.store.borrow_mut();
         let mirror = &mut store.data_mut().bindings;
         for key in &self.inject {
+            // 审查 nit1（REVIEW-54a9b08）：单次 downcast 判型 + 取值。
+            // 值为另一 wasm 组件的 wit `Value` 装箱时同步；原生组件
+            // 提供的值（不同装箱类型）不同步——镜像无此键（get 返回
+            // none），跨类型值翻译 M1 不支持。
             match self.ctx.get_dyn(*key) {
-                // 值是 wasm wit Value 装箱（另一 wasm 组件提供）。
-                Some(value) if value.is::<Value>() => {
-                    let value = value
-                        .downcast_ref::<Value>()
-                        .expect("is::<Value> 已检查")
-                        .clone();
-                    mirror.insert(key.as_str().to_string(), value);
-                }
-                // 原生组件提供的值（不同装箱类型）：M1 不支持跨类型
-                // 值翻译——镜像无此键（get 返回 none）。
-                _ => {
+                Some(value) => match value.downcast_ref::<Value>() {
+                    Some(v) => {
+                        mirror.insert(key.as_str().to_string(), v.clone());
+                    }
+                    None => {
+                        mirror.remove(key.as_str());
+                    }
+                },
+                None => {
                     mirror.remove(key.as_str());
                 }
             }
