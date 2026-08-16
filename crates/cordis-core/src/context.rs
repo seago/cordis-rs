@@ -469,10 +469,38 @@ mod tests {
         // 在 δₙ 处以 {1..n} 的任意排列应用这 n 个逆都回到 γ₀。
         // LIFO 只是其中一种排列（Thm 16 无需独立性假设）；
         // 独立性（Def 19）买来的是**其余所有排列**。
-        assert_permutation_reverts(&[4, 3, 2, 1]); // LIFO（Thm 16 的排列）
-        assert_permutation_reverts(&[1, 2, 3, 4]); // 正序（非 LIFO）
-        assert_permutation_reverts(&[3, 1, 4, 2]); // 交错乱序
-        assert_permutation_reverts(&[2, 4, 1, 3]); // 另一交错乱序
+        // 审查 nit 1 强化：穷举全部 4! = 24 种排列（而非代表选取）。
+        let mut order = [1usize, 2, 3, 4];
+        let mut seen = 0;
+        loop {
+            assert_permutation_reverts(&order);
+            seen += 1;
+            if !next_permutation(&mut order) {
+                break;
+            }
+        }
+        assert_eq!(seen, 24, "4! = 24 种排列全部验证");
+    }
+
+    /// 字典序下一个排列（就地改写）；已为最大排列时返回 `false`。
+    fn next_permutation(order: &mut [usize; 4]) -> bool {
+        // 从右向左找第一个升序对（a[i] < a[i+1]）。
+        let mut i = order.len() - 1;
+        while i > 0 && order[i - 1] >= order[i] {
+            i -= 1;
+        }
+        if i == 0 {
+            return false;
+        }
+        // 从右向左找第一个大于 order[i-1] 的元素并交换。
+        let mut j = order.len() - 1;
+        while order[j] <= order[i - 1] {
+            j -= 1;
+        }
+        order.swap(i - 1, j);
+        // 反转后缀 [i..] 使之为最小。
+        order[i..].reverse();
+        true
     }
 
     #[test]

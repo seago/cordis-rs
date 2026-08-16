@@ -30,8 +30,8 @@
 
 use cordis_core::interp::{Component as InterpComponent, InterpState};
 use cordis_core::{
-    Component, Context, Disposer, EffectIter, FiberId, Key, KeySet, RegistryError, Runtime, Step,
-    Symbol,
+    Component, Context, Disposer, EffectIter, FiberId, FiberState, Key, KeySet, RegistryError,
+    Runtime, Step, Symbol,
 };
 use proptest::prelude::*;
 use std::collections::BTreeSet;
@@ -278,4 +278,101 @@ proptest! {
             h.compare(&format!("step {i}: {action:?}"));
         }
     }
+}
+
+/// Thm 73(1)（canonical form）：动态历史的静止态 == 静态装配的静止态。
+///
+/// 组件集合 `{A: ∅→k0, B: k0→k1, C: k0,k1→∅}`（⊲ 序 A→B→C）。
+/// - **动态**：乱序注册（C、B 先 Inactive，A 出现后级联激活）→ 退役 A
+///   （B、C 级联停用）→ 重装 A′（B、C 重新激活）——交错历史后静止；
+/// - **canonical**：同一编排步骤，A 中每个 fiber 一个 episode、按 ⊲ 序
+///   （A→B→C）一次性装入，无卸载。
+///
+/// 断言两者活跃集一致——"动态历史无痕迹 = 静态装配"（§4.4.5 招牌承诺）。
+#[test]
+fn thm73_canonical_form_static_assembly() {
+    let comp = |inject: &[&str], provide: &[&str]| -> Rc<dyn Component> {
+        Rc::new(CanonicalComponent {
+            inject: inject.iter().map(|s| Symbol::intern(s)).collect(),
+            provide: provide.iter().map(|s| Symbol::intern(s)).collect(),
+        })
+    };
+
+    // ── 动态历史（乱序注册 + 退役 + 重装）────────────────────────────
+    let rt = Rc::new(Runtime::new());
+    let root = rt.context();
+    let c = root
+        .use_component(comp(&["k0", "k1"], &[]), Rc::new(()))
+        .unwrap();
+    let b = root
+        .use_component(comp(&["k0"], &["k1"]), Rc::new(()))
+        .unwrap();
+    assert!(matches!(&*c.state(), FiberState::Inactive(_)), "依赖未满足");
+    assert!(matches!(&*b.state(), FiberState::Inactive(_)), "依赖未满足");
+    let a = root.use_component(comp(&[], &["k0"]), Rc::new(())).unwrap();
+    assert!(matches!(&*a.state(), FiberState::Active { .. }));
+    assert!(
+        matches!(&*b.state(), FiberState::Active { .. }),
+        "A 激活 → B 级联"
+    );
+    assert!(
+        matches!(&*c.state(), FiberState::Active { .. }),
+        "B 激活 → C 级联"
+    );
+
+    // 退役 A：B、C 级联停用；移除 A（退役 fiber 仍占供给名，O-Insert 语义）
+    // 后重装 A′：B、C 重新激活（交错历史）。
+    a.retire();
+    assert!(
+        matches!(&*b.state(), FiberState::Inactive(_)),
+        "A 退役 → B 停用"
+    );
+    rt.remove_fiber(a.id()).expect("退役且 Inactive 后可移除");
+    let a2 = root.use_component(comp(&[], &["k0"]), Rc::new(())).unwrap();
+    assert!(matches!(&*a2.state(), FiberState::Active { .. }));
+    assert!(
+        matches!(&*b.state(), FiberState::Active { .. }),
+        "A′ 激活 → B 重连"
+    );
+    assert!(
+        matches!(&*c.state(), FiberState::Active { .. }),
+        "B 激活 → C 重连"
+    );
+    // ── canonical：按 ⊲ 序（A→B→C）一次性装入，无卸载 ────────────────
+    let rt2 = Rc::new(Runtime::new());
+    let root2 = rt2.context();
+    let _a = root2
+        .use_component(comp(&[], &["k0"]), Rc::new(()))
+        .unwrap();
+    let _b = root2
+        .use_component(comp(&["k0"], &["k1"]), Rc::new(()))
+        .unwrap();
+    let _c = root2
+        .use_component(comp(&["k0", "k1"], &[]), Rc::new(()))
+        .unwrap();
+
+    // Thm 73(1) 的 "up to the names"：fiber id 是绝对名字（绝不复用，
+    // 动态历史的 A′ ≠ canonical 的 A），按每个活跃 fiber 的
+    // (inject, provide) 签名比较安装集（§4.4.5、Lemma 56 renaming）。
+    let signature = |rt: &Runtime| -> BTreeSet<(Vec<Symbol>, Vec<Symbol>)> {
+        rt.active_fibers()
+            .into_iter()
+            .map(|id| {
+                let f = rt.fiber(id).expect("活跃集内的 fiber 必在 registry");
+                let mut inject: Vec<Symbol> = f.inject().iter().collect();
+                let mut provide: Vec<Symbol> = f.provide().iter().collect();
+                inject.sort();
+                provide.sort();
+                (inject, provide)
+            })
+            .collect()
+    };
+    let dyn_sig = signature(&rt);
+    let canon_sig = signature(&rt2);
+
+    assert_eq!(dyn_sig.len(), 3, "动态历史静止态含 A′/B/C");
+    assert_eq!(
+        dyn_sig, canon_sig,
+        "Thm 73(1)：动态历史无痕迹 = 静态装配（安装集一致，up to names）"
+    );
 }
