@@ -30,6 +30,12 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
+      # 审查 B1（REVIEW-73314ba）：wasm guest 是独立 crate（非 workspace
+      # 成员、独立 target 目录、rust-cache 不覆盖）——必须在 cargo test
+      # **之前**构建，否则 cordis-wasm 的加载测试在干净环境必然失败。
+      - name: build wasm guest (M1)
+        run: cargo build --manifest-path examples/wasm-plugin-rust/Cargo.toml --target wasm32-wasip2
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -39,8 +45,3 @@ jobs:
       # 审查 m2：M0 验收示例的端到端断言纳入门禁（cargo test 只编译不运行 bin）。
       - name: run hello-plugin (M0 验收)
         run: cargo run --quiet -p hello-plugin
-
-      # M1：先构建 wasm guest 组件（独立 crate，非 workspace 成员），
-      # 供 cordis-wasm 的加载测试使用（tests/load_guest.rs 按约定路径查找）。
-      - name: build wasm guest (M1)
-        run: cargo build --manifest-path examples/wasm-plugin-rust/Cargo.toml --target wasm32-wasip2

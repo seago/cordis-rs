@@ -191,29 +191,32 @@ impl Context {
         }))
     }
 
-    /// 符号级动态 `set`（wasm 桥接入口，ADR-0004 值语义）：在 `realm` 处
-    /// 绑定**已装箱**的值（跨边界值类型由 wit 世界统一，见
-    /// `cordis_wasm`）。语义与 [`Context::set`] 一致（Def 43/48 纪律、
-    /// notify、逆 = 撤销绑定），仅值类型擦除。
+    /// 符号级动态 `set`（wasm 桥接入口，ADR-0004 值语义）：在键 `key`
+    /// 处绑定**已装箱**的值（跨边界值类型由 wit 世界统一，见
+    /// `cordis_wasm`）。语义与 [`Context::set`] **完全对称**（审查
+    /// REVIEW-2a7a686 m1/m2）——内部经 `resolve_realm` 解析目标 realm
+    /// （隔离语义由核心承担），Def 43/48 纪律按**键**判定（`provide`
+    /// 声明的是键符号）；notify、逆 = 撤销绑定与 typed 版本一致，仅
+    /// 值类型擦除。
     ///
     /// 类型纪律：同一 realm 的绑定值类型由调用方约定（wasm 组件经桥接
     /// 使用统一的外部值类型）；下游以不匹配的类型读取报 `TypeMismatch`。
     pub fn set_dyn(
         self: &Rc<Self>,
-        realm: Symbol,
+        key: Symbol,
         value: Box<dyn Any + Send + Sync>,
     ) -> Result<Disposer, StoreError> {
-        // Def 43/48 纪律：组件只写自己声明的供给（供给按 realm 判定——
-        // 声明即键符号，跨边界等价）。
+        let realm = self.resolve_realm(key);
+        // Def 43/48 纪律：组件只写自己声明的供给（按键判定，同 `set`）。
         if let Some(fid) = self.fiber {
             let allowed = self
                 .runtime
                 .fibers
                 .borrow()
                 .get(&fid)
-                .is_some_and(|f| f.provide.contains(realm));
+                .is_some_and(|f| f.provide.contains(key));
             if !allowed {
-                panic!("组件 {fid:?} 越界写入未声明的 realm {realm}（Def 43/48 纪律）");
+                panic!("组件 {fid:?} 越界写入未声明的键 {key}（Def 43/48 纪律）");
             }
         }
         if self.runtime.store.borrow().contains(realm) {

@@ -81,7 +81,7 @@ type CoreInverse = (String, Box<dyn FnOnce()>);
 struct PendingSet {
     /// 逆句柄 rep（guest 持同一句柄，宿主撤销时按 rep 找核心逆）。
     rep: u32,
-    /// 键（= realm 符号名）。
+    /// 键（realm 解析由核心 `set_dyn` 承担，审查 m2）。
     key: String,
     /// 值（wit 跨边界值）。
     value: Value,
@@ -91,6 +91,10 @@ struct PendingSet {
 ///
 /// `Store<T>` 的 `T`（`Send`：`WasiView` 约束）。实现 `context`
 /// 接口（get/set）与 `inverse` 资源（run/drop）。
+///
+/// **rep 空间单调（审查 m3，REVIEW-2a7a686）**：`next_rep` 与
+/// [`InstanceState::core_inverses`] 槽位只增不减（drop 为 no-op）——
+/// 已知边界（与组件生命周期内 set 次数同阶；M2 提供回收）。
 pub struct Host {
     /// guest 在 step 期间累积的绑定请求（迭代器 step 后转发并清空）。
     pending: Vec<PendingSet>,
@@ -138,10 +142,21 @@ impl WasiView for Host {
 }
 
 impl HostInverse for Host {
-    /// 宿主侧逆执行入口——**协议上不被调用**：核心逆（非 `Send`）存放
-    /// 在 [`InstanceState::core_inverses`]，由迭代器产出的逆闭包执行；
-    /// 此实现仅作防御（guest 主动调 `run` 时无核心访问，no-op）。
-    fn run(&mut self, _self_: Resource<Inverse>) {}
+    /// 宿主侧逆执行入口——**协议上不被调用**（审查 m4，
+    /// REVIEW-2a7a686）：核心逆（非 `Send`）存放在
+    /// [`InstanceState::core_inverses`]，由迭代器产出的逆闭包经 rep
+    /// 执行（unbind + notify + 镜像清理）；撤销**只能由宿主驱动**
+    /// （组件卸载路径），guest 调用 `inverse.run` 为协议违反——
+    /// 以 panic 显式失败（panic = bug），不做静默 no-op。
+    fn run(&mut self, _self_: Resource<Inverse>) {
+        panic!(
+            "inverse.run 由宿主驱动撤销（组件卸载路径）——guest 调用违反协议（Def 8 逆的撤销归宿主）"
+        );
+    }
+    /// drop（m3，REVIEW-2a7a686）：防御性退化——核心逆在
+    /// [`InstanceState::core_inverses`]（`Host` 拿不到），槽位与
+    /// `next_rep` 空间**单调增长**属已知边界（每个组件的 rep 数量
+    /// 与其生命周期内 set 次数同阶，M1 可接受；M2 提供回收）。
     fn drop(&mut self, _rep: Resource<Inverse>) -> wasmtime::Result<()> {
         Ok(())
     }
@@ -295,9 +310,11 @@ impl WasmTaskIter {
         };
         let mut inverses = Vec::new();
         for set in pending {
-            let realm = Symbol::intern(&set.key);
+            // 审查 m2（REVIEW-2a7a686）：传**键**给 `set_dyn`——ρ 解析
+            // （isolate 映射）由核心承担，与 typed `set` 对称。
+            let key = Symbol::intern(&set.key);
             let value: Box<dyn std::any::Any + Send + Sync> = Box::new(set.value);
-            let disposer = self.ctx.set_dyn(realm, value).unwrap_or_else(|err| {
+            let disposer = self.ctx.set_dyn(key, value).unwrap_or_else(|err| {
                 panic!("wasm 组件绑定 {} 失败：{err:?}（配置错误）", set.key)
             });
             inverses.push((set.rep, (set.key, disposer)));

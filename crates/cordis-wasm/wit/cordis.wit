@@ -10,6 +10,9 @@ interface context {
         blob(list<u8>),
     }
     resource inverse {
+        /// 撤销绑定（Def 8 的逆）。**宿主专用（审查 m4）**：撤销由宿主
+        /// 在组件卸载路径驱动（经 rep 表执行核心逆）；guest **不得调用**
+        /// ——guest 侧调用为协议违反（宿主 panic = bug）。
         run: func();
     }
     get: func(key: string) -> option<value>;
