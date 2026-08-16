@@ -145,12 +145,12 @@
 | 里程碑 | 日期 | 覆盖章节 | 结论 | 未决偏差 |
 |---|---|---|---|---|
 | M0 原生闭环 | 2026-08-16 | §3.1–3.3、§4.1–4.4、§5.1（§5.1.1–5.1.3 主体；§5.1.4 见未决） | **门禁判定：通过（含处置清单）**——核心演算语义逐规则一致：可逆效应（execute/LIFO/armed/累加器）、共效应（满足谓词/三类分类/realm 键控/isolate 派生/notify 快照）、fiber 演算（组件三元组/七元组/registry 派生量/target/静止/O-Insert-Retire-Remove/L-Reload-Unload/L-Leave/惯性/步界中断）均有测试闭环（Thm 7/16/21/63/64/66/73/Cor 62 + oracle×引擎 2000 用例 + Cor 21 穷举 24 排列）；**本次走查修正**：Thm 73(1) canonical form 补测、Cor 21 全排列强化、3 处表述失准更正（Alg 1 第 17 行 dispose 组合时机、classify 衔接留白、Thm 63/64 表述）、映射表补 `Runtime::satisfied`（σ⊧d 与 γ⊧d=σγ⊧d 语义区分） | 处置清单（下里程碑首批任务）：① interception provider 函数形态（Def 30/31，实现缺口）② §5.1.4 Proxy 访问层（Alg 6，实现缺口）③ Thm 59/61 直接测试 ④ Thm 66 定量上界 `(K+4)(V+1)` 断言 ⑤ L-Raise 落地时 `is_quiet` 补 ζ 析取 ⑥ 命令式 Disposer 结构（wasm 句柄化时按论文形态对齐） |
-| M1 Wasm 后端 | 2026-08-17 | §6.2–6.4 | **门禁判定：通过（含处置清单）**——逐节对照无未解释偏差（详见下方「M1 Wasm 后端走查记录」）：§6.2 排他绑定 = O-Insert 供给不相交检查（`ProvisionClash`）+ loader 两阶段 apply（同键替换单次完成）；broker 形态模型可表达（注册 = 可逆效应）但无示例；滚动更新/跨进程为 M2/M3 场景。§6.3 能力访问控制 = wasm 能力面（import 面）+ 镜像仅含 inject 键（get 未声明键 = None，结构性强制）+ `set_dyn` Def 43/48 纪律；沙箱 = wasmtime SFI + trap 捕获宿主存活（门禁 2/3 实测）；拦截求值形态仍为缺口（承 M0 清单①）。§6.4 时间维度 = 逆句柄化 + Wasmtime 原生 embedder 丢弃即释放（与论文原文一致）+ 注册/撤回为可逆效应；空间维度 = Rust 过程宏路径（论文明确描述）+ 运行时符号级动态中介；Go guest 实证语言无关性（门禁 3/3）。**本次走查新增记录**：⑧恶意 guest 触发宿主 panic（越界 set）的边界（见 §6.3 行）⑨运行时符号级动态解析 vs 编译期类型化 DI 边界 ⑦broker 示例缺失（可表达性未演示） | 处置清单（下里程碑首批任务）：① interception provider 函数形态（Def 30/31）② §5.1.4 Proxy 访问层（Alg 6）③ Thm 59/61 直接测试 ④ Thm 66 定量上界断言 ⑤ L-Raise + `is_quiet` ζ 析取（失败模型实现时，含 ⑧ 的处置）⑥ 命令式 Disposer 结构对齐 ⑦ §6.2 broker 示例（M3 案例素材）⑨ typed world 评估时重审动态解析边界 |
+| M1 Wasm 后端 | 2026-08-17 | §6.2–6.4 | **门禁判定：通过（含处置清单）**——逐节对照无未解释偏差（详见下方「M1 Wasm 后端走查记录」）：§6.2 排他绑定 = O-Insert 供给不相交检查（`ProvisionClash`）+ loader 两阶段 apply（同键替换单次完成）；broker 形态模型可表达（注册 = 可逆效应）但无示例；滚动更新/跨进程为 M2/M3 场景。§6.3 能力访问控制 = wasm 能力面（import 面）+ 镜像仅含 inject 键（get 未声明键 = None，结构性强制）+ `set_dyn` Def 43/48 纪律；沙箱 = wasmtime SFI + trap 捕获宿主存活（门禁 2/3 实测）；拦截求值形态仍为缺口（承 M0 清单①）。§6.4 时间维度 = 逆句柄化 + Wasmtime 原生 embedder 丢弃即释放（与论文原文一致）+ 注册/撤回为可逆效应；空间维度 = Rust 过程宏路径（论文明确描述）+ 运行时符号级动态中介；Go guest 实证语言无关性（门禁 3/3）。**本次走查新增记录**：⑧恶意 guest 触发宿主 panic（越界 set）的边界（见 §6.3 行）⑨运行时符号级动态解析 vs 编译期类型化 DI 边界 ⑦broker 示例缺失（可表达性未演示） | 处置清单（下里程碑首批任务）：① interception provider 函数形态（Def 30/31）② §5.1.4 Proxy 访问层（Alg 6）③ Thm 59/61 直接测试 ④ Thm 66 定量上界断言 ⑤ L-Raise + `is_quiet` ζ 析取（失败模型实现时）⑥ 命令式 Disposer 结构对齐 ⑦ §6.2 broker 示例（M3 案例素材）⑧ 恶意 guest 越界 set → 宿主 panic 兜底（已直证，语义处置随 ⑤）⑨ typed world 评估时重审动态解析边界 |
 
 ## M1 Wasm 后端走查记录（2026-08-17，PR #15）
 
 > 程序（PLAN §7）：重读 §6.2–6.4 → 逐条核对已知偏差 → 补查映射 → 输出走查记录 + 处置清单。
-> 稳定态确认：`cargo test --workspace` 77 测试全绿、clippy/fmt 门禁干净、API 冻结（M1 边界）。
+> 稳定态确认：`cargo test --workspace` 80 测试全绿（77 + 处置③ 的 preservation_recovery 3）、clippy/fmt 门禁干净、API 冻结（M1 边界）。
 
 ### §6.2 Service Multiplexing（服务复用）
 
@@ -168,7 +168,7 @@
 | 能力静态可知 → 加载时审查 | inject/provide 为静态导出（跨边界调用核对，`load_guest.rs` 断言） | **对应** |
 | 拦截机制细粒度策略（Def 30：元数据咨询、可运行时装/卸/改不触发 reload） | interception 求值形态**未实现**（仅元数据累积；`get` 不消费 ι）——M0 走查处置清单① | **缺口**（承 M0 清单①，M2 首批任务；非 M1 新增） |
 | 沙箱化不可信组件：执行边界（SFI/独立运行时/沙箱进程/容器）；桥接透明性；宿主侧桥接是普通 fiber、能力可衰减 | wasmtime = 软件故障隔离（guest 内存/执行隔离）；`sandbox_isolation.rs`：恶意 guest（step panic → trap）被捕获、**宿主进程存活**（可继续实例化/驱动正常组件）——门禁 2/3 实测；WasmComponent 是普通 fiber（实现 `Component`，loader 兼容）；桥接透明性 = 镜像同步（wasm 消费 wasm/原生/Go 断言同构：dependency_consumption/dual_backend/go_guest） | **对应**（门禁 2/3 达成；与论文 "software fault isolation" + "bridge is an ordinary fiber" 一致） |
-| （补查风险点）恶意 guest 调 `context::set` 写未声明键 → 核心 `set_dyn` panic!（宿主 Rust panic，非 wasm trap） | 与 guest 代码 trap 同路径（step → 迭代器转发 → panic）被宿主侧 `catch_unwind` 边界捕获（sandbox 测试证明该边界可捕获、宿主存活）；但语义上 "panic = bug" 是**宿主不变式**（可信组件协议违反），未按不可信输入建模 | **新增记录（⑧）**：已知边界——guest 引发的宿主 panic 依赖 catch_unwind 兜底而非失败模型；L-Raise 失败模型（处置清单⑤）落地时应把协议违反转为错误 outcome（fiber 错误状态），届时一并处置 |
+| （补查风险点）恶意 guest 调 `context::set` 写未声明键 → 核心 `set_dyn` panic!（宿主 Rust panic，非 wasm trap） | 与 guest 代码 trap 同路径（step → 迭代器转发 → panic）被宿主侧 `catch_unwind` 边界捕获——**直证**：PR #17 `guest_undeclared_set_panic_is_caught_and_host_survives`（`wasm-plugin-rust-misbehave` 示例 step 写未声明键 → 捕获、宿主存活）；语义上 "panic = bug" 是**宿主不变式**（可信组件协议违反），未按不可信输入建模 | **新增记录（⑧）**：直证边界 + 语义处置随 ⑤（L-Raise 失败模型：协议违反 → 错误 outcome） |
 
 ### §6.4 Language Independence and Selection（语言无关性）
 
@@ -192,5 +192,5 @@
 | ⑤ | L-Raise 失败模型 + `is_quiet` ζ 析取（含 ⑧ 处置） | M0 清单⑤ + 本次 ⑧ | M2（失败模型实现时） |
 | ⑥ | 命令式 Disposer 结构对齐（wasm 句柄化已部分对齐） | M0 清单⑥ | 记录（M2 评估） |
 | ⑦ | §6.2 broker 示例（可表达性演示） | 本次新增 | M3 案例素材 |
-| ⑧ | 恶意 guest 触发宿主 panic（越界 set → 核心 panic!）的边界——依赖 catch_unwind 兜底而非失败模型 | 本次新增（§6.3 补查风险点） | 随 ⑤（L-Raise 失败模型）处置 |
+| ⑧ | 恶意 guest 触发宿主 panic（越界 set → 核心 panic!）的边界——**已直证**（PR #17：`guest_undeclared_set_panic_is_caught_and_host_survives`，`wasm-plugin-rust-misbehave` 示例：step 写未声明键 → catch_unwind 捕获、宿主存活）；语义上仍应随 ⑤（L-Raise 失败模型）转为错误 outcome | 本次新增（§6.3 补查风险点） | 直证测试已落地；语义处置随 ⑤ |
 | ⑨ | 运行时符号级动态解析 vs 编译期类型化 DI | 本次新增 | M2 typed world 评估时重审 |
