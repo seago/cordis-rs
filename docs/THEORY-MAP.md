@@ -32,7 +32,7 @@
 | `relied_n(γ)`（撤离 guard） | Def 50 | 同步级联天然保证（依赖者先撤，Thm 63 测试）；显式 guard 随 async 化实现 | 单元 | 部分完成（PR #5 语义等价；显式化 PR #6） |
 | `use`（组件实例化） | Alg 4 | `Context::use_component`（`Runtime::register`，Def 47 注册回调效应） | 单元 | 完成（PR #5） |
 | `refresh` / `reload` / `unload` | Alg 5 | `Runtime::{refresh, reload, unload}`（惯性状态机） | 单元 | 完成（PR #5，同步版） |
-| 配置 Entry | Def 74 | 待填 | | PR #8 |
+| 配置 Entry | Def 74 | `cordis_loader::{Entry, Loader}`（`register_component`/`apply`/`fiber`，§5.2.1 增量协调） | 单元 | 完成（PR #8 最小版：`id`/`config`（经 `revision`）/`disabled`/组件名） |
 
 ## 定理覆盖
 
@@ -91,6 +91,11 @@
 | 2026-08-16 / PR #7 审查 | **修复（m1）**：门面 re-export 改 `pub use cordis_core::*`（glob）——`execute` 等逐一漏列问题不再复发（原列表缺 `execute`） | — | 修正（glob 全量导出） | 已修复 |
 | 2026-08-16 / PR #7 审查 | **修复（m2）**：CI 增加 `cargo run --quiet -p hello-plugin`——M0 验收断言纳入门禁（`cargo test` 只编译 bin 不运行） | — | 修正（CI 门禁） | 已修复 |
 | 2026-08-16 / PR #7 审查 | 宏重复参数覆盖语义文档化（nit2：后者覆盖前者） | — | 实现说明 | 记录 |
+| 2026-08-16 / PR #8 | loader 最小协调落地：`Entry`（id/component/config/revision/disabled）+ `Loader`（`register_component`/`apply`/`fiber`），§5.2.1 增量协调（新增实例化、消失卸载、`disabled` 切换、`component`/`revision` 变更重建，未变条目幂等）——覆盖 Def 74 三字段 + 组件名（`url` 原生版）；`isolate`/`intercept` 注解、嵌套 group/include、托管 realm（Algorithm 7）留 M2 | Def 74, §5.2.1 | 公开差异声明（最小范围，M2 补齐） | 记录 |
+| 2026-08-16 / PR #8 | 组件级 config diff 由调用方递增 `Entry::revision` 承担（配置值 `Rc<dyn Any>` 不可比较）——论文将 config 变更交由组件自决，协调键承担 id/url 层 diff；此处以协调键代行 | §5.2.1 | 公开差异声明（最小版取舍） | 记录 |
+| 2026-08-16 / PR #8 | 条目全部实例化于 root 上下文（根级、无子代）——`remove_fiber` 的 `HasChildren` 前提不受影响；嵌套实例化随 group/include（M2）落地 | Def 74, §4.2 | 公开差异声明（最小版取舍） | 记录 |
+| 2026-08-16 / PR #8 | 配置错误（未注册组件名 / 供给冲突）→ panic（panic = bug，与核心同策略）；幂等性以「不重建则 fiber id 不变」断言覆盖 | — | 实现说明 | 记录 |
+| 2026-08-16 / PR #8 | `Context::use_component` / `Runtime::register` 的 `config` 参数由 `Box<dyn Any>` 改为 `Rc<dyn Any>`——编排方（loader）重建条目需保留并复用配置（`Box` 不可克隆）；调用点随迁（native/示例/测试） | Def 47 | 实现说明（API 调整） | 记录 |
 
 ## 里程碑走查记录
 
