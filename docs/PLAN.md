@@ -309,6 +309,6 @@ proptest! {
 | 里程碑 | 状态 | 门禁 |
 |---|---|---|
 | M0 原生闭环 | **通过（走查完成）**（PR #1–9 + M0 走查：骨架、核心类型 + 参考解释器、可逆效应引擎、共效应操作 + 通知分类、fiber 生命周期状态机、oracle × 引擎元理论验证、DX 层 + hello-plugin 示例、loader 最小协调、Cor 21 测试、Thm 73(1) canonical form 补测） | 定理测试全绿 ✓；走查（§3.1–3.3/§4.1–4.4/§5.1）**通过（含处置清单）**——6 项处置清单成为 M1 首批任务（THEORY-MAP「里程碑走查记录」） |
-| M1 Wasm 后端 | **进行中**（PR #10–11 已完成：wit 世界 v1 + 工具链定型（wasm32-wasip2 + no_std guest + wasmtime 47）+ 宿主加载/驱动原语 + Rust guest 示例端到端闭环 + **WasmComponent 接入 cordis-core**（set 转发核心 store、逆衔接、retire 级联）） | 同一 loader 加载原生与 wasm 组件；guest 崩溃不伤宿主；Rust + Go 双语言 guest；走查 §6.2–6.4 |
+| M1 Wasm 后端 | **进行中**（PR #10–12 已完成：wit 世界 v1 + 工具链定型（wasm32-wasip2 + no_std guest + wasmtime 47）+ 宿主加载/驱动原语 + WasmComponent 接入 cordis-core（set 转发、逆衔接、retire 级联）+ **wasm 依赖者消费**（注入键同步镜像、双 wasm 组件 provider/consumer 闭环）） | 同一 loader 加载原生与 wasm 组件；guest 崩溃不伤宿主；Rust + Go 双语言 guest；走查 §6.2–6.4 |
 | M2 加载器 + HMR | 未开始 | — |
 | M3 案例验证 | 未开始 | — |
