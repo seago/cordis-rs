@@ -76,6 +76,11 @@
 | 2026-08-15 / PR #5 | 根上下文（fiber = None）`set` 的绑定不参与 `σγ`（Def 45 仅 Active fiber 的 `σ` 并集）——编排器级的全局提供需经组件/fiber 完成 | Def 45 | 公开差异声明（与论文一致，补充说明） | 记录 |
 | 2026-08-15 / PR #5 | `relied_n` guard（Def 50）：同步级联天然实现「依赖者先撤、提供者绑定保持到依赖者停用」（Thm 63 测试验证）；显式 guard 随 async 化实现 | Def 50 | 公开差异声明（同步语义等价） | 记录 |
 | 2026-08-15 / PR #5 | 执行期检查 Def 43/48 纪律（组件 `set` 越界写入未声明供给 → panic）——论文中为组件义务，实现升级为运行时检查（panic = bug） | Def 43/48 | 实现说明（强化检查） | 记录 |
+| 2026-08-16 / PR #5 审查 | **修复（M1）**：notify 载荷统一为 **realm**（`set` 原传用户键，与 `reload`/`unload` 的 realm 载荷不一致）+ `notify_fibers` 改按 realm 语义匹配（`f.ctx.resolve_realm(inject_key) == payload_realm`）——修复隔离场景（realm ≠ key）下依赖者收不到激活/停用通知的级联断裂；补 2 个交叉测试（同 realm 级联 / 跨 realm 负例） | Alg 3, Def 28/29 | 修正（含隔离×fiber 交叉测试） | 已修复 |
+| 2026-08-16 / PR #5 审查 | 载荷语义文档化（m1）：`Reactor`/`notify` 文档明示 keys 为已解析 realm | Alg 3 | 实现说明 | 已修复 |
+| 2026-08-16 / PR #5 审查 | 幽灵 fiber 文档化（m2）：`remove_fiber` 仅移除 registry 条目，fiber 对象仍被父 ctx 注册回调持有至父 `dispose_all`——预期语义已注明 | Def 47 | 实现说明 | 记录 |
+| 2026-08-16 / PR #5 审查 | 级联栈深度边界（m3）：依赖链深度 N → N 层嵌套调用栈（同步核心已知边界），async 化自然缓解——runtime 模块文档已注明 | §4.3 | 实现说明 | 记录 |
+| 2026-08-16 / PR #5 审查 | `Fiber::state()` 借用警告（m4）：持 Ref 期间调 `retire` 会 RefCell panic——doc 已注明（与 `store()` 同纪律） | — | 实现说明 | 记录 |
 
 ## 里程碑走查记录
 
