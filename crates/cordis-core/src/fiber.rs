@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 
+use crate::component::Component;
 use crate::context::Context;
 use crate::effect::{Disposer, EffectIter};
 use crate::keyset::KeySet;
@@ -110,6 +111,8 @@ pub struct Fiber {
     pub(crate) ctx: Rc<Context>,
     /// `e(config)`：config 绑定的效应函数（Algorithm 4 第 9 行）。
     pub(crate) apply: Box<dyn Fn() -> Box<dyn EffectIter>>,
+    /// 组件实例（读取 `d(k)` 声明元数据，Def 30 的 `𝔇inter`；M2-PR2）。
+    pub(crate) component: Rc<dyn Component>,
     /// `τ`：退役标志。
     pub(crate) retired: Cell<bool>,
     /// `θ`：生命周期状态。
@@ -162,6 +165,11 @@ impl Fiber {
     /// 是否已退役（`τ`）。
     pub fn retired(&self) -> bool {
         self.retired.get()
+    }
+
+    /// 组件实例（读取 `d(k)` 声明元数据；M2-PR2）。
+    pub fn component(&self) -> &Rc<dyn Component> {
+        &self.component
     }
 
     /// 退役（O-Retire，Def 47 的注册逆）：置 `τ` 并刷新目标（→ ⊥ → 卸载链）。

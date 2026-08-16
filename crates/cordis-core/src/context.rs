@@ -319,15 +319,73 @@ impl Context {
 
     /// 读取 `k` 处合并后的拦截元数据（未安装或类型不符返回 `None`）。
     ///
-    /// **⚠ 半成品警示（M0 审查 REVIEW-M0）**：同 [`Context::intercept`]——
-    /// 元数据可读回，但读路径（[`Context::get`]）不消费 `ι`；provider 函数
-    /// 求值形态（Def 30/31）由 M1 落地。
+    /// **M2-PR2 更新**：原始 `ι` 表读取（半成品警示移除——读路径消费
+    /// 经 [`Context::get_meta`] 落地，见下）。
     pub fn intercept_of<M: InterceptMeta + Clone>(&self, key: Symbol) -> Option<M> {
         self.intercept
             .borrow()
             .get(&key)
             .and_then(|boxed| (boxed.as_ref() as &dyn Any).downcast_ref::<M>())
             .cloned()
+    }
+
+    /// **Def 31 读路径求值的元数据侧（M2-PR2 落地，处置①）**：
+    /// `get(k, μ) = σ(k)(μ ⊕ₖ ι(k))`——组件声明的元数据 `μ = d(k)`
+    /// （[`Component::declared_metadata`]）与上下文携带的 `ι(k)` **右偏合并**
+    /// （`ι` 优先，可让外层上下文约束组件对共效应的使用而不改组件，
+    /// §6.3 语义）后，交给 provider 函数求值。
+    ///
+    /// 本实现中 provider 函数 `σ(k)` 为**常量函数**（返回绑定值）——
+    /// 求值结果 = 绑定值（[`Context::get`] 不变），本 API 暴露合并后的
+    /// 元数据（provider 函数形态的价值核心实现随 typed world 评估，
+    /// 处置⑨）。值类型不符（组件声明与读取类型不同）→ panic（与
+    /// [`Context::intercept`] 的类型纪律一致）。
+    pub fn get_meta<M: InterceptMeta + Clone>(self: &Rc<Self>, key: Symbol) -> Option<M> {
+        let declared = self.declared_metadata_of::<M>(key);
+        let carried = self.intercept_of::<M>(key);
+        match (declared, carried) {
+            (Some(mu), Some(iota)) => Some(M::merge(&mu, &iota)),
+            (Some(mu), None) => Some(mu),
+            (None, iota) => iota,
+        }
+    }
+
+    /// 读取本 fiber 组件的声明元数据 `d(k)`（Def 30 的 `𝔇inter`）。
+    fn declared_metadata_of<M: InterceptMeta + Clone>(&self, key: Symbol) -> Option<M> {
+        let fid = self.fiber?;
+        let component = {
+            let fibers = self.runtime.fibers.borrow();
+            let fiber = fibers.get(&fid)?;
+            Rc::clone(fiber.component())
+        };
+        let declared = component.declared_metadata(key)?;
+        Some(
+            (declared.as_ref() as &dyn Any)
+                .downcast_ref::<M>()
+                .unwrap_or_else(|| {
+                    panic!("拦截元数据类型冲突：组件声明与读取类型必须一致（键 {key}）")
+                })
+                .clone(),
+        )
+    }
+
+    /// **就地拦截（loader 的 `intercept` 字段分派，§5.2.1）**：把 `ν` 右偏
+    /// 合并进**本上下文**的 `ι` 表——与派生实现（[`Context::intercept`]，
+    /// Def 31 精确形态）不同，不产生新上下文、**不触发 reload**（元数据
+    /// 仅读时咨询）。可逆性由调用方承担（loader/HMR 回滚时自行恢复旧值；
+    /// 组件退役不撤销就地拦截）。
+    pub fn intercept_in_place<M: InterceptMeta>(self: &Rc<Self>, key: Symbol, meta: M) {
+        let mut table = self.intercept.borrow_mut();
+        let merged = match table.get(&key) {
+            None => meta,
+            Some(existing) => {
+                let existing = (existing.as_ref() as &dyn Any)
+                    .downcast_ref::<M>()
+                    .expect("拦截元数据类型冲突：同一 key 的多次拦截必须使用同一类型");
+                M::merge(existing, &meta)
+            }
+        };
+        table.insert(key, Box::new(merged));
     }
 
     /// 满足谓词 `γ ⊧ d`（Def 24，经 `ρ` 解析）：`∀k ∈ d. ρ(k) ∈ dom(σ)`。

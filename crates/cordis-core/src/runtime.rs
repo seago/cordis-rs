@@ -211,6 +211,7 @@ impl Runtime {
             provide,
             ctx: fiber_ctx,
             apply,
+            component: Rc::clone(&component),
             retired: Cell::new(false),
             state: RefCell::new(FiberState::Inactive(None)),
             target: RefCell::new(None),
