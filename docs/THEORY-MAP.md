@@ -39,11 +39,15 @@
 | 定理 / 结论 | 测试位置 | 状态 |
 |---|---|---|
 | Thm 7 / Thm 16：LIFO 恢复、声音不变量 | `effect::tests` / `context::tests`（`execute_runs_inverses_in_lifo`、`thm16_*`、`accumulator_reverts_all_effects_lifo`、**`nested_effect_reverts_in_application_order`**） | 完成（PR #3；嵌套顺序审查后修复） |
-| Cor 21：独立效应乱序撤销 | `context::tests::cor21_independent_effects_revert_in_any_permutation`（4 排列：LIFO/正序/两交错乱序，每步断言 Thm 20(1) 中间态） | 完成（PR #9：不同键 `set` 满足 Def 19 独立性——变换可交换、逆互不干扰） |
+| Cor 21：独立效应乱序撤销 | `context::tests::cor21_independent_effects_revert_in_any_permutation`（**穷举全部 4! = 24 种排列**，每步断言 Thm 20(1) 中间态） | 完成（PR #9 + M0 走查强化：不同键 `set` 满足 Def 19 独立性——变换可交换；clause(2) 因状态无关逆退化，见已知偏差） |
 | Thm 63：依赖者先停、teardown 可读依赖 | `runtime::tests::withdrawal_cascade_disposes_dependents_first`（teardown 检查逆） | 真实引擎已验（PR #5）；停用**结果**经 property（活跃集一致）覆盖，teardown 可读的**顺序性**由集成测试直接验证（M0 走查：表述厘清；oracle 两态模型不携带转换内顺序） |
 | Thm 64：单转换不跨两次解析 | `runtime::tests::target_change_mid_reload_chains_unload`（目标中途变化 → 惯性链卸载） | 真实引擎已验（PR #5）；M0 走查：括号"guard 步界中断"属 §4.3.2 效应层（`execute_interrupts_at_step_boundary`），Thm 64 为解析层惯性——两层级测试分开对应 |
 | Thm 66：Progress、guard 不死锁 | `interp::tests::drive_*`（oracle 自检）+ `tests/property.rs`（每个动作后 `is_quiet` 断言） | oracle 已验（PR #2）；真实引擎已验（PR #6）；M0 走查：到达静止已验，定量上界 `(K+4)(V+1)` 未断言（记录为覆盖缺口） |
-| Thm 73 / Cor 62：Confluence、离场无残留 | `interp::tests::confluence_all_interleavings`（穷举交错）+ `tests/property.rs`（oracle 对比：活跃集/σγ/绑定总数逐步一致）+ **`thm73_canonical_form_static_assembly`**（M0 走查补：动态历史 == 静态装配，up to names） | oracle 已验（PR #2）；真实引擎已验（PR #6）；**Thm 73(1) canonical form 补测（M0 走查）** |
+| Thm 73 / Cor 62：Confluence、离场无残留 | `interp::tests::confluence_all_interleavings`（穷举交错）+ `tests/property.rs`（oracle 对比：活跃集/σγ/绑定总数逐步一致）+ **`thm73_canonical_form_static_assembly`**（M0 走查补：动态历史 == 静态装配，up to names） | oracle 已验（PR #2）；真实引擎已验（PR #6）；**Thm 73(1) canonical form 补测（M0 走查）**；Cor 62 近似覆盖：绑定总数 == σγ 无泄漏已验，`≈` 的值维度因 Def 69 规范组件全用常量值 1 被平凡化（M0 走查注明） |
+| Thm 59：Preservation（Def 58 四条款守卫不变式） | 无专门测试——Def 58(3)(4)（installed 的 `ω` 落于 registry 且 provider 已安装）无直接断言；供给不相交/π 前提/移除前置有片段覆盖（`provision_clash_rejected`、`unknown_parent_rejected`、`remove_preconditions`） | M0 走查：覆盖缺口（间接经 Thm 66/73 property 支撑；列入 M1 首批任务） |
+| Thm 61：Recovery exactness（式 56，累加器恢复精确） | 由 §3.1 局部 LIFO 测试（Thm 7/16）间接支撑；多 fiber 交错的全局形态未直接验证 | M0 走查：覆盖缺口（时间组合性核心；列入 M1 首批任务） |
+| Def 65 / Lemma 68 / Lemma 70：support 系、静止时 support = Active | `interp::tests`（`drive_reaches_quiet_and_lemma70`、`withdrawal_cascade`、`confluence_all_interleavings` 内 `active_set == support_set` 断言） | 已覆盖（PR #2/#6）；M0 走查补入覆盖表 |
+| 元理论内部引理（Lemma 55/56/57、Lemma 71/72、Thm 54） | 无直接测试——≃/≈/重命名等价未在实现中显式建模，属证明内部引理（非可观察性质） | M0 走查：注明"证明内部、无直接测试" |
 | Def 26：通知分类正确性 | `notify::tests::classification_matrix`（8 组合分类矩阵） | 完成（PR #4） |
 
 ## 已知偏差
