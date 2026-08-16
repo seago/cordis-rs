@@ -43,6 +43,8 @@ pub type Reactor = Rc<dyn Fn(&Context, &[Symbol])>;
 pub enum RegistryError {
     /// O-Insert：`∃m. p ∩ p_m ≠ ∅`（单一来源纪律）。
     ProvisionClash,
+    /// O-Insert：`π ∉ dom(Fγ) ∪ {root}`（父不存在/已移除）。
+    UnknownParent,
     /// O-Remove：`n ∉ dom(Fγ)`。
     UnknownFiber,
     /// O-Remove：`τ_n ≠ ⊤`。

@@ -14,15 +14,24 @@
 //!   的最终结果；teardown 期间依赖可读的**顺序性**由 PR #5 集成测试
 //!   `withdrawal_cascade_disposes_dependents_first` 直接验证（本套件不重复）。
 //!
-//! 动作错误一致性亦被断言：插入供给冲突、未知 fiber、未退役移除等前提
-//! 违反必须**同侧**报错（oracle 拒绝 ⟺ 引擎拒绝）。
+//! 动作错误一致性亦被断言：插入供给冲突、未知父、未知 fiber、未退役移除
+//! 等前提违反必须**同侧**报错（oracle 拒绝 ⟺ 引擎拒绝）。
+//!
+//! 动作空间含 **parent 维度**（审查 m2）：`Insert` 可引用已插入的 fiber 为父
+//! ——引擎在父 fiber 的 ctx 上实例化（Def 47 注册进父累加器），oracle 登记
+//! 注册子代（父卸载时子代被 O-Retire）——`HasChildren` 移除前提与父级联
+//! 退役由此进入随机覆盖。
 //!
 //! 组件采用 **Def 69 规范模型**：激活恰好安装 `provide` 全部键
 //! （与 oracle 的规范化效应建模一致）。
+//!
+//! **验证强度（审查 m1）**：`proptest_config` 固定 2000 用例（默认 256 的
+//! 8 倍）——随仓库固化，不受 CI 环境影响。
 
 use cordis_core::interp::{Component as InterpComponent, InterpState};
 use cordis_core::{
-    Component, Context, Disposer, EffectIter, FiberId, Key, KeySet, Runtime, Step, Symbol,
+    Component, Context, Disposer, EffectIter, FiberId, Key, KeySet, RegistryError, Runtime, Step,
+    Symbol,
 };
 use proptest::prelude::*;
 use std::collections::BTreeSet;
@@ -101,11 +110,13 @@ impl EffectIter for CanonicalIter {
     }
 }
 
-// ── 随机编排动作（Retire/Remove 以「第 k 次成功插入」为引用）────────────
+// ── 随机编排动作（Retire/Remove/父引用以「第 k 次成功插入」为索引）──────
 
 #[derive(Debug, Clone)]
 enum RawAction {
     Insert {
+        /// 父引用（第 k 次成功插入的 fiber；None = root）。
+        parent: Option<usize>,
         inject: Vec<usize>,
         provide: Vec<usize>,
     },
@@ -130,8 +141,8 @@ fn arb_spec() -> impl Strategy<Value = Vec<usize>> {
 
 fn arb_action() -> impl Strategy<Value = RawAction> {
     prop_oneof![
-        3 => (arb_spec(), arb_spec())
-            .prop_map(|(inject, provide)| RawAction::Insert { inject, provide }),
+        3 => (prop::option::weighted(0.3, 0usize..16), arb_spec(), arb_spec())
+            .prop_map(|(parent, inject, provide)| RawAction::Insert { parent, inject, provide }),
         1 => (0usize..16).prop_map(|insert_idx| RawAction::Retire { insert_idx }),
         1 => (0usize..16).prop_map(|insert_idx| RawAction::Remove { insert_idx }),
     ]
@@ -161,29 +172,44 @@ impl Harness {
 
     fn apply(&mut self, action: &RawAction) {
         match action {
-            RawAction::Insert { inject, provide } => {
+            RawAction::Insert {
+                parent,
+                inject,
+                provide,
+            } => {
                 let inject = spec_from(inject);
                 let provide = spec_from(provide);
+                // 父引用解析：引用不存在（越界/已移除）→ 两侧一致报错
+                // （oracle UnknownParent / 引擎无父 ctx 可实例化）。
+                let parent_id = parent.and_then(|idx| self.inserted.get(idx).copied());
                 let o_res = self.oracle.insert(
-                    None,
+                    parent_id,
                     &InterpComponent {
                         inject: inject.clone(),
                         provide: provide.clone(),
                     },
                 );
-                let e_res = self.root.use_component(
-                    Rc::new(CanonicalComponent {
-                        inject: inject.clone(),
-                        provide: provide.iter().collect(),
-                    }),
-                    Box::new(()),
-                );
+                let component: Rc<dyn Component> = Rc::new(CanonicalComponent {
+                    inject: inject.clone(),
+                    provide: provide.iter().collect(),
+                });
+                let e_res = match parent_id {
+                    None => self.root.use_component(component, Box::new(())),
+                    // Def 47：在父 fiber 的 ctx 上实例化（注册进父的累加器）。
+                    Some(pid) => match self.runtime.fiber(pid) {
+                        Some(parent_fiber) => {
+                            parent_fiber.ctx().use_component(component, Box::new(()))
+                        }
+                        None => Err(RegistryError::UnknownParent),
+                    },
+                };
                 match (o_res, e_res) {
                     (Ok(oid), Ok(fiber)) => {
                         assert_eq!(oid, fiber.id(), "两端 fiber id 必须一致");
+                        assert_eq!(parent_id, fiber.parent(), "两端父引用必须一致");
                         self.inserted.push(oid);
                     }
-                    (Err(_), Err(_)) => {} // 前提违反（供给冲突）两侧一致拒绝
+                    (Err(_), Err(_)) => {} // 前提违反（供给冲突/未知父）两侧一致拒绝
                     (Ok(_), Err(e)) => panic!("引擎拒绝而 oracle 接受：{e:?}"),
                     (Err(e), Ok(_)) => panic!("oracle 拒绝而引擎接受：{e:?}"),
                 }
@@ -242,6 +268,8 @@ impl Harness {
 }
 
 proptest! {
+    // 审查 m1：固定验证强度（2000 用例，默认 256 的 8 倍），随仓库固化。
+    #![proptest_config(ProptestConfig::with_cases(2000))]
     #[test]
     fn engine_matches_oracle(actions in prop::collection::vec(arb_action(), 1..=12)) {
         let mut h = Harness::new();

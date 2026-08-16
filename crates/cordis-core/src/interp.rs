@@ -5,7 +5,9 @@
 //! 论文本身不规定调度。
 //!
 //! 对抽象效应函数 `e` 的**规范化建模**（Def 69 假设）：激活恰好安装
-//! `provide` 中的全部键，停用撤销之；其余上下文不变。见 THEORY-MAP 已知偏差。
+//! `provide` 中的全部键，停用撤销之；其余上下文不变。另建模 **Def 47
+//! 注册**：在父 fiber 下实例化即登记为父的注册子代，父卸载（累加器运行）
+//! 时子代被 O-Retire（随父退役）。见 THEORY-MAP 已知偏差。
 //!
 //! 规则前提：O-Insert / O-Retire / O-Remove（编排）、L-Reload / L-Unload（生命周期）。
 
@@ -105,6 +107,9 @@ pub struct Fiber {
     pub retired: bool,
     /// `θ`：生命周期状态。
     pub state: Lifecycle,
+    /// 本 fiber 注册的子代（Def 47：注册的逆 = O-Retire，随本 fiber 的
+    /// 累加器执行——本 fiber 卸载时子代被退役）。
+    pub registered: Vec<FiberId>,
 }
 
 /// 系统状态 `γ`：registry `Fγ` + 名字计数器（Def 45）。
@@ -206,8 +211,18 @@ impl InterpState {
                 table: KeySet::new(),
                 retired: false,
                 state: Lifecycle::Inactive,
+                registered: Vec::new(),
             },
         );
+        // Def 47：在父 fiber 下实例化 = 父的效应注册了本 fiber——
+        // 登记进父的 registered（父卸载时本 fiber 被 O-Retire）。
+        if let Some(p) = parent {
+            self.fibers
+                .get_mut(&p)
+                .expect("parent existence checked")
+                .registered
+                .push(id);
+        }
         Ok(id)
     }
 
@@ -259,6 +274,9 @@ impl InterpState {
     /// L-Unload：`θ_n = Active(g, ω) ∧ target_n(γ) ≠ ω`。
     ///
     /// 逆建模：`σ_n := ∅`，`θ := Inactive`。
+    ///
+    /// **Def 47 注册逆**：本 fiber 的累加器还包含其注册子代的 O-Retire——
+    /// 卸载时全部注册子代被退役（τ := ⊤），随后由生命周期规则驱动停用。
     pub fn unload(&mut self, n: FiberId) -> Result<(), Violation> {
         let target = self.target(n);
         let f = self.fibers.get_mut(&n).ok_or(Violation::UnknownFiber)?;
@@ -270,6 +288,13 @@ impl InterpState {
         }
         f.table = KeySet::new();
         f.state = Lifecycle::Inactive;
+        let registered = f.registered.clone();
+        let _ = f; // 结束可变借用，再遍历注册子代
+        for child in registered {
+            if let Some(c) = self.fibers.get_mut(&child) {
+                c.retired = true;
+            }
+        }
         Ok(())
     }
 
@@ -491,20 +516,40 @@ mod tests {
         let mut s = InterpState::new();
         let parent = s.insert(None, &comp(&[], &["k"])).unwrap();
         let child = s.insert(Some(parent), &comp(&[], &[])).unwrap();
+        s.drive_to_quiescence(); // 父（无依赖）与子（无依赖）均激活
 
         // 未退役不可移除
         assert_eq!(s.remove(parent), Err(Violation::NotRetired));
-        // 有子代不可移除
+        // 退役但未驱动（仍 Active）→ StillActive 优先
         s.retire(parent).unwrap();
+        assert_eq!(s.remove(parent), Err(Violation::StillActive));
+        // 驱动后父卸载（Def 47 级联：注册子代随父退役并停用），仍有 π-子代
+        s.drive_to_quiescence();
         assert_eq!(s.remove(parent), Err(Violation::HasChildren));
-        // 活跃不可移除
-        s.drive_to_quiescence();
-        s.retire(child).unwrap();
-        assert_eq!(s.remove(child), Err(Violation::StillActive));
-        // 先退役并停用后可移除
-        s.drive_to_quiescence();
+        assert!(
+            s.fibers.get(&child).unwrap().retired,
+            "子代被父的注册逆退役"
+        );
+        assert!(matches!(
+            s.fibers.get(&child).unwrap().state,
+            Lifecycle::Inactive
+        ));
+        // 级联后子已退役停用：先移除子（解除 π-子代关系），再移除父。
         s.remove(child).unwrap();
         s.remove(parent).unwrap();
+        assert!(s.is_quiet());
+    }
+
+    #[test]
+    fn remove_rejects_active_fiber() {
+        // 退役但未驱动（仍 Active）不可移除（O-Remove 前提 θ = Inactive）。
+        let mut s = InterpState::new();
+        let a = s.insert(None, &comp(&[], &["k"])).unwrap();
+        s.drive_to_quiescence(); // a Active
+        s.retire(a).unwrap(); // τ 置位但尚未驱动
+        assert_eq!(s.remove(a), Err(Violation::StillActive));
+        s.drive_to_quiescence();
+        s.remove(a).unwrap();
         assert!(s.is_quiet());
     }
 

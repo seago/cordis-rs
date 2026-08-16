@@ -133,6 +133,12 @@ impl Fiber {
         &self.provide
     }
 
+    /// fiber 自己的上下文（Algorithm 4 第 8 行的 `fiber.ctx`）：组件效应
+    /// 经它注册，也用于在父 fiber 下实例化子组件（Def 47）。
+    pub fn ctx(&self) -> &Rc<Context> {
+        &self.ctx
+    }
+
     /// 生命周期状态 `θ`。
     ///
     /// **借用警告（审查 m4）**：持有返回的 `Ref` 期间调用 [`Fiber::retire`]
