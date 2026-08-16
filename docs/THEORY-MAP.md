@@ -81,8 +81,11 @@
 | 2026-08-16 / PR #5 审查 | 幽灵 fiber 文档化（m2）：`remove_fiber` 仅移除 registry 条目，fiber 对象仍被父 ctx 注册回调持有至父 `dispose_all`——预期语义已注明 | Def 47 | 实现说明 | 记录 |
 | 2026-08-16 / PR #5 审查 | 级联栈深度边界（m3）：依赖链深度 N → N 层嵌套调用栈（同步核心已知边界），async 化自然缓解——runtime 模块文档已注明 | §4.3 | 实现说明 | 记录 |
 | 2026-08-16 / PR #5 审查 | `Fiber::state()` 借用警告（m4）：持 Ref 期间调 `retire` 会 RefCell panic——doc 已注明（与 `store()` 同纪律） | — | 实现说明 | 记录 |
-| 2026-08-16 / PR #6 | 元理论 property suites 落地：`tests/property.rs` 以 oracle（Def 69 规范组件 + 随机编排 ≤12 步 × 2000 用例）对比真实引擎——Thm 66（动作后必静止）、Thm 73（活跃集/σγ 逐步一致）、Cor 62（绑定总数 == σγ，无残留）；动作错误一致性（供给冲突/未知 fiber/移除前提同侧报错）亦断言 | §4.4 | 完成（oracle × 引擎闭环） | 记录 |
+| 2026-08-16 / PR #6 | 元理论 property suites 落地：`tests/property.rs` 以 oracle（Def 69 规范组件 + 随机编排 ≤12 步，`proptest_config` **固定 2000 用例**）对比真实引擎——Thm 66（动作后必静止）、Thm 73（活跃集/σγ 逐步一致）、Cor 62（绑定总数 == σγ，无残留）；动作错误一致性（供给冲突/未知 fiber/移除前提同侧报错）亦断言 | §4.4 | 完成（oracle × 引擎闭环） | 记录 |
 | 2026-08-16 / PR #6 | `Runtime` 补充公开只读 API（`active_fibers`/`provided`/`store`）供 oracle 对比与监控——无语义变更 | — | 实现说明 | 记录 |
+| 2026-08-16 / PR #6 审查 | **修复（m1）**：验证强度与文档一致——`proptest_config` 固定 2000 用例（原默认 256，文档声称 2000 不符） | — | 修正（随仓库固化） | 已修复 |
+| 2026-08-16 / PR #6 审查 | **修复（m2）**：动作空间补 parent 维度——oracle 建模 **Def 47 注册**（`Fiber.registered`：父卸载时注册子代被 O-Retire，interp `unload` 扩展 + 测试重构）；引擎侧经 `Fiber::ctx()` 在父 fiber 的 ctx 上实例化；`RegistryError` 补 `UnknownParent`（O-Insert π 前提）——`HasChildren` 移除前提与父级联退役进入随机覆盖 | Def 47, §4.2 | 修正（oracle 建模扩展 + harness parent 维度） | 已修复 |
+| 2026-08-16 / PR #6 审查 | `Fiber::ctx` 公开访问器（`fiber.ctx`，Algorithm 4 第 8 行的文档化实体）——harness 父级实例化所需 | Def 44 | 实现说明 | 已修复 |
 
 ## 里程碑走查记录
 
