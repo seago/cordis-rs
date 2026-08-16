@@ -12,12 +12,19 @@
 //!
 //! **未覆盖（M2）**：`isolate` / `intercept` 注解、嵌套 group/include、
 //! 托管 realm（Algorithm 7）、组件级 config diff（论文交由组件自决）。
-//! 条目当前全部实例化在 root 上下文（根级，无子代——`remove_fiber` 的
-//! `HasChildren` 前提不受影响）。
+//! 条目当前全部实例化在 root 上下文。
+//!
+//! **叶子约束（审查 m2）**：loader 管理的条目是**叶子**——不得经
+//! `Loader::fiber(id)?.ctx()` 在条目下实例化子组件；否则条目移除/重建时
+//! `Runtime::remove_fiber` 的 `HasChildren` 前提不满足（panic = bug）。
+//! 嵌套条目随 group/include 在 M2 落地。
+//!
+//! **两阶段协调（审查 m1）**：`apply` 先做卸载侧（释放供给名）再做
+//! 实例化侧——同供给键的替换可在单次 `apply` 完成。
 
 use std::any::Any;
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use cordis_core::{Component, Context, Fiber, Runtime};
@@ -104,21 +111,43 @@ impl Loader {
     /// - `component` 或 `revision` 变更 → 重建（退役旧 fiber、以新配置
     ///   重新实例化）。
     ///
-    /// 组件名未注册或供给冲突（两个条目提供同一键）→ panic（配置错误，
-    /// panic = bug）。
+    /// **两阶段执行**（审查 m1）：先做卸载侧（移除消失条目、卸载
+    /// `disabled` 置位与需重建条目的旧 fiber，释放供给名），再做实例化
+    /// 侧（新增 / `disabled` 清除 / 重建）——保证**同供给键的替换**
+    /// （desired 用条目 Y 替换提供同一键的 X）可在单次 `apply` 完成，
+    /// 否则 Y 实例化时命中 X 的供给检查而 `ProvisionClash`。
+    ///
+    /// 组件名未注册或供给冲突（两个**同时存在**的条目提供同一键）→ panic
+    /// （配置错误，panic = bug）。
+    ///
+    /// `desired` 内重复 `id` 未定义（按 last-wins 处理，可能浪费一次
+    /// 实例化）；调用方应保证 `id` 唯一。
     pub fn apply(&self, desired: &[Entry]) {
-        let desired_ids: BTreeSet<&str> = desired.iter().map(|e| e.id.as_str()).collect();
+        // 阶段 1（卸载侧）：先释放供给名，为阶段 2 的同供给替换腾位。
+        let current: Vec<String> = self.entries.borrow().keys().cloned().collect();
+        for id in current {
+            let Some(entry) = desired.iter().rev().find(|e| e.id == id) else {
+                self.remove(&id);
+                continue;
+            };
+            let Some(loaded) = self.entries.borrow().get(&id).cloned() else {
+                continue;
+            };
+            let disabling = !loaded.disabled && entry.disabled;
+            let rebuilding = !entry.disabled
+                && (loaded.component != entry.component || loaded.revision != entry.revision);
+            if disabling || rebuilding {
+                self.unload_fiber(&id);
+            }
+        }
+
+        // 阶段 2（实例化侧）：新增 / disabled 清除 / 重建条目实例化；
+        // 未变条目零操作（幂等）。
         for entry in desired {
             let loaded = self.entries.borrow().get(&entry.id).cloned();
             match loaded {
                 None => self.load(entry),
                 Some(loaded) => self.reconcile(entry, &loaded),
-            }
-        }
-        let current: Vec<String> = self.entries.borrow().keys().cloned().collect();
-        for id in current {
-            if !desired_ids.contains(id.as_str()) {
-                self.remove(&id);
             }
         }
     }
@@ -218,9 +247,13 @@ impl Loader {
             .and_then(|l| l.fiber.take());
         if let Some(fiber) = fiber {
             fiber.retire(); // 同步卸载（级联依赖者）
-            self.runtime
-                .remove_fiber(fiber.id())
-                .unwrap_or_else(|err| panic!("条目 `{id}` 移除失败：{err:?}（根级条目应无子代）"));
+            self.runtime.remove_fiber(fiber.id()).unwrap_or_else(|err| {
+                panic!(
+                    "条目 `{id}` 移除失败：{err:?}——条目下存在子代 fiber（loader 管理的 \
+                         条目为叶子：不得经 `Loader::fiber(id)?.ctx()` 实例化子组件；嵌套 \
+                         条目随 group/include 在 M2 落地）"
+                )
+            });
         }
     }
 
@@ -261,6 +294,21 @@ mod tests {
                     .downcast_ref::<String>()
                     .expect("val_provider 的 config 为 String")
                     .clone();
+                Box::new(once(Box::new(move || {
+                    ctx.set::<ValKey>(value).expect("绑定 val")
+                })))
+            }),
+        })
+    }
+
+    /// 测试组件：提供 `val`，绑定固定值（不读 config——用于区分组件身份）。
+    fn fixed_val_provider(value: &str) -> Rc<TestComponent> {
+        let value = value.to_string();
+        Rc::new(TestComponent {
+            inject: spec(&[]),
+            provide: spec(&["val"]),
+            effects: Box::new(move |ctx, _config| {
+                let value = value.clone();
                 Box::new(once(Box::new(move || {
                     ctx.set::<ValKey>(value).expect("绑定 val")
                 })))
@@ -439,6 +487,73 @@ mod tests {
             "依赖消失 → consumer 级联停用"
         );
         assert!(runtime.store().symbols().next().is_none(), "绑定全部恢复");
+    }
+
+    #[test]
+    fn same_supply_replacement_in_single_apply() {
+        // m1 回归：desired 用 Y 替换提供同一键的 X——两阶段协调
+        // （先释放供给名再实例化），单次 apply 不得 ProvisionClash。
+        let (loader, runtime) = loader();
+        loader.register_component("provider2", val_provider());
+        loader.apply(&[entry("old", "provider", "pg", 1, false)]);
+        let old_id = loader.fiber("old").unwrap().id();
+        assert_eq!(
+            loader
+                .fiber("old")
+                .unwrap()
+                .ctx()
+                .get::<ValKey>()
+                .unwrap()
+                .as_str(),
+            "pg"
+        );
+
+        // 单次 apply：移除 old（provider）并新增 new（provider2，同供给 val）。
+        loader.apply(&[entry("new", "provider2", "mysql", 1, false)]);
+        assert!(loader.fiber("old").is_none(), "旧条目已移除");
+        assert!(
+            runtime.fiber(old_id).is_none(),
+            "旧 fiber 已从 registry 移除"
+        );
+        let new_fiber = loader.fiber("new").expect("新条目已实例化");
+        assert!(matches!(&*new_fiber.state(), FiberState::Active { .. }));
+        assert_eq!(
+            new_fiber.ctx().get::<ValKey>().unwrap().as_str(),
+            "mysql",
+            "新条目使用新配置"
+        );
+        assert!(
+            runtime.store().symbols().next().is_some(),
+            "供给名由新条目持有"
+        );
+    }
+
+    #[test]
+    fn disabled_period_changes_take_effect_on_reenable() {
+        // m3 固化：disabled 期间 component/revision 变更不更新记录，
+        // enabled 后以新 entry 实例化——最终一致。
+        let (loader, _runtime) = loader();
+        loader.register_component("provider2", fixed_val_provider("second"));
+        loader.apply(&[entry("provider", "provider", "pg", 1, false)]);
+        assert!(loader.fiber("provider").is_some());
+
+        // disabled 置位。
+        loader.apply(&[entry("provider", "provider", "pg", 1, true)]);
+        assert!(loader.fiber("provider").is_none(), "禁用条目无 fiber");
+
+        // disabled 期间变更组件名 + revision（记录保持旧值，不实例化）。
+        loader.apply(&[entry("provider", "provider2", "ignored", 2, true)]);
+        assert!(loader.fiber("provider").is_none(), "仍 disabled：不实例化");
+
+        // disabled 清除：以新 entry（provider2 / rev 2）实例化。
+        loader.apply(&[entry("provider", "provider2", "ignored", 2, false)]);
+        let fiber = loader.fiber("provider").expect("重载");
+        assert!(matches!(&*fiber.state(), FiberState::Active { .. }));
+        assert_eq!(
+            fiber.ctx().get::<ValKey>().unwrap().as_str(),
+            "second",
+            "启用后使用 disabled 期间的新组件"
+        );
     }
 
     #[test]
