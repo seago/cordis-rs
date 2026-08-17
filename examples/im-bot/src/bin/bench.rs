@@ -1,17 +1,20 @@
 //! M3-PR2 基准：notify 扇出（§5.1.2，Algorithm 2/3 传播）+ 切换延迟
 //! （§5.3 存储后端切换）。报告与数据解读见 `docs/bench/M3-BENCH.md`。
 //!
-//! - 场景 A（扇出）：1 提供者 + N 消费者注入同一键——激活 / 停用 /
-//!   再激活总耗时随 N 的扩展（期望：每消费者常数成本 → 近线性）；
-//! - 场景 B（切换延迟）：adapter/database/bot 三层 + M 个无关填充组件，
-//!   切换存储后端（同一条目 revision 递增 → database 重建 → 新 fiber
-//!   重供 `db` 键）耗时随 M 的扩展，并直证**重激活局部性**（§5.3
-//!   "reactivates only the dependents whose resolved dependency
-//!   changed"）：bot 效应恰好重执行 1 次、adapter 0 次、bot fiber 不变、
-//!   填充组件不受影响——与 M 无关。
+//! 测量分三层（评审 REVIEW-bbb252a 定案，避免 loader 协调污染传播本体）：
+//! - **notify 扫描本体**（Algorithm 3）：全 Active 系统上 `ctx.notify`
+//!   微基准——target 不变 → refresh early-return，测得单次 O(F) 扫描；
+//! - **传播净成本**：激活（fresh loader 首 apply，无 diff 污染）与
+//!   停用/再激活（fresh 系统单次转换 − 同列表未变 re-apply 的 diff 基线）;
+//! - **loader 协调总账**：diff 基线（O(N²) `desired.iter().rev().find()`）
+//!   与场景 B 切换 apply 总耗时。
+//!
+//! 场景 B 另直证**重激活局部性**（§5.3 "reactivates only the dependents
+//! whose resolved dependency changed"）：bot 效应恰好重执行 1 次、adapter
+//! 0 次、bot fiber 不变、填充组件不受影响——与 M 无关（ExecCount 直证）。
 //!
 //! 运行：`cargo run -p im-bot --bin bench`（断言通过即成功，表格输出；
-//! CI 门禁与 `cargo test` 一致走 debug 构建，绝对上界宽松防抖动）。
+//! CI 门禁与 `cargo test` 一致走 debug，绝对上界宽松防抖动）。
 
 use cordis::{Context, EffectIter, FiberState, Key, Runtime, component};
 use cordis_core::symbol::Symbol;
@@ -173,12 +176,13 @@ fn filler_entries(m: usize) -> Vec<Entry> {
         .collect()
 }
 
-/// 新建场景 A 系统（注册组件，未 apply）。
-fn fan_system() -> Loader {
-    let loader = Loader::new(Rc::new(Runtime::new()));
+/// 新建场景 A 系统（注册组件，未 apply），返回 (loader, runtime)。
+fn fan_system() -> (Loader, Rc<Runtime>) {
+    let runtime = Rc::new(Runtime::new());
+    let loader = Loader::new(Rc::clone(&runtime));
     loader.register_component("fan-provider", Rc::new(FanProvider));
     loader.register_component("fan", Rc::new(Fan));
-    loader
+    (loader, runtime)
 }
 
 /// 测量 `f` 的耗时（重复 `reps` 次取中位数）。
@@ -195,25 +199,15 @@ fn time<F: FnMut()>(mut f: F, reps: usize) -> Duration {
 fn main() {
     // ── 场景 A：notify 扇出 ──────────────────────────────────────────
     println!("== 场景 A：notify 扇出（1 提供者 + N 消费者注入同一键）==");
-    println!("N\t激活\t停用\t再激活（中位数，reps=5）");
+    println!("N\t激活\t停用\t再激活\tdiff基线\t净停用\t净再激活\tnotify扫描（中位数，reps=5）");
     let mut prev_act = Duration::ZERO;
+    let mut prev_scan = Duration::ZERO;
     for n in [1usize, 10, 100, 1000] {
         let all = {
             let mut all = vec![entry("fan-provider", "fan-provider", Rc::new(()))];
             all.extend(fan_entries(n));
             all
         };
-        // 激活：全新系统单次 apply（每次重复 fresh loader，避免 no-op）。
-        let t_act = time(
-            || {
-                let loader = fan_system();
-                loader.apply(&all);
-            },
-            5,
-        );
-        // 停用 / 再激活：同一系统上 apply（provider disabled 切换）。
-        let loader = fan_system();
-        loader.apply(&all);
         let off = {
             let mut off = vec![Entry::new(
                 "fan-provider",
@@ -225,7 +219,77 @@ fn main() {
             off.extend(fan_entries(n));
             off
         };
-        let t_off = time(|| loader.apply(&off), 5);
+        // 激活：全新系统单次 apply——**无 diff 污染**（阶段一 loaded 为空），
+        // 每次重复 fresh loader 防 no-op。测得 = loader 建树 + provider
+        // 绑定 + 单次 notify → N 消费者级联激活（§5.1.2 传播）。
+        let t_act = time(
+            || {
+                let (loader, _runtime) = fan_system();
+                loader.apply(&all);
+            },
+            5,
+        );
+        // 停用 / 再激活：每次重复 fresh 系统（先建树再单次转换，避免
+        // rep 2+ 命中 reconcile 幂等短路——REVIEW-bbb252a MAJOR-1）。
+        // **注意**：apply 对 N+1 条目的阶段一 O(N²) desired-diff
+        //（`desired.iter().rev().find()`）同样计入——此两列是"协调 +
+        // 传播"的总账，非传播本体（见下 diff 基线）。
+        let t_off = {
+            let mut samples = Vec::with_capacity(5);
+            for _ in 0..5 {
+                let (loader, _runtime) = fan_system();
+                loader.apply(&all);
+                let start = Instant::now();
+                loader.apply(&off);
+                samples.push(start.elapsed());
+            }
+            median(samples)
+        };
+        let t_on = {
+            let mut samples = Vec::with_capacity(5);
+            for _ in 0..5 {
+                let (loader, _runtime) = fan_system();
+                loader.apply(&all);
+                loader.apply(&off);
+                let start = Instant::now();
+                loader.apply(&all);
+                samples.push(start.elapsed());
+            }
+            median(samples)
+        };
+        // diff 基线：同列表**未变**重放 apply（幂等短路，无任何转换）——
+        // 纯 loader 协调的 O(N²) desired-diff 成本；传播残差 ≈ 总账 − 基线。
+        let t_diff = {
+            let mut samples = Vec::with_capacity(5);
+            for _ in 0..5 {
+                let (loader, _runtime) = fan_system();
+                loader.apply(&all);
+                let start = Instant::now();
+                loader.apply(&all);
+                samples.push(start.elapsed());
+            }
+            median(samples)
+        };
+        // notify 扫描本体微基准（Algorithm 3）：在全 Active 系统上
+        // `ctx.notify([fan])`——N 消费者 target 不变 → refresh early-
+        // return，测得 = 单次 O(F) 全表扫描 + O(1) 目标比较/消费者，
+        // **不触碰 loader diff**。
+        let t_scan = {
+            let (loader, _runtime) = fan_system();
+            loader.apply(&all);
+            let provider = loader.fiber("fan-provider").expect("provider 激活");
+            let keys = [Symbol::intern("bench:fan")];
+            time(
+                || {
+                    provider.ctx().notify(&keys);
+                },
+                5,
+            )
+        };
+        // 断言实例：钉死停用/再激活的状态收敛（含终态静止）。
+        let (loader, runtime) = fan_system();
+        loader.apply(&all);
+        loader.apply(&off);
         for i in 0..n {
             let fiber = loader.fiber(&format!("fan-{i}")).expect("fan 条目存在");
             assert!(
@@ -233,7 +297,8 @@ fn main() {
                 "扇出停用：fan-{i} 应 Inactive"
             );
         }
-        let t_on = time(|| loader.apply(&all), 5);
+        assert_quiet(&runtime, "扇出停用");
+        loader.apply(&all);
         for i in 0..n {
             let fiber = loader.fiber(&format!("fan-{i}")).expect("fan 条目存在");
             assert!(
@@ -241,21 +306,32 @@ fn main() {
                 "扇出再激活：fan-{i} 应 Active"
             );
         }
-        println!("{n}\t{t_act:?}\t{t_off:?}\t{t_on:?}");
-        // 近线性门禁：激活成本不应超线性增长（每消费者常数成本 →
-        // 10 倍消费者 ≪ 100 倍耗时；上界宽松防 CI 抖动）。
+        assert_quiet(&runtime, "扇出再激活");
+        let net_off = t_off.saturating_sub(t_diff);
+        let net_on = t_on.saturating_sub(t_diff);
+        println!(
+            "{n}\t{t_act:?}\t{t_off:?}\t{t_on:?}\t{t_diff:?}\t{net_off:?}(净)\t{net_on:?}(净)\t{t_scan:?}(扫描)"
+        );
+        // 近线性门禁（REVIEW-bbb252a NIT-2）：**只对干净路径**——t_act
+        //（无 diff 污染）与 t_scan（纯 notify 扫描）。t_off/t_on 含 O(N²)
+        // diff 按构造超线性，不上 scaling 门禁（绝对上界兜底）。
         if n > 1 {
             assert!(
                 t_act < prev_act * 25 + Duration::from_millis(20),
                 "扇出激活应近线性：N={n} 成本异常"
             );
+            assert!(
+                t_scan < prev_scan * 30 + Duration::from_millis(10),
+                "notify 扫描应近线性（O(F)）：N={n} 成本异常"
+            );
         }
         prev_act = t_act;
+        prev_scan = t_scan;
     }
     // 绝对上界（CI 安全网，debug 构建）：1000 消费者全链路激活 < 500ms。
     let big = time(
         || {
-            let loader = fan_system();
+            let (loader, _runtime) = fan_system();
             let mut all = vec![entry("fan-provider", "fan-provider", Rc::new(()))];
             all.extend(fan_entries(1000));
             loader.apply(&all);
