@@ -30,10 +30,12 @@
 //! 编排责任（条目由调用方持有），按设计收尾为公开差异；
 //! ② isolate 变更经 Algorithm 7 realm 重指派（M2-PR4，就地不重建）；
 //! ③ 组条目自身的 isolate 注解不应用（组无声明键；组 isolate 变更仍整棵
-//! 重建）——**M3-PR3 评估结案**：组级 isolate 的候选语义"继承至子树"
-//!（最近注解优先）需把 effective-isolate 穿透 instantiation 与
-//! Algorithm 7 patch 两条路径（realm 脱同步风险），论文 §5.2.1 未声明
-//! 组级 realm 语义——记录为公开差异，随 typed world/编排工具层实现；
+//! 重建）——**M3-PR3 评估结案**：论文 Def 74 将 isolate 声明为应用于
+//! entry 的 context（组亦为 entry），但未展开组级 isolate 继承至子树的
+//! 传播语义；实现中组 isolate 因 GroupHolder 空键自然 no-op，构成与
+//! Def 74 的字面偏差。候选语义"继承至子树（最近注解优先）"需把
+//! effective-isolate 穿透 instantiation 与 Algorithm 7 patch 两条路径
+//!（realm 脱同步风险）——记录为公开差异，随 typed world/编排工具层实现；
 //! ④ **失败 fiber 静默加载**（审查 nit7，REVIEW-32a913d）：L-Raise 后
 //! `use_component` 对组件失败返回 `Ok(fiber)`（`Inactive(Some(ζ))`）——
 //! loader 不检查失败态，静默记为"已加载"；调用方需自行 `fiber.state()`

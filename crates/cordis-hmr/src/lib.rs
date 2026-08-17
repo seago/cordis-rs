@@ -27,12 +27,12 @@
 //! PR #21 行）。
 //!
 //! **⑫ 评估结案（M3-PR3）**：生产化适配器 = 解析 cargo metadata（JSON）
-//! 或 Cargo.toml（TOML）→ 模块图。仓库零第三方依赖纪律下无 TOML/JSON
-//! 解析器可用，手写解析器对真实清单脆弱且高风险；`HashMapGraph` 已把
-//! 算法（`classify`/`detect`/`reload`）证明为数据驱动——适配器只是数据
-//! 来源替换，不触碰算法。结论：适配器随 typed world / 编排工具层（届时
-//! 允许 serde_json/toml 依赖）落地的构建工具 crate，本里程碑记录为公开
-//! 差异关闭。
+//! 或 Cargo.toml（TOML）→ 模块图。算法 crate 无 TOML/JSON 解析器依赖
+//!（本 crate 仅 `anyhow` 错误处理；`serde` 为 wasmtime 传递依赖不可
+//! 用），手写解析器对真实清单脆弱且高风险；`HashMapGraph` 已把算法
+//!（`classify`/`detect`/`reload`）证明为数据驱动——适配器只是数据来源
+//! 替换，不触碰算法。结论：适配器随 typed world / 编排工具层（届时允许
+//! serde_json/toml 依赖）落地的构建工具 crate，本里程碑记录为公开差异关闭。
 //!
 //! ## 事务语义与失败模型（M2-PR1 协同）
 //!
