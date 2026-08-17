@@ -214,6 +214,7 @@
 | ⑧ | 恶意 guest 触发宿主 panic（越界 set → 核心 panic!）的边界——**M2-PR1（PR #17）收官**：不再依赖 catch_unwind 兜底——桥接 `forward_pending` 把越界写（核心纪律 panic 载荷）与绑定冲突（AlreadyBound）统一转为 `FiberError::raise` → 失败 outcome（fiber 失败态、宿主存活）；测试 `guest_undeclared_set_becomes_error_outcome_and_host_survives` | 本次新增（§6.3 补查风险点） | **已落地**（PR #17：语义处置随 ⑤ 一并收官） |
 | ⑨ | 运行时符号级动态解析 vs 编译期类型化 DI | 本次新增 | **评估完成（M2-PR6）**：保持通用 `context` 接口 + 符号级动态值 API——§6.4 的"运行时动态中介"正是论文要求（"dependency access must be dynamically mediated"）；结构检查由宿主侧注入键核对承担（load_guest 断言）；typed world（import 段即 inject 规格）列为 DX 增强（M3 或按需）——关闭为记录 |
 | M2 加载器 + HMR | 2026-08-17 | §5.2（§5.2.1/5.2.2） | **门禁判定：通过（含处置清单）**——§5.2.1 声明式配置：Def 74 全字段条目（id/url/isolate/intercept/config/disabled）落地 + 按字段最小扰动分派（url/revision 重建、**intercept 就地**、**isolate = Algorithm 7 realm 重指派**、disabled 卸载/重载）+ 配置树（group/include 分支条目、子列表 keyed diff 递归、组持有者 fiber = π 语义）+ 托管 realm（local/global + delimiter→树成员等价适应）；已知边界：双向写回未实现（条目权威）、组条目 isolate 不应用。§5.2.2 HMR：Alg 8/9/10 三阶段落地（分类不动点/过期检测/事务性重载 + 回滚——不进入半重载）；模块图 = HashMapGraph/WasmLeafGraph（cargo metadata/wit 解析为生产化适配器，边界记录）；门禁用例直证：保存即生效 + 其他组件状态保留 + 双回滚。**本次走查处置**：处置清单 ① ② ③ ④ ⑤ ⑥ ⑧ ⑨ 全部落地/评估收尾（⑦ broker 示例归 M3）；新增记录：⑩ 双向写回未实现 ⑪ 组条目 isolate 不应用 ⑫ 模块图生产化适配器 | 处置清单（下里程碑首批任务）：⑦ §6.2 broker 示例（M3 案例素材）；⑩ 双向写回（组件→条目方向，M3 评估）；⑪ 组条目 isolate 注解（M3 或 typed world 时）；⑫ cargo metadata/wit 模块图适配器（M3 或按需） |
+| M3 案例验证 | 2026-08-17 | §5.3（+ §6.2 服务代理、§5.1.2/§5.3 基准量化） | **门禁判定：通过（含处置清单收口）**——逐条对照无未解释偏差（详见下方「M3 走查记录」）：§5.3 Koishi 案例形态级复现（IM adapter 提供 platform / 数据库驱动提供存储 / 功能插件声明为共效应并访问）——运行时重配置（切换存储后端 / 重连 adapter）只重激活解析依赖变化的依赖者（bot 重激活 fiber 不变、无关组件不受影响），依赖不可用保持 Inactive 直到出现不报错，跨独立作者代码经共效应键组合一致；时间组合（卸载单插件效果不需重启宿主、自动逆组合无需手写卸载路径、HMR 保存生效）经 loader/cordis-hmr 直证；§6.2 服务代理（处置⑦ broker 落地，审查重排依赖方向后闭环）；§5.3 "future work" 的量化测量由 M3-PR2 bench 补充（notify 扫描线性直证 / 传播净成本 / loader O(N²) 协调总账）。**本次走查处置**：处置清单 ⑦ 落地、⑩⑪⑫ 评估收口（PR #24/#26）；新增记录：bench 已知边界 ①②③（loader desired-diff O(N²) 索引优化、激活/teardown 序列残差、CI 余量校准） | 无未解释偏差（范围说明 2 项：协作规模 4000+ 插件不可复现、浏览器第二运行时未复现——均以形态/载体级证据对应，非偏差） |
 
 
 ## M2 走查记录（2026-08-17，PR #23）
@@ -248,7 +249,7 @@
 |---|---|---|
 | ⑦ | §6.2 broker 示例（可表达性演示） | M3 案例素材 |
 | ⑩ | 双向写回（组件→条目方向） | **评估完成（M3-PR3，PR #26）**：条目权威为设计决策（desired 树由编排方持有）；组件侧杆杠 = `Fiber::retire`（运行时退役 + 级联卸载），退役**粘滞**跨未变 apply——语义钉死测试 `retired_component_persists_across_unchanged_apply`；写回方向属编排责任，公开差异关闭 |
-| ⑪ | 组条目 isolate 注解 | **评估完成（M3-PR3，PR #26）**：候选语义"继承至子树（最近注解优先）"需 effective-isolate 穿透 instantiation 与 Algorithm 7 patch 两条路径（realm 脱同步风险）；论文 §5.2.1 未声明组级 realm 语义（组 = loader 树构造）——记录为公开差异，随 typed world/编排工具层实现 |
+| ⑪ | 组条目 isolate 注解 | **评估完成（M3-PR3，PR #26）**：论文 Def 74 声明 isolate 应用于 entry 的 context（组亦为 entry）但未展开组级继承传播；实现中组 isolate 因 GroupHolder 空键自然 no-op（与 Def 74 字面偏差）——候选语义"继承至子树（最近注解优先）"需 effective-isolate 穿透 instantiation 与 Algorithm 7 patch 两条路径（realm 脱同步风险）；记录为公开差异，随 typed world/编排工具层实现 |
 | ⑫ | cargo metadata / wit 模块图适配器 | **评估完成（M3-PR3，PR #26）**：算法 crate 无 TOML/JSON 解析器依赖（hmr 仅 anyhow 错误处理；serde 为 wasmtime 传递依赖不可用）；`HashMapGraph` 已证明算法数据驱动（适配器仅换数据源）；适配器随 typed world/构建工具 crate 落地（届时允许 serde_json/toml），公开差异关闭 |
 
 ### Algorithm 6 适应记录（REVIEW-e8bd96e nit1）
@@ -259,3 +260,36 @@
 可能读到旧 realm 的绑定或 NotBound（映射 `Inactive`）。同步引擎中重指派
 与访问不可并发（单线程、调用链内原子），漂移仅影响"重指派进行中的
 同步调用链"——记录为已知边界（精确判别留待 typed world / 快照 realm）。
+
+## M3 走查记录（2026-08-17，PR #27）
+
+> 程序（PLAN §7）：重读 §5.3 → 逐条核对实现/测试/bench 证据 → 补查映射 → 走查记录 + 门禁判定。
+> 稳定态确认：`cargo test --workspace` 33 套测试全绿、clippy/fmt 门禁干净、三 PR（#24 im-bot 案例、#25 bench、#26 处置评估）审查闭环。
+
+### §5.3 Case Study: Koishi（案例研究）
+
+| 论文段落 | 实现证据 | 对照 |
+|---|---|---|
+| 规模与代表性：4000+ 社区插件、IM 适配器/数据库驱动/控制台/终端用户功能 | 无法复现协作规模；形态级验证（三层拓扑 + 运行时操作）+ bench 量化补充（M3-PR2） | **范围说明**（非偏差：论文为存在性结论，本仓库以可复现迷你案例验证其形态） |
+| 表达性：一切功能 = §5.1 上下文原语之上的插件，宿主只贡献领域词汇 | im-bot 的 adapter/database/bot 均为 `#[component]` 普通组件（inject/provide 键声明），无宿主特判；broker（§6.2 服务代理）同型 | **对应**（`examples/im-bot/src/main.rs`、`bin/broker.rs`） |
+| 通用性：同一模型在**第二运行时**（web console）重现；原语固定、含义留给应用 | 仓库跨语言/载体演示：Rust + Go 双语言 guest 在同一 loader 互通（M1-PR14）、wasm 沙箱载体（M1）——原语语义固定、各应用自行解释 | **对应**（载体级证据：浏览器运行时未复现，以 wasm 载体 + 双语言 guest 作通用性观察） |
+| 时间组合①：卸载单插件效果不需要重启宿主 | loader `disabled` 切换 → 整棵卸载级联 + 可逆效应自动撤销（`disabled_toggle_unloads_and_reloads`；broker 场景 3 卸载后备 = 注册逆自动执行、仅撤路由集） | **对应** |
+| 时间组合②：上下文中介效果被追踪、逆自动组合 → 插件作者无需手写卸载路径（locality of concern） | im-bot/broker 各组件 `apply_impl` 均无手写 dispose 逻辑——撤销全部经 `ctx.set` 绑定逆 / `ctx.effect` 逆自动执行（broker 后备注册逆、三层绑定逆）；`retired_component_persists_across_unchanged_apply` 钉死退役粘滞与条目权威 | **对应**（直接论据：无卸载路径的前提下效果被自动撤回） |
+| 时间组合③：HMR 保存生效、保留缓存状态与存活连接 | cordis-hmr Alg 8/9/10 事务重载 + 双回滚；`hmr_reload_applies_new_version_keeping_other_components`（其他组件状态保留 = 连接/状态不丢）（M2 门禁） | **对应**（M2 已走查） |
+| 空间组合拓扑：IM adapter 提供 platform、数据库驱动提供存储、功能插件声明为共效应并访问 | im-bot 三层：`PlatformKey`（adapter）/ `DbKey`（database）/ bot 注入两者、提供 `ReplyKey`；bot 经 `ctx.get` 访问两层 | **对应**（main.rs） |
+| 运行时重配置：切换存储后端 / 重连 adapter → 只重激活解析依赖变化的依赖者（§3.2） | main.rs 场景 1/2（bot 重激活、fiber 不变；adapter/database 不受影响）；bench 场景 B ExecCount 直证 bot 恰 1 次、adapter 0 次、与 M 无关；同供给键替换双路径（同条目 revision 重建 + 跨条目替换测试） | **对应**（§3.2 重激活局部性实证） |
+| 依赖不可用 → 保持 inactive 直到出现、不报错（"stays inactive until it appears, without erroring"） | main.rs 场景 3：移除 adapter → bot `Inactive`（不 panic/不报错）；adapter 重现 → 自动激活 | **对应** |
+| 跨独立作者代码组合一致（只协调共效应键） | im-bot 三组件独立定义（三个 struct/impl，无相互引用），仅经键连接；broker 后备/broker/消费者仅经 `RegKey`/`ServiceKey` 键连接 | **对应** |
+| Threats to validity：存在性/采纳性结论；量化测量 = future work | M3-PR2 bench 报告对本实现作量化补充（notify 扫描线性直证 / 传播净成本 / loader 协调 O(N²) 总账），明确论文未主张定量（M3-BENCH.md §1） | **记录**（论文留作 future work 的量化，本报告作出补充） |
+
+### 门禁判定
+
+| 门禁项 | 证据 | 判定 |
+|---|---|---|
+| 三层拓扑案例全断言（adapter/database/功能插件；切换后端/重连/依赖不可用） | `cargo run -p im-bot`（M3-PR1，REVIEW-d1263fa 闭环） | **通过** |
+| §6.2 broker 示例（处置⑦ 落地） | `cargo run -p im-bot --bin broker`（M3-PR1，审查重排依赖方向后闭环） | **通过** |
+| bench 报告产出（notify 扇出、切换延迟） | `docs/bench/M3-BENCH.md` + `cargo run -p im-bot --bin bench`（M3-PR2，三层分离测量 + REVIEW-bbb252a 闭环） | **通过** |
+| 处置⑩⑪⑫ 评估收尾 | 退役粘滞语义测试 + 已知边界文档 + THEORY-MAP 处置行（M3-PR3，REVIEW-d457b60 闭环） | **通过** |
+| 走查 §5.3 无未解释偏差 | 上表逐条对照；范围说明 2 项（协作规模、浏览器第二运行时）均已注明非偏差 | **通过** |
+
+**M3 门禁判定：通过（5/5）**——案例、broker、bench、处置评估、走查 §5.3 五门禁全部达成；处置清单（⑦ 落地、⑩⑪⑫ 评估收口）全部闭环；无未解释偏差（2 项范围说明非偏差）。
