@@ -1,5 +1,6 @@
 //! Fiber（论文 Def 44/49）与生命周期状态。
 
+use std::any::Any;
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -115,7 +116,9 @@ pub struct Fiber {
     /// `fiber.dispose`，Table 2）。
     pub(crate) ctx: Rc<Context>,
     /// `e(config)`：config 绑定的效应函数（Algorithm 4 第 9 行）。
-    pub(crate) apply: Box<dyn Fn() -> Box<dyn EffectIter>>,
+    /// 可换（`RefCell`）：§5.2.1 双向绑定的组件侧更新（[`Fiber::update`]）
+    /// 就地替换本闭包后重跑，fiber 身份保留。
+    pub(crate) apply: RefCell<Box<dyn Fn() -> Box<dyn EffectIter>>>,
     /// 组件实例（读取 `d(k)` 声明元数据，Def 30 的 `𝔇inter`；M2-PR2）。
     pub(crate) component: Rc<dyn Component>,
     /// `τ`：退役标志。
@@ -183,5 +186,23 @@ impl Fiber {
     pub fn retire(self: &Rc<Self>) {
         self.retired.set(true);
         self.ctx.runtime().refresh(self);
+    }
+
+    /// 就地更新配置（§5.2.1 "the binding runs in both directions" 的组件侧；
+    /// TS `Fiber.update` 参照，fiber.ts:476）。
+    ///
+    /// 语义：换 config 闭包 → 逆转当前全部效应（依赖者级联停用，Thm 63 序）
+    /// → 以新配置重跑（fiber **身份保留**，非重建）→ 绑定重装（依赖者级联
+    /// 恢复）。失败（L-Raise）→ `Inactive(ζ)`，与 `reload` 同路径。
+    ///
+    /// 仅限 **Active** fiber 调用（TS `assertActive` 同型：非激活调用 =
+    /// 协议违反，panic = bug）。写回观察者（[`Runtime::set_update_hook`]）
+    /// 在重跑前以新 config 触发——loader 经此实现条目侧写回。
+    pub fn update(self: &Rc<Self>, config: Rc<dyn Any>) {
+        assert!(
+            matches!(&*self.state.borrow(), FiberState::Active { .. }),
+            "Fiber::update 仅 Active fiber 可用（§5.2.1 双向绑定；INACTIVE_EFFECT）"
+        );
+        self.ctx.runtime().update_fiber(self, config);
     }
 }

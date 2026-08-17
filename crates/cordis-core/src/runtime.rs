@@ -55,6 +55,9 @@ pub enum RegistryError {
     HasChildren,
 }
 
+/// 更新观察者（§5.2.1 双向绑定条目侧）：`(&Fiber, 新 config)`。
+pub type UpdateHook = dyn Fn(&Fiber, Rc<dyn Any>) + 'static;
+
 /// 运行时：共享共效应表 `σ`、fiber registry `Fγ` 与通知反应器。
 pub struct Runtime {
     /// `σ`：按 realm 键控的依赖表（Def 28）。
@@ -65,6 +68,9 @@ pub struct Runtime {
     pub(crate) fibers: RefCell<HashMap<FiberId, Rc<Fiber>>>,
     /// 名字计数器（Def 45：名称原子、绝不复用）。
     next: Cell<u64>,
+    /// 更新观察者（§5.2.1 双向绑定条目侧；TS `internal/update` 钩子参照）：
+    /// [`Fiber::update`] 以新 config 触发，loader/编排方注册以写回条目。
+    update_hook: RefCell<Option<Rc<UpdateHook>>>,
 }
 
 impl Default for Runtime {
@@ -81,6 +87,7 @@ impl Runtime {
             reactors: RefCell::new(Vec::new()),
             fibers: RefCell::new(HashMap::new()),
             next: Cell::new(0),
+            update_hook: RefCell::new(None),
         };
         runtime
             .reactors
@@ -210,7 +217,7 @@ impl Runtime {
             inject,
             provide,
             ctx: fiber_ctx,
-            apply,
+            apply: RefCell::new(apply),
             component: Rc::clone(&component),
             retired: Cell::new(false),
             state: RefCell::new(FiberState::Inactive(None)),
@@ -361,6 +368,33 @@ impl Runtime {
         };
     }
 
+    /// 注册更新观察者（§5.2.1 双向绑定条目侧；通常由 loader 在构造时注册）。
+    ///
+    /// 观察者在 [`Fiber::update`] 换闭包**之前**以新 config 触发（TS
+    /// `internal/update` 瀑布先写回后重启的序）；回调 panic = 宿主 bug（传播）。
+    pub fn set_update_hook(&self, hook: Option<Rc<UpdateHook>>) {
+        *self.update_hook.borrow_mut() = hook;
+    }
+
+    /// §5.2.1 双向绑定组件侧（TS `Fiber.update` 参照）：换 config 闭包 →
+    /// 强制重跑（[`unload`] 逆转当前效应 → 目标未变 → 链式 [`reload`]）。
+    ///
+    /// fiber **身份保留**（非重建）；依赖者因绑定撤销/重装级联停用/恢复
+    /// （与 TS `restart()` 行为一致）；新配置下的重跑失败 = L-Raise →
+    /// `Inactive(ζ)`（与 `reload` 同路径）。
+    pub fn update_fiber(&self, fiber: &Rc<Fiber>, config: Rc<dyn Any>) {
+        // 写回观察者先行（TS `internal/update` 序：先写回后重启）。
+        if let Some(hook) = &*self.update_hook.borrow() {
+            hook(fiber, Rc::clone(&config));
+        }
+        let component = Rc::clone(&fiber.component);
+        let ctx = Rc::clone(&fiber.ctx);
+        let new_apply: Box<dyn Fn() -> Box<dyn EffectIter>> =
+            Box::new(move || component.apply(Rc::clone(&ctx), config.as_ref()));
+        *fiber.apply.borrow_mut() = new_apply;
+        self.unload(fiber);
+    }
+
     /// reload（Algorithm 5 第 12–23 行）：执行组件效应并承诺视图。
     ///
     /// - `committed ← resolve(inject)`（当前各键提供者）；
@@ -391,7 +425,7 @@ impl Runtime {
             let fiber = Rc::clone(fiber);
             move || fiber.target.borrow().as_ref() == Some(&guard_target)
         };
-        let iter = (fiber.apply)();
+        let iter = (fiber.apply.borrow())();
         let raised =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(iter, guard)));
         let recover = match raised {

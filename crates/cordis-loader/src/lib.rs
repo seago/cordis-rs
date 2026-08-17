@@ -56,7 +56,7 @@ use cordis_core::context::InterceptMeta;
 use cordis_core::effect::{EffectIter, once};
 use cordis_core::keyset::KeySet;
 use cordis_core::symbol::Symbol;
-use cordis_core::{Component, Context, Disposer, Fiber, FiberId, Runtime};
+use cordis_core::{Component, Context, Disposer, Fiber, FiberId, FiberState, Runtime};
 
 /// 隔离注解（Def 74 的 `isolate`；§5.2.1 托管 realm 的两种作用域）。
 ///
@@ -140,6 +140,12 @@ pub struct Entry {
     pub isolate: Option<IsolateAnnotation>,
     /// 拦截注解（Def 74 的 `intercept`：键 → 元数据，就地更新不重建）。
     pub intercept: Intercepts,
+    /// **注入携带配置**（G2，TS `EntryOptions.inject` 参照）：键 → 拦截
+    /// 元数据，实例化时应用（遮蔽同键 `intercept`，TS fiber 层 inject
+    /// 遮蔽 entry 层 intercept 的对应）；读取方经 [`Context::get_meta`]
+    /// 右偏合并消费（Def 30/31 的 `ι(k)` 实用化）。组条目上应用后由
+    /// 派生链拷贝继承给子条目。
+    pub inject: Intercepts,
     /// 配置（绑定进 `apply` 形成效应函数，Algorithm 4 第 9 行）。
     /// 以 [`Rc`] 持有以便重建时复用；**变更检测依赖 [`Entry::revision`]**
     /// （配置值本身不可比较）。
@@ -159,6 +165,7 @@ impl fmt::Debug for Entry {
             .field("component", &self.component)
             .field("isolate", &self.isolate)
             .field("intercept", &self.intercept)
+            .field("inject", &self.inject)
             .field("revision", &self.revision)
             .field("disabled", &self.disabled)
             .field("children", &self.children)
@@ -180,6 +187,7 @@ impl Entry {
             component: component.into(),
             isolate: None,
             intercept: Intercepts::new(),
+            inject: Intercepts::new(),
             config,
             revision,
             disabled,
@@ -195,6 +203,7 @@ impl Entry {
             component: String::new(),
             isolate: None,
             intercept: Intercepts::new(),
+            inject: Intercepts::new(),
             config: Rc::new(()),
             revision: 0,
             disabled: false,
@@ -217,6 +226,17 @@ impl Entry {
     /// 设置拦截注解。
     pub fn with_intercept<M: InterceptMeta>(mut self, key: Symbol, meta: M) -> Self {
         self.intercept.insert(key, meta);
+        self
+    }
+
+    /// 设置注入携带配置（G2：TS `EntryOptions.inject` 参照）——实例化时
+    /// 应用并**遮蔽同键**拦截注解（TS fiber 层 inject 遮蔽 entry 层
+    /// intercept）；读取方经 [`Context::get_meta`] 右偏合并消费。
+    ///
+    /// **变更纪律（同 config）**：值不可比较，已加载条目的 inject 变更须
+    /// 随 `revision` 递增触发重建（reconcile 不感知本字段）。
+    pub fn with_inject<M: InterceptMeta>(mut self, key: Symbol, meta: M) -> Self {
+        self.inject.insert(key, meta);
         self
     }
 
@@ -306,6 +326,49 @@ impl Loader {
         self.components.borrow().get(name).cloned()
     }
 
+    /// **双向绑定条目侧写回**（§5.2.1 "the binding runs in both
+    /// directions"；TS loader `internal/update` 钩子参照，loader/index.ts:74）：
+    /// 就地更新已加载条目的 config 并对条目 fiber 做**就地重跑**（[`Fiber::update`]，
+    /// 身份保留、依赖者级联），不递增 revision——协调键不变 ⟹ 后续同
+    /// revision 的 apply 不重建（写回不被清除）。调用方作为 desired 树的
+    /// 所有者自行决定持久化。
+    pub fn update_entry(&self, id: &str, config: Rc<dyn Any>) {
+        // 1. 条目书签（供后续协调可见；整棵树递归查找）。
+        if let Some(l) = find_loaded_mut(&mut self.entries.borrow_mut(), id) {
+            l.config = Rc::clone(&config);
+        }
+        // 2. 条目 fiber 就地重跑（Active 时；revision 未变，fiber 保留）。
+        if let Some(fiber) = self.fiber(id)
+            && !fiber.retired()
+            && matches!(&*fiber.state(), FiberState::Active { .. })
+        {
+            fiber.update(config);
+        }
+    }
+
+    /// 已加载条目当前 config（双向绑定写回后可查询；None = 条目不存在）。
+    /// 整棵树递归查找。
+    pub fn entry_config(&self, id: &str) -> Option<Rc<dyn Any>> {
+        find_loaded(&self.entries.borrow(), id).map(|l| Rc::clone(&l.config))
+    }
+
+    /// 注册更新观察者（loader 侧写回通道）：把 [`Runtime::set_update_hook`]
+    /// 接到本 loader——组件侧 [`Fiber::update`] 触发时，自动把新 config 写入
+    /// 该 fiber 所属条目的书签（TS `internal/update` 的 loader 半段）。
+    ///
+    /// 需要 `Rc<Loader>`（观察者闭包持有 loader 引用）。
+    pub fn register_update_hook(self: &Rc<Self>) {
+        let loader = Rc::clone(self);
+        self.runtime
+            .set_update_hook(Some(Rc::new(move |fiber: &Fiber, config: Rc<dyn Any>| {
+                if let Some(id) = loader.entry_of(fiber.id())
+                    && let Some(l) = find_loaded_mut(&mut loader.entries.borrow_mut(), &id)
+                {
+                    l.config = Rc::clone(&config);
+                }
+            })));
+    }
+
     /// 条目当前 fiber（组 = 持有者 fiber；未加载 / 已卸载 / 未满足依赖时为
     /// `None`）。整棵树递归查找。
     pub fn fiber(&self, id: &str) -> Option<Rc<Fiber>> {
@@ -317,6 +380,23 @@ impl Loader {
             return loaded.fiber.clone();
         }
         map.values().find_map(|l| self.find_fiber(id, &l.children))
+    }
+
+    /// 反查 fiber → 条目 id（写回映射；整棵树递归）。
+    fn entry_of(&self, fid: FiberId) -> Option<String> {
+        self.entry_of_in(&fid, &self.entries.borrow())
+    }
+
+    fn entry_of_in(&self, fid: &FiberId, map: &HashMap<String, LoadedEntry>) -> Option<String> {
+        for (id, l) in map {
+            if l.fiber.as_ref().is_some_and(|f| f.id() == *fid) {
+                return Some(id.clone());
+            }
+            if let Some(found) = self.entry_of_in(fid, &l.children) {
+                return Some(found);
+            }
+        }
+        None
     }
 
     /// 已加载条目数（整棵树）。
@@ -508,6 +588,10 @@ impl Loader {
             for (key, meta) in entry.intercept.iter() {
                 ctx.intercept_set_boxed(key, meta.clone_box());
             }
+            // G2：组注入携带配置——子条目 ctx 经 derive 拷贝继承。
+            for (key, meta) in entry.inject.iter() {
+                ctx.intercept_set_boxed(key, meta.clone_box());
+            }
             ctx
         } else {
             let component = self
@@ -601,6 +685,10 @@ impl Loader {
             }
         }
         for (key, meta) in entry.intercept.iter() {
+            ctx.intercept_set_boxed(key, meta.clone_box());
+        }
+        // G2 注入携带配置：后应用 ⟹ 同键遮蔽 intercept（TS 分层同序）。
+        for (key, meta) in entry.inject.iter() {
             ctx.intercept_set_boxed(key, meta.clone_box());
         }
         ctx
@@ -809,6 +897,29 @@ impl Component for GroupHolder {
     fn apply(&self, _ctx: Rc<Context>, _config: &dyn Any) -> Box<dyn EffectIter> {
         Box::new(once(Box::new(|| Box::new(|| {}) as Disposer)))
     }
+}
+
+/// 递归查找已加载条目（整棵树；`update_entry`/`entry_config` 用）。
+fn find_loaded<'a>(map: &'a HashMap<String, LoadedEntry>, id: &str) -> Option<&'a LoadedEntry> {
+    if let Some(l) = map.get(id) {
+        return Some(l);
+    }
+    map.values().find_map(|l| find_loaded(&l.children, id))
+}
+
+fn find_loaded_mut<'a>(
+    map: &'a mut HashMap<String, LoadedEntry>,
+    id: &str,
+) -> Option<&'a mut LoadedEntry> {
+    if map.contains_key(id) {
+        return map.get_mut(id);
+    }
+    for l in map.values_mut() {
+        if let Some(found) = find_loaded_mut(&mut l.children, id) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1559,6 +1670,278 @@ mod tests {
             ),
             "consumer 随 provider 重建恢复"
         );
+        assert!(runtime.is_quiet(), "静止");
+    }
+
+    /// G1（TS-REFERENCE-GAP）双向绑定条目侧（§5.2.1 "the binding runs in
+    /// both directions"；TS loader `internal/update` 参照）：`update_entry`
+    /// 就地更新 config + 条目 fiber **就地重跑**（身份保留、依赖者级联），
+    /// 不递增 revision——同 revision 的后续 apply 不重建（写回不被清除）。
+    #[test]
+    fn update_entry_replaces_config_in_place() {
+        let (loader, runtime) = loader();
+        loader.apply(&[
+            entry("provider", "provider", "pg", 1, false),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        let provider_id = loader.fiber("provider").unwrap().id();
+        let base = {
+            let store = runtime.store();
+            store
+                .get_value(Symbol::intern("val"))
+                .expect("val 绑定")
+                .downcast_ref::<String>()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(base, "pg", "初始绑定 = 条目 config");
+
+        loader.update_entry("provider", Rc::new("pg2".to_string()));
+        assert_eq!(
+            loader.fiber("provider").unwrap().id(),
+            provider_id,
+            "update_entry = 就地重跑（fiber 身份保留，非重建）"
+        );
+        assert!(matches!(
+            &*loader.fiber("provider").unwrap().state(),
+            FiberState::Active { .. }
+        ));
+        assert!(matches!(
+            &*loader.fiber("consumer").unwrap().state(),
+            FiberState::Active { .. }
+        ));
+        let value = {
+            let store = runtime.store();
+            store
+                .get_value(Symbol::intern("val"))
+                .expect("val 绑定")
+                .downcast_ref::<String>()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(value, "pg2", "绑定反映新 config");
+        assert_eq!(
+            loader
+                .entry_config("provider")
+                .unwrap()
+                .downcast_ref::<String>()
+                .unwrap(),
+            "pg2",
+            "条目书签已写回"
+        );
+        assert!(runtime.is_quiet(), "update_entry 后静止");
+
+        // 同 revision 的 apply 零操作：**fiber 状态保留**（协调键未变、
+        // 不重建——就地重跑后的新配置不被清除）；书签则回映 desired
+        //（reconcile 的 no-op 分支把 desired config 拷回记录——书签是
+        // 协调记录而非权威源，调用方作为树所有者决定持久化）。
+        loader.apply(&[
+            entry("provider", "provider", "pg", 1, false),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        assert_eq!(
+            loader.fiber("provider").unwrap().id(),
+            provider_id,
+            "同 revision apply 零操作（fiber 身份保留）"
+        );
+        let value = {
+            let store = runtime.store();
+            store
+                .get_value(Symbol::intern("val"))
+                .expect("val 绑定")
+                .downcast_ref::<String>()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(value, "pg2", "fiber 层写回保留（不重建）");
+        assert_eq!(
+            loader
+                .entry_config("provider")
+                .unwrap()
+                .downcast_ref::<String>()
+                .unwrap(),
+            "pg",
+            "书签回映 desired（协调记录非权威源）"
+        );
+    }
+
+    /// G1 组件侧自更新 → loader 观察者写回：`register_update_hook` 把
+    /// runtime 钩子接到 loader——`Fiber::update` 触发时新 config 自动写入
+    /// 所属条目书签（TS `internal/update` 的 loader 半段）。
+    #[test]
+    fn fiber_self_update_writes_back_through_loader_hook() {
+        let (loader, runtime) = loader();
+        loader.register_update_hook();
+        loader.apply(&[
+            entry("provider", "provider", "pg", 1, false),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        let provider_id = loader.fiber("provider").unwrap().id();
+
+        loader
+            .fiber("provider")
+            .unwrap()
+            .update(Rc::new("pg3".to_string()));
+        assert_eq!(
+            loader.fiber("provider").unwrap().id(),
+            provider_id,
+            "自更新 = 就地重跑"
+        );
+        assert_eq!(
+            loader
+                .entry_config("provider")
+                .unwrap()
+                .downcast_ref::<String>()
+                .unwrap(),
+            "pg3",
+            "观察者已把新 config 写回条目书签"
+        );
+        let value = {
+            let store = runtime.store();
+            store
+                .get_value(Symbol::intern("val"))
+                .expect("val 绑定")
+                .downcast_ref::<String>()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(value, "pg3", "绑定反映自更新");
+        assert!(runtime.is_quiet(), "自更新后静止");
+    }
+
+    /// G1 组内子条目自更新：写回映射（`entry_of`）命中嵌套条目。
+    #[test]
+    fn group_child_self_update_maps_to_nested_entry() {
+        let (loader, _runtime) = loader();
+        loader.register_update_hook();
+        loader.apply(&[Entry::group(
+            "g",
+            vec![
+                entry("child", "provider", "pg", 1, false),
+                entry("consumer", "consumer", "ignored", 1, false),
+            ],
+        )]);
+        loader
+            .fiber("child")
+            .unwrap()
+            .update(Rc::new("pg4".to_string()));
+        assert_eq!(
+            loader
+                .entry_config("child")
+                .unwrap()
+                .downcast_ref::<String>()
+                .unwrap(),
+            "pg4",
+            "组内子条目的自更新写回其自身书签"
+        );
+    }
+
+    // ── G2（TS-REFERENCE-GAP）：注入携带配置（Entry.inject）──────────
+
+    /// 读取 `fs` 键拦截元数据的提供者（G2 消费端：`get_meta` 右偏合并）。
+    fn meta_provider() -> Rc<TestComponent> {
+        Rc::new(TestComponent {
+            inject: spec(&[]),
+            provide: spec(&["fs"]),
+            effects: Box::new(|ctx, _config| {
+                Box::new(once(Box::new(move || {
+                    let meta = ctx.get_meta::<PathMeta>(Symbol::intern("fs"));
+                    let value = match &meta {
+                        Some(m) if m.read_only => "ro".to_string(),
+                        Some(m) => format!(
+                            "rw:{}",
+                            m.paths.iter().cloned().collect::<Vec<_>>().join(",")
+                        ),
+                        None => "none".to_string(),
+                    };
+                    ctx.set::<FsKey>(value).expect("绑定 fs")
+                })))
+            }),
+        })
+    }
+
+    /// G2 注入携带配置（TS `EntryOptions.inject` 参照）：条目注入的
+    /// 每键配置经 `get_meta` 右偏合并被提供者消费（Def 30/31 的 `ι(k)`
+    /// 实用化）；无注入时读不到元数据。
+    ///
+    /// 注：inject 变更与 config 同纪律——值不可比较，变更须随 revision
+    /// 递增触发重建（reconcile 不感知 inject 字段）。
+    #[test]
+    fn entry_inject_config_consumed_via_get_meta() {
+        // 有注入：提供者读到 `ro`。
+        let (l1, rt1) = loader();
+        l1.register_component("m", meta_provider());
+        l1.apply(&[Entry::new("p", "m", Rc::new(()), 0, false)
+            .with_inject(Symbol::intern("fs"), path_meta(&["/x"], true))]);
+        let value = {
+            let store = rt1.store();
+            store
+                .get_value(Symbol::intern("fs"))
+                .expect("fs 绑定")
+                .downcast_ref::<String>()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(value, "ro", "注入携带配置经 get_meta 合并消费");
+        assert!(rt1.is_quiet(), "静止");
+
+        // 无注入：独立系统读不到元数据。
+        let (l2, rt2) = loader();
+        l2.register_component("m", meta_provider());
+        l2.apply(&[Entry::new("p", "m", Rc::new(()), 0, false)]);
+        let value = {
+            let store = rt2.store();
+            store
+                .get_value(Symbol::intern("fs"))
+                .expect("fs 绑定")
+                .downcast_ref::<String>()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(value, "none", "无注入携带配置时读不到元数据");
+    }
+
+    /// G2 遮蔽序：同键 inject 后应用，遮蔽 entry 层 intercept
+    ///（TS fiber 层 inject 遮蔽 entry 层 intercept 的对应）。
+    #[test]
+    fn inject_shadows_intercept_for_same_key() {
+        let (loader, runtime) = loader();
+        loader.register_component("m", meta_provider());
+        loader.apply(&[Entry::new("p", "m", Rc::new(()), 0, false)
+            .with_intercept(Symbol::intern("fs"), path_meta(&["/i"], false))
+            .with_inject(Symbol::intern("fs"), path_meta(&["/j"], true))]);
+        let value = {
+            let store = runtime.store();
+            store
+                .get_value(Symbol::intern("fs"))
+                .expect("fs 绑定")
+                .downcast_ref::<String>()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(value, "ro", "inject（后应用）遮蔽 intercept");
+        assert!(runtime.is_quiet(), "静止");
+    }
+
+    /// G2 组条目注入携带配置：经派生链拷贝继承给子条目（提供者读取）。
+    #[test]
+    fn group_inject_inherits_to_children() {
+        let (loader, runtime) = loader();
+        loader.register_component("m", meta_provider());
+        loader.apply(&[
+            Entry::group("g", vec![Entry::new("p", "m", Rc::new(()), 0, false)])
+                .with_inject(Symbol::intern("fs"), path_meta(&["/g"], false)),
+        ]);
+        let value = {
+            let store = runtime.store();
+            store
+                .get_value(Symbol::intern("fs"))
+                .expect("fs 绑定")
+                .downcast_ref::<String>()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(value, "rw:/g", "组注入配置经派生继承给子条目");
         assert!(runtime.is_quiet(), "静止");
     }
 
