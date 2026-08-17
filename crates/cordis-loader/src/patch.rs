@@ -23,7 +23,9 @@ pub struct Patch {
     pub id: Option<String>,
     /// 向 `id` 组条目插入的子条目（非组条目 → 忽略，TS warn 同型）。
     pub insert: Option<Vec<Entry>>,
-    /// 组件名替换（`name` 变更 → 重建）。
+    /// 组件名替换（`name` 变更 → 重建）。**公开差异（REVIEW-e1b97e5
+    /// nit-1）**：TS 的 `name` 是定位/匹配护栏（不匹配即跳过、从不改写），
+    /// 本实现复用为**改名覆盖**——调用方按此语义使用。
     pub name: Option<String>,
     /// config 覆盖（`revision` 应随变更递增，同 config 纪律）。
     pub config: Option<Rc<dyn Any>>,
@@ -64,11 +66,24 @@ impl Patch {
 /// 递归匹配 `id`（组 children 内亦匹配）；`id` 未命中 → 忽略（TS warn
 /// 同型）。`insert` 的目标必须是组条目（`is_group`），否则忽略。
 pub fn apply_patches(entries: &[Entry], patches: &[Patch]) -> Vec<Entry> {
-    entries.iter().map(|e| patch_entry(e, patches)).collect()
+    let mut out: Vec<Entry> = entries.iter().map(|e| patch_entry(e, patches)).collect();
+    // 根层 insert（`id = None`；REVIEW-e1b97e5 major-2：TS `data.push`
+    // 同型——此前 `is_some_and` 使 None 永不命中 = 静默 no-op）。
+    for patch in patches {
+        if patch.id.is_none()
+            && let Some(children) = &patch.insert
+        {
+            out.extend(children.iter().cloned());
+        }
+    }
+    out
 }
 
 fn patch_entry(entry: &Entry, patches: &[Patch]) -> Entry {
     let mut out = entry.clone();
+    // 先应用**全部** patch 到本条目（字段覆盖 + insert）——每个 patch
+    // 对本条目恰好一次（REVIEW-e1b97e5 major-1：递归不得在循环体内，
+    // 否则多 patch 时嵌套组被重跑全量序列、insert 非幂等 → 重复插入）。
     for patch in patches {
         let id_match = patch.id.as_deref().is_some_and(|id| id == entry.id);
         if id_match {
@@ -90,13 +105,13 @@ fn patch_entry(entry: &Entry, patches: &[Patch]) -> Entry {
                 out.children.extend(children.iter().cloned());
             }
         }
-        // 递归子条目（组内 patch 也作用于嵌套条目）。
-        out.children = out
-            .children
-            .iter()
-            .map(|c| patch_entry(c, patches))
-            .collect();
     }
+    // 递归子条目（组内 patch 也作用于嵌套条目；每条目恰遍历一次）。
+    out.children = out
+        .children
+        .iter()
+        .map(|c| patch_entry(c, patches))
+        .collect();
     out
 }
 
@@ -170,6 +185,50 @@ mod tests {
             )],
         );
         assert_eq!(out2[1].children.len(), 0, "非组条目 insert 忽略");
+    }
+
+    #[test]
+    fn multiple_patches_do_not_duplicate_inserts() {
+        // REVIEW-e1b97e5 major-1 回归：递归在 patch 循环体内会令嵌套组
+        // 重跑全量序列（insert 非幂等 → 重复插入）；修复后恰一次。
+        let tree = vec![Entry::group(
+            "g",
+            vec![Entry::group("h", vec![entry("x", "comp", "v", 1, false)])],
+        )];
+        let patches = vec![
+            Patch::insert_into(Some("g".into()), vec![entry("c1", "comp", "v", 1, false)]),
+            Patch::insert_into(Some("g".into()), vec![entry("c2", "comp", "v", 1, false)]),
+        ];
+        let out = apply_patches(&tree, &patches);
+        let ids: Vec<&str> = out[0].children.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["h", "c1", "c2"],
+            "两个 patch 各插入一次（无重复；原嵌套组 h 保留）"
+        );
+        // 嵌套组本身不被重复处理。
+        let h_ids: Vec<&str> = out[0].children[0]
+            .children
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(h_ids, vec!["x"], "嵌套组子条目不被重复");
+    }
+
+    #[test]
+    fn root_insert_without_id_appends_to_top() {
+        // REVIEW-e1b97e5 major-2 回归：`insert_into(None, ...)` 根层插入
+        //（TS `data.push` 同型）。
+        let tree = vec![entry("a", "comp", "v", 1, false)];
+        let out = apply_patches(
+            &tree,
+            &[Patch::insert_into(
+                None,
+                vec![entry("z", "comp", "v", 1, false)],
+            )],
+        );
+        assert_eq!(out.len(), 2, "根层追加");
+        assert_eq!(out[1].id, "z");
     }
 
     #[test]
