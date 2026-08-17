@@ -4,8 +4,9 @@
 //! 层**（提供 `db`，持久存储）→ **功能插件**（`bot` 注入两者，提供
 //! `reply`）。§5.3 的运行时操作直证：
 //!
-//! 1. **切换存储后端**（同供给键替换，单次 apply）：只重激活解析依赖
-//!    变化的依赖者（bot 重建）；adapter 不受影响（fiber 不变）；
+//! 1. **切换存储后端**（同一条目 revision 递增 → database 重建，新
+//!    fiber 重新供给 `db` 键）：只重激活解析依赖变化的依赖者（bot 重激活）；
+//!    adapter 不受影响（fiber 不变）；
 //! 2. **重连 adapter**（退役 → 移除 → 重装）：bot 级联停用再自动重连；
 //!    database 不受影响（fiber 不变）；
 //! 3. **依赖不可用**：移除 adapter → bot 保持 Inactive（不报错）；
@@ -136,7 +137,8 @@ fn main() {
     );
     assert_quiet(&runtime, "初始装配");
 
-    // ── 1. 切换存储后端（sqlite → postgres，同供给键单次 apply）──────
+    // ── 1. 切换存储后端（sqlite → postgres：同一条目 revision 递增 ──
+    //    → database 重建 → 新 fiber 重供 db 键）
     loader.apply(&[
         entry("adapter", "adapter", "telegram"),
         Entry::new(
