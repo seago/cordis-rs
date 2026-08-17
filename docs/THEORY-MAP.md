@@ -264,7 +264,7 @@
 ## M3 走查记录（2026-08-17，PR #27）
 
 > 程序（PLAN §7）：重读 §5.3 → 逐条核对实现/测试/bench 证据 → 补查映射 → 走查记录 + 门禁判定。
-> 稳定态确认：`cargo test --workspace` 33 套测试全绿、clippy/fmt 门禁干净、三 PR（#24 im-bot 案例、#25 bench、#26 处置评估）审查闭环。
+> 稳定态确认：`cargo test --workspace` 全绿——118 个 `#[test]` 函数（`grep -rc '^\s*#\[test\]' crates examples` 计数）、33 条 `test result: ok` 摘要行（每个测试可执行文件 / doc-test 一条）、0 `FAILED`（REVIEW-567a770 nit1 修正口径）；clippy/fmt 门禁干净；三 PR（#24 im-bot 案例、#25 bench、#26 处置评估）审查闭环。
 
 ### §5.3 Case Study: Koishi（案例研究）
 
