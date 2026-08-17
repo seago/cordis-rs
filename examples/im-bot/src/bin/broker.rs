@@ -209,7 +209,7 @@ fn service(runtime: &Runtime) -> ServiceVal {
 fn assert_active(loader: &Loader, id: &str, what: &str) {
     assert!(
         matches!(
-            &*loader.fiber(id).expect(what).state(),
+            *loader.fiber(id).expect(what).state(),
             FiberState::Active { .. }
         ),
         "{what}：应保持 Active"

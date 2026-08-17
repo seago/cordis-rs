@@ -82,7 +82,7 @@ fn l_raise_records_error_outcome_and_recovers_completed_steps() {
     assert!(
         matches!(&*fiber.state(), FiberState::Inactive(Some(err)) if err.to_string().contains("第二步失败")),
         "L-Raise：fiber 以错误 outcome 终态：{:?}",
-        &*fiber.state()
+        *fiber.state()
     );
     // 已完成步骤已恢复：k0 绑定全清。
     assert!(
@@ -184,7 +184,7 @@ fn l_raise_failed_fiber_can_retry_activation() {
     assert!(
         matches!(&*f.state(), FiberState::Inactive(Some(_))),
         "首次激活失败：{:?}",
-        &*f.state()
+        *f.state()
     );
     assert!(runtime.is_quiet());
 
@@ -195,7 +195,7 @@ fn l_raise_failed_fiber_can_retry_activation() {
     assert!(
         matches!(&*f.state(), FiberState::Active { .. }),
         "重试后激活：{:?}",
-        &*f.state()
+        *f.state()
     );
     p2.retire();
     assert!(runtime.is_quiet());
@@ -281,7 +281,7 @@ fn l_raise_failure_unload_recovers_and_notifies() {
     assert!(
         matches!(&*provider2.state(), FiberState::Inactive(Some(err)) if err.to_string().contains("第二次激活失败")),
         "第 2 次激活失败 outcome：{:?}",
-        &*provider2.state()
+        *provider2.state()
     );
     // 失败卸载路径：依赖者保持停用、绑定全清、静止。
     assert!(

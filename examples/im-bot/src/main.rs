@@ -196,7 +196,7 @@ fn main() {
     ]);
     assert!(
         matches!(
-            &*loader.fiber("bot").expect("bot").state(),
+            *loader.fiber("bot").expect("bot").state(),
             FiberState::Inactive(_)
         ),
         "adapter 断开 → bot 级联停用"
@@ -219,7 +219,7 @@ fn main() {
     ]);
     assert!(
         matches!(
-            &*loader.fiber("bot").expect("bot").state(),
+            *loader.fiber("bot").expect("bot").state(),
             FiberState::Active { .. }
         ),
         "adapter 重连 → bot 自动重连"
@@ -251,7 +251,7 @@ fn main() {
     ]);
     assert!(
         matches!(
-            &*loader.fiber("bot").expect("bot").state(),
+            *loader.fiber("bot").expect("bot").state(),
             FiberState::Inactive(_)
         ),
         "依赖不可用 → bot Inactive（不报错）"
@@ -270,7 +270,7 @@ fn main() {
     ]);
     assert!(
         matches!(
-            &*loader.fiber("bot").expect("bot").state(),
+            *loader.fiber("bot").expect("bot").state(),
             FiberState::Active { .. }
         ),
         "adapter 出现 → bot 自动激活（§5.3）"

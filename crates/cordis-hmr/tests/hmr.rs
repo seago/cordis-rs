@@ -340,7 +340,7 @@ fn hmr_reload_rolls_back_on_component_failure() {
     // 回滚后旧版本生效。
     assert_eq!(sum_of(&runtime), "sum(1)", "回滚到旧版本");
     assert!(matches!(
-        &*loader.fiber("c").unwrap().state(),
+        *loader.fiber("c").unwrap().state(),
         FiberState::Active { .. }
     ));
     assert!(runtime.is_quiet(), "静止");
@@ -411,7 +411,7 @@ fn hmr_reload_rolls_back_before_repanic_on_provision_clash() {
     assert_eq!(sum_of(&runtime), "sum(1)", "回滚到旧版本");
     assert!(
         matches!(
-            &*loader.fiber("c").expect("c 仍在").state(),
+            *loader.fiber("c").expect("c 仍在").state(),
             FiberState::Active { .. }
         ),
         "consumer 状态保留"

@@ -423,7 +423,7 @@ fn main() {
         loader.apply(&all);
         let bot_first = loader.fiber("bot").expect("bot 激活").id();
         assert!(matches!(
-            &*loader.fiber("bot").expect("bot").state(),
+            *loader.fiber("bot").expect("bot").state(),
             FiberState::Active { .. }
         ));
         let adapter_base = adapter_count.0.get();

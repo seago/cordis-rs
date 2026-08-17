@@ -1417,7 +1417,7 @@ mod tests {
         // c 仍解析旧 realm → 依赖丢失 → 停用（affected 通知）。
         assert!(
             matches!(
-                &*loader.fiber("c").expect("c 仍在").state(),
+                *loader.fiber("c").expect("c 仍在").state(),
                 FiberState::Inactive(_)
             ),
             "c 停用（提供者 realm 迁移，依赖不可见）"
@@ -1440,7 +1440,7 @@ mod tests {
         );
         assert!(
             matches!(
-                &*loader.fiber("c").unwrap().state(),
+                *loader.fiber("c").unwrap().state(),
                 FiberState::Active { .. }
             ),
             "c 在新 realm 重新激活"
@@ -1465,7 +1465,7 @@ mod tests {
         assert!(loader.fiber("a").is_some(), "组内子条目激活");
         assert!(
             matches!(
-                &*loader.fiber("c").unwrap().state(),
+                *loader.fiber("c").unwrap().state(),
                 FiberState::Active { .. }
             ),
             "c 依赖组内提供者激活"
@@ -1494,10 +1494,7 @@ mod tests {
         );
         drop(store);
         assert!(
-            matches!(
-                &*loader.fiber("c").unwrap().state(),
-                FiberState::Inactive(_)
-            ),
+            matches!(*loader.fiber("c").unwrap().state(), FiberState::Inactive(_)),
             "c 停用（依赖随 realm 迁移）"
         );
         assert!(runtime.is_quiet(), "静止");
@@ -1520,7 +1517,7 @@ mod tests {
         assert!(provider.retired(), "退役标记（组件侧杆杠）");
         assert!(
             matches!(
-                &*loader.fiber("consumer").unwrap().state(),
+                *loader.fiber("consumer").unwrap().state(),
                 FiberState::Inactive(_)
             ),
             "退役级联：consumer 停用"
@@ -1538,7 +1535,7 @@ mod tests {
         );
         assert!(
             matches!(
-                &*loader.fiber("consumer").unwrap().state(),
+                *loader.fiber("consumer").unwrap().state(),
                 FiberState::Inactive(_)
             ),
             "consumer 仍停用（未变 apply 不恢复）"
@@ -1550,14 +1547,14 @@ mod tests {
         ]);
         assert!(
             matches!(
-                &*loader.fiber("provider").unwrap().state(),
+                *loader.fiber("provider").unwrap().state(),
                 FiberState::Active { .. }
             ),
             "条目变更（revision）→ 退役 fiber 被重建"
         );
         assert!(
             matches!(
-                &*loader.fiber("consumer").unwrap().state(),
+                *loader.fiber("consumer").unwrap().state(),
                 FiberState::Active { .. }
             ),
             "consumer 随 provider 重建恢复"
