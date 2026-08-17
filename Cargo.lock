@@ -889,6 +889,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "im-bot"
+version = "0.1.0"
+dependencies = [
+ "cordis",
+ "cordis-core",
+ "cordis-loader",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,17 @@
+[package]
+name = "im-bot"
+default-run = "im-bot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "IM-bot 迷你案例（论文 §5.3 Koishi 式三层依赖拓扑：adapter/database/功能插件 + 服务代理 broker）"
+
+[lints]
+workspace = true
+
+[dependencies]
+cordis = { path = "../../crates/cordis" }
+cordis-core = { path = "../../crates/cordis-core" }
+cordis-loader = { path = "../../crates/cordis-loader" }
