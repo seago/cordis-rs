@@ -382,7 +382,8 @@ impl Runtime {
     }
 
     /// §5.2.1 双向绑定组件侧（TS `Fiber.update` 参照）：换 config 闭包 →
-    /// 强制重跑。两条路径（REVIEW-97bb598 major-1 采纳 TS 语义）：
+    /// 强制重跑（Algorithm 5 的 reload/unload 强制实例）。两条路径
+    ///（REVIEW-97bb598 major-1 采纳 TS 语义）：
     ///
     /// - **Active** → [`unload`] 逆转当前效应 → 目标未变 → 链式 [`reload`]
     ///   （fiber 身份保留；依赖者因绑定撤销/重装级联停用/恢复）；

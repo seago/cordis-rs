@@ -189,7 +189,9 @@ impl Fiber {
     }
 
     /// 就地更新配置（§5.2.1 "the binding runs in both directions" 的组件侧；
-    /// TS `Fiber.update` 参照，fiber.ts:476）。
+    /// TS `Fiber.update` 参照，fiber.ts:476）。实现 = Algorithm 5 的
+    /// reload/unload **强制实例**（换 config 闭包 → 逆转当前效应 →
+    /// 链式重载；fiber 身份保留）。
     ///
     /// 语义：换 config 闭包 → 逆转当前全部效应（依赖者级联停用，Thm 63 序）
     /// → 以新配置重跑（fiber **身份保留**，非重建）→ 绑定重装（依赖者级联
