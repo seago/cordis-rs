@@ -32,6 +32,7 @@
 | `relied_n(γ)`（撤离 guard） | Def 50 | 同步级联天然保证（依赖者先撤，Thm 63 测试）；显式 guard 随 async 化实现 | 单元 | 部分完成（PR #5 语义等价；显式化 PR #6） |
 | `use`（组件实例化） | Alg 4 | `Context::use_component`（`Runtime::register`，Def 47 注册回调效应） | 单元 | 完成（PR #5） |
 | `refresh` / `reload` / `unload` | Alg 5 | `Runtime::{refresh, reload, unload}`（惯性状态机） | 单元 | 完成（PR #5，同步版） |
+| `Fiber::update` / `update_fiber`（§5.2.1 双向绑定组件侧） | Alg 5（reload/unload 的**强制实例**）, §5.2.1 | `Fiber::update`（换 config 闭包 → unload 逆转当前效应 → 目标未变链式 reload，fiber 身份保留）/ `Runtime::update_fiber`（Active 与失败态双路径；失败态清 ζ + `refresh` 重算 target = **复活**）+ `Runtime::set_update_hook`（观察者先于重跑，loader 条目书签写回经 `update_entry`/`register_update_hook`） | `tests/update_binding.rs`（4：就地重跑身份保留/观察者序/失败复活/退役 panic）+ loader 6（update_entry 就地/自更新写回/组内映射/inject 消费/遮蔽序/组继承） | 完成（PR #29，REVIEW-97bb598 major-1 采纳 TS `_error = undefined` 复活语义；复活通道 = `l_raise_failed_fiber_can_retry_activation` 的 update 变体；退役粘滞/条目权威语义不变） |
 | 配置 Entry | Def 74 | `cordis_loader::{Entry, Loader}`（`register_component`/`apply`/`fiber`，§5.2.1 增量协调） | 单元 | 完成（PR #8 最小版：`id`/`config`（经 `revision`）/`disabled`/组件名） |
 
 ## 定理覆盖
