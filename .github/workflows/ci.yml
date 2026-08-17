@@ -74,3 +74,7 @@ jobs:
         run: |
           cargo run --quiet -p im-bot
           cargo run --quiet -p im-bot --bin broker
+
+      # M3 基准门禁：notify 扇出 + 切换延迟（断言通过 + 宽松绝对上界）。
+      - name: run im-bot bench (M3 基准)
+        run: cargo run --quiet -p im-bot --bin bench

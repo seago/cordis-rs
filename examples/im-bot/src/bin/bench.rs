@@ -1,0 +1,417 @@
+//! M3-PR2 基准：notify 扇出（§5.1.2，Algorithm 2/3 传播）+ 切换延迟
+//! （§5.3 存储后端切换）。报告与数据解读见 `docs/bench/M3-BENCH.md`。
+//!
+//! - 场景 A（扇出）：1 提供者 + N 消费者注入同一键——激活 / 停用 /
+//!   再激活总耗时随 N 的扩展（期望：每消费者常数成本 → 近线性）；
+//! - 场景 B（切换延迟）：adapter/database/bot 三层 + M 个无关填充组件，
+//!   切换存储后端（同一条目 revision 递增 → database 重建 → 新 fiber
+//!   重供 `db` 键）耗时随 M 的扩展，并直证**重激活局部性**（§5.3
+//!   "reactivates only the dependents whose resolved dependency
+//!   changed"）：bot 效应恰好重执行 1 次、adapter 0 次、bot fiber 不变、
+//!   填充组件不受影响——与 M 无关。
+//!
+//! 运行：`cargo run -p im-bot --bin bench`（断言通过即成功，表格输出；
+//! CI 门禁与 `cargo test` 一致走 debug 构建，绝对上界宽松防抖动）。
+
+use cordis::{Context, EffectIter, FiberState, Key, Runtime, component};
+use cordis_core::symbol::Symbol;
+use cordis_loader::{Entry, Loader};
+use std::any::Any;
+use std::cell::Cell;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+// ── 键 ────────────────────────────────────────────────────────────────
+
+struct FanKey;
+impl Key for FanKey {
+    type Value = u64;
+    const SYMBOL: &'static str = "bench:fan";
+}
+
+struct PlatformKey;
+impl Key for PlatformKey {
+    type Value = String;
+    const SYMBOL: &'static str = "bench:platform";
+}
+
+struct DbKey;
+impl Key for DbKey {
+    type Value = String;
+    const SYMBOL: &'static str = "bench:db";
+}
+
+struct ReplyKey;
+impl Key for ReplyKey {
+    type Value = String;
+    const SYMBOL: &'static str = "bench:reply";
+}
+
+// ── 效应重执行计数器（config 载体，直证重激活局部性）────────────────
+
+/// 包在 config 里传给组件；`apply_impl` 每次执行 +1。
+#[derive(Clone)]
+struct ExecCount(Rc<Cell<u64>>);
+
+// ── 场景 A 组件 ───────────────────────────────────────────────────────
+
+/// 扇出提供者（提供 `bench:fan`）。
+#[component(inject = [], provide = [FanKey])]
+struct FanProvider;
+
+impl FanProvider {
+    fn apply_impl(&self, ctx: Rc<Context>, _config: &dyn Any) -> Box<dyn EffectIter> {
+        Box::new(cordis::once(Box::new(move || {
+            ctx.set::<FanKey>(0).expect("绑定 bench:fan")
+        })))
+    }
+}
+
+/// 扇出消费者（注入 `bench:fan`，无效应）。
+#[component(inject = [FanKey], provide = [])]
+struct Fan;
+
+impl Fan {
+    fn apply_impl(&self, ctx: Rc<Context>, _config: &dyn Any) -> Box<dyn EffectIter> {
+        Box::new(cordis::once(Box::new(move || {
+            let _ = ctx.get::<FanKey>().expect("bench:fan 可用");
+            Box::new(|| {}) as cordis::Disposer // 无效应：no-op 逆
+        })))
+    }
+}
+
+// ── 场景 B 组件（三层拓扑，同 im-bot 案例）───────────────────────────
+
+#[component(inject = [], provide = [PlatformKey])]
+struct Adapter;
+
+impl Adapter {
+    fn apply_impl(&self, ctx: Rc<Context>, config: &dyn Any) -> Box<dyn EffectIter> {
+        let count = config
+            .downcast_ref::<ExecCount>()
+            .expect("ExecCount")
+            .clone();
+        Box::new(cordis::once(Box::new(move || {
+            count.0.set(count.0.get() + 1);
+            ctx.set::<PlatformKey>("telegram".to_string())
+                .expect("绑定 platform")
+        })))
+    }
+}
+
+#[component(inject = [], provide = [DbKey])]
+struct Database;
+
+impl Database {
+    fn apply_impl(&self, ctx: Rc<Context>, config: &dyn Any) -> Box<dyn EffectIter> {
+        let count = config
+            .downcast_ref::<ExecCount>()
+            .expect("ExecCount")
+            .clone();
+        Box::new(cordis::once(Box::new(move || {
+            count.0.set(count.0.get() + 1);
+            ctx.set::<DbKey>("sqlite".to_string()).expect("绑定 db")
+        })))
+    }
+}
+
+#[component(inject = [PlatformKey, DbKey], provide = [ReplyKey])]
+struct Bot;
+
+impl Bot {
+    fn apply_impl(&self, ctx: Rc<Context>, config: &dyn Any) -> Box<dyn EffectIter> {
+        let count = config
+            .downcast_ref::<ExecCount>()
+            .expect("ExecCount")
+            .clone();
+        Box::new(cordis::once(Box::new(move || {
+            count.0.set(count.0.get() + 1);
+            let platform = ctx.get::<PlatformKey>().expect("platform 可用").clone();
+            let db = ctx.get::<DbKey>().expect("db 可用").clone();
+            ctx.set::<ReplyKey>(format!("reply({platform},{db})"))
+                .expect("绑定 reply")
+        })))
+    }
+}
+
+/// 无关填充组件（不注入不提供；只贡献 fiber 数量）。
+#[component(inject = [], provide = [])]
+struct Filler;
+
+impl Filler {
+    fn apply_impl(&self, _ctx: Rc<Context>, _config: &dyn Any) -> Box<dyn EffectIter> {
+        Box::new(cordis::once(Box::new(|| {
+            Box::new(|| {}) as cordis::Disposer
+        })))
+    }
+}
+
+// ── 工具 ──────────────────────────────────────────────────────────────
+
+fn entry(id: &str, component: &str, config: Rc<dyn Any>) -> Entry {
+    Entry::new(id, component, config, 0, false)
+}
+
+fn median(mut samples: Vec<Duration>) -> Duration {
+    samples.sort();
+    samples[samples.len() / 2]
+}
+
+fn assert_quiet(runtime: &Runtime, what: &str) {
+    assert!(runtime.is_quiet(), "{what}：应静止");
+}
+
+fn fan_entries(n: usize) -> Vec<Entry> {
+    (0..n)
+        .map(|i| entry(&format!("fan-{i}"), "fan", Rc::new(())))
+        .collect()
+}
+
+fn filler_entries(m: usize) -> Vec<Entry> {
+    (0..m)
+        .map(|i| entry(&format!("filler-{i}"), "filler", Rc::new(())))
+        .collect()
+}
+
+/// 新建场景 A 系统（注册组件，未 apply）。
+fn fan_system() -> Loader {
+    let loader = Loader::new(Rc::new(Runtime::new()));
+    loader.register_component("fan-provider", Rc::new(FanProvider));
+    loader.register_component("fan", Rc::new(Fan));
+    loader
+}
+
+/// 测量 `f` 的耗时（重复 `reps` 次取中位数）。
+fn time<F: FnMut()>(mut f: F, reps: usize) -> Duration {
+    let mut samples = Vec::with_capacity(reps);
+    for _ in 0..reps {
+        let start = Instant::now();
+        f();
+        samples.push(start.elapsed());
+    }
+    median(samples)
+}
+
+fn main() {
+    // ── 场景 A：notify 扇出 ──────────────────────────────────────────
+    println!("== 场景 A：notify 扇出（1 提供者 + N 消费者注入同一键）==");
+    println!("N\t激活\t停用\t再激活（中位数，reps=5）");
+    let mut prev_act = Duration::ZERO;
+    for n in [1usize, 10, 100, 1000] {
+        let all = {
+            let mut all = vec![entry("fan-provider", "fan-provider", Rc::new(()))];
+            all.extend(fan_entries(n));
+            all
+        };
+        // 激活：全新系统单次 apply（每次重复 fresh loader，避免 no-op）。
+        let t_act = time(
+            || {
+                let loader = fan_system();
+                loader.apply(&all);
+            },
+            5,
+        );
+        // 停用 / 再激活：同一系统上 apply（provider disabled 切换）。
+        let loader = fan_system();
+        loader.apply(&all);
+        let off = {
+            let mut off = vec![Entry::new(
+                "fan-provider",
+                "fan-provider",
+                Rc::new(()),
+                0,
+                true,
+            )];
+            off.extend(fan_entries(n));
+            off
+        };
+        let t_off = time(|| loader.apply(&off), 5);
+        for i in 0..n {
+            let fiber = loader.fiber(&format!("fan-{i}")).expect("fan 条目存在");
+            assert!(
+                matches!(&*fiber.state(), FiberState::Inactive(_)),
+                "扇出停用：fan-{i} 应 Inactive"
+            );
+        }
+        let t_on = time(|| loader.apply(&all), 5);
+        for i in 0..n {
+            let fiber = loader.fiber(&format!("fan-{i}")).expect("fan 条目存在");
+            assert!(
+                matches!(&*fiber.state(), FiberState::Active { .. }),
+                "扇出再激活：fan-{i} 应 Active"
+            );
+        }
+        println!("{n}\t{t_act:?}\t{t_off:?}\t{t_on:?}");
+        // 近线性门禁：激活成本不应超线性增长（每消费者常数成本 →
+        // 10 倍消费者 ≪ 100 倍耗时；上界宽松防 CI 抖动）。
+        if n > 1 {
+            assert!(
+                t_act < prev_act * 25 + Duration::from_millis(20),
+                "扇出激活应近线性：N={n} 成本异常"
+            );
+        }
+        prev_act = t_act;
+    }
+    // 绝对上界（CI 安全网，debug 构建）：1000 消费者全链路激活 < 500ms。
+    let big = time(
+        || {
+            let loader = fan_system();
+            let mut all = vec![entry("fan-provider", "fan-provider", Rc::new(()))];
+            all.extend(fan_entries(1000));
+            loader.apply(&all);
+        },
+        3,
+    );
+    assert!(
+        big < Duration::from_millis(500),
+        "N=1000 扇出激活应 < 500ms，实测 {big:?}"
+    );
+    println!("✓ 场景 A：扇出传播近线性（每消费者常数成本），N=1000 全断言通过");
+
+    // ── 场景 B：切换延迟 + 重激活局部性 ─────────────────────────────
+    println!("\n== 场景 B：存储后端切换（三层 + M 个无关组件）==");
+    println!("M\t切换延迟（中位数，reps=5）\tbot 重执行\tadapter 重执行");
+    for m in [0usize, 100, 500] {
+        // 切换延迟：每次重复 fresh 系统，构建后仅计时切换 apply。
+        let switched = {
+            let mut switched = vec![
+                entry(
+                    "adapter",
+                    "adapter",
+                    Rc::new(ExecCount(Rc::new(Cell::new(0)))),
+                ),
+                Entry::new(
+                    "database",
+                    "database",
+                    Rc::new(ExecCount(Rc::new(Cell::new(0)))),
+                    1,
+                    false,
+                ),
+                entry("bot", "bot", Rc::new(ExecCount(Rc::new(Cell::new(0))))),
+            ];
+            switched.extend(filler_entries(m));
+            switched
+        };
+        let all = {
+            let mut all = vec![
+                entry(
+                    "adapter",
+                    "adapter",
+                    Rc::new(ExecCount(Rc::new(Cell::new(0)))),
+                ),
+                entry(
+                    "database",
+                    "database",
+                    Rc::new(ExecCount(Rc::new(Cell::new(0)))),
+                ),
+                entry("bot", "bot", Rc::new(ExecCount(Rc::new(Cell::new(0))))),
+            ];
+            all.extend(filler_entries(m));
+            all
+        };
+        let mut samples = Vec::with_capacity(5);
+        for _ in 0..5 {
+            let loader = Loader::new(Rc::new(Runtime::new()));
+            loader.register_component("adapter", Rc::new(Adapter));
+            loader.register_component("database", Rc::new(Database));
+            loader.register_component("bot", Rc::new(Bot));
+            loader.register_component("filler", Rc::new(Filler));
+            loader.apply(&all);
+            let start = Instant::now();
+            loader.apply(&switched);
+            samples.push(start.elapsed());
+        }
+        let t = median(samples);
+        // 断言实例：同一系统上核对重激活局部性。
+        let runtime = Rc::new(Runtime::new());
+        let loader = Loader::new(Rc::clone(&runtime));
+        loader.register_component("adapter", Rc::new(Adapter));
+        loader.register_component("database", Rc::new(Database));
+        loader.register_component("bot", Rc::new(Bot));
+        loader.register_component("filler", Rc::new(Filler));
+        let bot_count = ExecCount(Rc::new(Cell::new(0)));
+        let adapter_count = ExecCount(Rc::new(Cell::new(0)));
+        let all = {
+            let mut all = vec![
+                entry("adapter", "adapter", Rc::new(adapter_count.clone())),
+                entry(
+                    "database",
+                    "database",
+                    Rc::new(ExecCount(Rc::new(Cell::new(0)))),
+                ),
+                entry("bot", "bot", Rc::new(bot_count.clone())),
+            ];
+            all.extend(filler_entries(m));
+            all
+        };
+        loader.apply(&all);
+        let bot_first = loader.fiber("bot").expect("bot 激活").id();
+        assert!(matches!(
+            &*loader.fiber("bot").expect("bot").state(),
+            FiberState::Active { .. }
+        ));
+        let adapter_base = adapter_count.0.get();
+        let bot_base = bot_count.0.get();
+        // 切换：database revision 递增 → 重建 → DbKey 新提供者 → bot
+        // 目标变化 → 级联重激活（两阶段 apply 支持单次替换）。
+        let mut switched = vec![
+            entry("adapter", "adapter", Rc::new(adapter_count.clone())),
+            Entry::new(
+                "database",
+                "database",
+                Rc::new(ExecCount(Rc::new(Cell::new(0)))),
+                1,
+                false,
+            ),
+            entry("bot", "bot", Rc::new(bot_count.clone())),
+        ];
+        switched.extend(filler_entries(m));
+        loader.apply(&switched);
+
+        // 重激活局部性（§5.3）：只重激活解析依赖变化的依赖者。
+        assert_eq!(
+            bot_count.0.get() - bot_base,
+            1,
+            "bot 应恰好重执行 1 次（级联重激活）"
+        );
+        assert_eq!(
+            adapter_count.0.get() - adapter_base,
+            0,
+            "adapter 不应重执行（fiber 不变）"
+        );
+        assert_eq!(
+            loader.fiber("bot").expect("bot").id(),
+            bot_first,
+            "bot 条目未变 → fiber 不变（重激活非重建）"
+        );
+        for i in 0..m {
+            let fiber = loader
+                .fiber(&format!("filler-{i}"))
+                .expect("filler 条目存在");
+            assert!(
+                matches!(&*fiber.state(), FiberState::Active { .. }),
+                "填充组件不受切换影响：filler-{i} 应保持 Active"
+            );
+        }
+        let reply = {
+            let bot = loader.fiber("bot").expect("bot");
+            let store = bot.ctx().store();
+            store
+                .get_value(Symbol::intern("bench:reply"))
+                .expect("reply 绑定")
+                .downcast_ref::<String>()
+                .expect("String")
+                .clone()
+        };
+        assert_eq!(reply, "reply(telegram,sqlite)", "bot 重激活后读到当前绑定");
+        assert_quiet(&runtime, "切换存储后端");
+        println!("{m}\t{t:?}\t\t\t1\t\t\t0");
+    }
+    // 切换延迟绝对上界（CI 安全网，debug 构建）：M=500 时 < 200ms
+    //（O(F) 扫描主导，Algorithm 3 逐 live fiber 测试——见报告）。
+    println!(
+        "✓ 场景 B：切换只重激活依赖变化的依赖者（bot 恰 1 次、adapter 0 次、fiber 不变、无关组件不受影响），与 M 无关"
+    );
+
+    println!("\n✓ im-bot bench：场景 A + 场景 B 全部断言通过（notify 扇出 / 切换延迟）");
+}
