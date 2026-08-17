@@ -250,7 +250,7 @@
 | # | 处置项 | 去向 |
 |---|---|---|
 | ⑦ | §6.2 broker 示例（可表达性演示） | M3 案例素材 |
-| ⑩ | 双向写回（组件→条目方向） | **重开并部分落地（G1，PR #29）**：M3-PR3 评估收口后被 TS 参考实现推翻（TS `Fiber.update` + `internal/update` 写回证明 §5.2.1 "runs in both directions" 是 loader 契约）——core `Fiber::update`（就地重跑、fiber 身份保留、依赖者级联、失败 = L-Raise）+ `Runtime::set_update_hook`（观察者先于重跑触发）+ loader `update_entry`/`entry_config`/`register_update_hook`（fiber→条目反查递归写回）。退役粘滞语义不变（retire 不改条目）；**剩余**：self-dispose → 条目 `disabled` 写回（TS `internal/plugin` 半段）；同 revision apply 不清除 fiber 层写回（书签回映 desired，协调记录非权威源） |
+| ⑩ | 双向写回（组件→条目方向） | **重开并部分落地（G1，PR #29）**：M3-PR3 评估收口后被 TS 参考实现推翻（TS `Fiber.update` + `internal/update` 写回证明 §5.2.1 "runs in both directions" 是 loader 契约）——core `Fiber::update`（就地重跑、fiber 身份保留、依赖者级联、失败 = L-Raise；**失败态可经 update 复活**——REVIEW-97bb598 major-1 采纳 TS `_error = undefined` 语义）+ `Runtime::set_update_hook`（观察者先于重跑触发、不参与 L-Raise 通道）+ loader `update_entry`/`entry_config`/`register_update_hook`（fiber→条目反查递归写回）。退役粘滞语义不变（retire 不改条目）；**剩余**：self-dispose → 条目 `disabled` 写回（TS `internal/plugin` 半段）；同 revision apply 不清除 fiber 层写回（书签回映 desired，协调记录非权威源） |
 | ⑪ | 组条目 isolate 注解 | **评估完成（M3-PR3，PR #26）**：论文 Def 74 声明 isolate 应用于 entry 的 context（组亦为 entry）但未展开组级继承传播；实现中组 isolate 因 GroupHolder 空键自然 no-op（与 Def 74 字面偏差）——候选语义"继承至子树（最近注解优先）"需 effective-isolate 穿透 instantiation 与 Algorithm 7 patch 两条路径（realm 脱同步风险）；记录为公开差异，随 typed world/编排工具层实现 |
 | ⑫ | cargo metadata / wit 模块图适配器 | **评估完成（M3-PR3，PR #26）**：算法 crate 无 TOML/JSON 解析器依赖（hmr 仅 anyhow 错误处理；serde 为 wasmtime 传递依赖不可用）；`HashMapGraph` 已证明算法数据驱动（适配器仅换数据源）；适配器随 typed world/构建工具 crate 落地（届时允许 serde_json/toml），公开差异关闭 |
 
