@@ -50,6 +50,12 @@
 //! 组拦截后移除自身注解 → 该键回到无元数据状态（仅剩组件声明），而非
 //! 组继承值——条目注解为权威的既定语义。
 
+mod config;
+mod patch;
+
+pub use config::interpolate;
+pub use patch::{Patch, apply_patches};
+
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
