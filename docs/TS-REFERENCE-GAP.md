@@ -124,7 +124,7 @@
 2. **G2 每键注入配置**：`Entry.inject` / 宏扩展——Koishi 生态常态，论文 Def 30/31 的 ι 实用化。✅ **已落地（PR #29）**：`Entry.inject`（键 → 拦截元数据）+ `with_inject`，实例化应用（遮蔽同键 intercept、组条目经派生继承），读取方 `get_meta` 右偏合并；变更纪律同 config（revision 代行）。
 3. **G3 per-key isolate**：`Entry.isolate` 粒度化（顺带重估处置⑪：组的 isolate 落子条目）。✅ **已落地（PR #31）**：`Entry.isolate` 改 `BTreeMap<Symbol, IsolateAnnotation>`（TS `Dict<true|string>` 同型，混合粒度 `{val: Local, sum: Global("x")}`）；`realm_of` 逐键查表、`patch_isolation` Δ 键域扩展为声明键 ∪ 新旧 isolate 映射键（Algorithm 7 重指派保持逐键）；**组条目 per-key isolate 经派生链拷贝继承给子条目、子条目注解覆盖（最近注解优先）——处置⑪ 顺势收口**；组 isolate 变更仍走整棵重建（保守路径，测试直证）。测试 loader +3（混合粒度 / 组继承与覆盖 / 组 isolate 变更重建）。
 4. **G4 hooks 最小集**（internal/update、internal/plugin、internal/service）——G1/G6 的工程底座。✅ **已落地（PR #30）**：`update_hook` + `retire_hook` 两观察者（`internal/update` + `internal/plugin` 半段）；`internal/service`（绑定变更观察）留待按需。
-5. **G7 config 校验 + 值级 diff**（typed world 前置）。
+5. **G7 config 校验 + 值级 diff**（typed world 前置）。✅ **已落地（PR #33，opt-in）**：`Config` trait（可选 `validate` + 值级 `same`）+ `Loader::register_config::<C>()` 类型注册表（`&dyn Any` 无法 downcast 到 unsized `dyn Config`，按类型注册 cast）；`validate` 失败 = 配置错误 panic（公开差异：TS → 失败态可重试）；`same` 为真 → revision 递增免重建（TS `deepEqual` 同型）；**HMR 兼容纪律**：`String` 等常用类型不实现 `same`（cordis-hmr 依赖 revision 递增触发重载）。
 6. **G5 配置插值 / G6 include 文件树 / ⑫ 依赖清单文件**（工具层，零依赖可行路径已找到）。✅ **G5/G6 已落地（PR #32，安全收窄）**：`cordis-loader::interpolate`（`{{name}}` 受控占位符替换，resolve 回调编排方提供；TS `with(ctx) eval` 任意表达式不支持、未解析保留原样 = 公开差异）；`Patch` + `apply_patches`（desired 树纯变换：`id` 递归匹配的 `name`/`config`/`revision`/`disabled` 覆盖 + `insert` 向组插入；TS `PatchOptions` loader 侧子集）。**剩余（编排工具层，零依赖纪律）**：yaml/json 文件读取、文件 watch、写回持久化（G6 后半）、依赖清单文件（⑫）。
 7. **G8/G9** 文档化或按需。
 8. **异步效应**：维持 ADR-0003 记录，typed world/async 阶段以 TS 为语义参照。
