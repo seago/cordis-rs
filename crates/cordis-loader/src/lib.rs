@@ -334,6 +334,9 @@ impl Loader {
             &mut self.entries.borrow_mut(),
         );
         self.in_apply.set(false);
+        // 注（REVIEW-460d8d0 nit）：apply_into 内 panic（配置错误）时不复位
+        // in_apply——panic = 宿主 bug（进程 unwind），退役观察者不再依赖，
+        // 延迟写回随之丢弃，可接受。
         // 排空退役写回（apply 期间 teardown 触发的 retire 延迟到协调结束后，
         // 避免 hook 重借 entries）。
         let pending = std::mem::take(&mut *self.retire_pending.borrow_mut());
