@@ -43,6 +43,9 @@ pub(crate) type ConfigCast = fn(&dyn Any) -> Option<&dyn Config>;
 
 /// 校验配置（G7）：经注册表取回 [`Config`]，`validate` 返回 `Err` →
 /// panic（配置错误 = bug，与 ProvisionClash/未知组件同型）。
+/// **范围（REVIEW-1c86b5f nit-1）**：panic 中止**整个 apply**（协调期），
+/// 与 TS 的单 fiber 失败态（其余条目继续）不同——公开差异；运行时组件
+/// 失败仍走 L-Raise（fiber 级）。
 pub(crate) fn validate_config(
     casts: &std::collections::HashMap<std::any::TypeId, ConfigCast>,
     config: &dyn Any,
@@ -62,6 +65,11 @@ pub(crate) fn configs_same(
     a: &dyn Any,
     b: &dyn Any,
 ) -> bool {
+    // REVIEW-1c86b5f nit-3：异类型直接短路（`same(b)` 依赖 b 与 self
+    // 同型，`type_id` 不同则必不等——避免把异类型交给 `same`）。
+    if a.type_id() != b.type_id() {
+        return false;
+    }
     match (
         casts.get(&a.type_id()).and_then(|f| f(a)),
         casts.get(&b.type_id()).and_then(|f| f(b)),

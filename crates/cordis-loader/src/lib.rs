@@ -1652,19 +1652,15 @@ mod tests {
         }
     }
 
-    /// 读 [`ValConfig`] 的 provider（覆盖 `loader()` 的 String 版）。
+    /// 不读 config 的 provider（覆盖 `loader()` 的 String 版；G7 测试用，
+    /// 便于异类型 config 场景——组件不依赖 config 具体类型）。
     fn val_config_provider() -> Rc<TestComponent> {
         Rc::new(TestComponent {
             inject: spec(&[]),
             provide: spec(&["val"]),
-            effects: Box::new(|ctx, config| {
-                let value = config
-                    .downcast_ref::<ValConfig>()
-                    .expect("ValConfig")
-                    .0
-                    .clone();
+            effects: Box::new(|ctx, _config| {
                 Box::new(once(Box::new(move || {
-                    ctx.set::<ValKey>(value).expect("绑定 val")
+                    ctx.set::<ValKey>("pg".to_string()).expect("绑定 val")
                 })))
             }),
         })
@@ -1743,6 +1739,84 @@ mod tests {
             val_config("", 1),
             entry("consumer", "consumer", "ignored", 1, false),
         ]);
+    }
+
+    /// G7 组条目 config 值级 diff（REVIEW-1c86b5f nit-6）：组 config
+    /// 同值 revision 递增免重建（阶段一含组条目；值变则整棵重建）。
+    #[test]
+    fn group_config_same_skips_rebuild() {
+        let (loader, _runtime) = loader();
+        loader.register_config::<ValConfig>();
+        let mut g1 = Entry::group("g", vec![entry("p", "provider", "pg", 1, false)]);
+        g1.config = Rc::new(ValConfig("gv".to_string()));
+        loader.apply(&[g1]);
+        let holder = loader.fiber("g").unwrap().id();
+
+        let mut g2 = Entry::group("g", vec![entry("p", "provider", "pg", 1, false)]);
+        g2.config = Rc::new(ValConfig("gv".to_string()));
+        let mut g2b = g2.clone();
+        g2b.revision = 2;
+        loader.apply(&[g2b]);
+        assert_eq!(
+            loader.fiber("g").unwrap().id(),
+            holder,
+            "组 config 同值 revision 递增 → 免重建"
+        );
+        assert!(loader.fiber("p").is_some(), "子条目保持");
+    }
+
+    /// G7 异类型保守（REVIEW-1c86b5f nit-6）：loaded 与 desired config
+    /// 类型不同（且均注册）→ `same` 不跨类型比较（type_id 短路）→ 重建。
+    #[test]
+    fn config_same_heterogeneous_types_rebuild() {
+        let (loader, _runtime) = loader();
+        loader.register_component("provider", val_config_provider());
+        loader.register_config::<ValConfig>();
+        loader.apply(&[
+            val_config("pg", 1),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        let first = loader.fiber("p").unwrap().id();
+        // desired 换 String 类型（同值不同型）→ 必重建。
+        loader.apply(&[
+            entry("p", "provider", "pg", 2, false),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        assert_ne!(
+            loader.fiber("p").unwrap().id(),
+            first,
+            "异类型 config（均注册）→ type_id 短路 → 重建"
+        );
+    }
+
+    /// G7 component 变更 + 同值 config 仍需重建（REVIEW-1c86b5f nit-6）：
+    /// `same` 只豁免 revision 变化，组件名变化始终重建。
+    #[test]
+    fn component_change_rebuilds_even_with_same_config() {
+        let (loader, _runtime) = loader();
+        loader.register_component("provider", val_config_provider());
+        loader.register_component("provider2", val_config_provider());
+        loader.register_config::<ValConfig>();
+        loader.apply(&[
+            val_config("pg", 1),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        let first = loader.fiber("p").unwrap().id();
+        loader.apply(&[
+            Entry::new(
+                "p",
+                "provider2",
+                Rc::new(ValConfig("pg".to_string())),
+                1,
+                false,
+            ),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        assert_ne!(
+            loader.fiber("p").unwrap().id(),
+            first,
+            "组件名变化 + 同值 config → 仍重建"
+        );
     }
 
     /// G7 未注册类型无校验（opt-in）。
