@@ -118,8 +118,10 @@
 
 ## 五、行动建议（排序）
 
-1. **G1 双向绑定**（重新打开处置⑩）：`Fiber::update` + loader 写回观察者——§5.2.1 明示语义，TS 有完整参照。
-2. **G2 每键注入配置**：`Entry.inject` / 宏扩展——Koishi 生态常态，论文 Def 30/31 的 ι 实用化。
+> **进度**：G1、G2 已于 PR #29 落地（2026-08-17）——见「G1/G2 落地记录」；G3–G9 待办。
+
+1. **G1 双向绑定**（重新打开处置⑩）：`Fiber::update` + loader 写回观察者——§5.2.1 明示语义，TS 有完整参照。✅ **已落地（PR #29）**：core `Fiber::update`（就地重跑、fiber 身份保留、依赖者级联）+ `Runtime::set_update_hook`；loader `update_entry`/`entry_config`/`register_update_hook`（fiber→条目反查写回）。**剩余**：self-dispose → 条目 `disabled` 写回（TS `internal/plugin` 半段）。
+2. **G2 每键注入配置**：`Entry.inject` / 宏扩展——Koishi 生态常态，论文 Def 30/31 的 ι 实用化。✅ **已落地（PR #29）**：`Entry.inject`（键 → 拦截元数据）+ `with_inject`，实例化应用（遮蔽同键 intercept、组条目经派生继承），读取方 `get_meta` 右偏合并；变更纪律同 config（revision 代行）。
 3. **G3 per-key isolate**：`Entry.isolate` 粒度化（顺带重估处置⑪：组的 isolate 落子条目）。
 4. **G4 hooks 最小集**（internal/update、internal/plugin、internal/service）——G1/G6 的工程底座。
 5. **G7 config 校验 + 值级 diff**（typed world 前置）。

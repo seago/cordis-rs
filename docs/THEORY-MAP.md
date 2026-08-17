@@ -159,6 +159,7 @@
 | 2026-08-17 / PR #18 审查 | **修复（nit1-4，REVIEW-6e0fd1e）**：nit1 `dom(d) ⊆ inject` 未强制 → 公开差异声明（义务不检查，与 Def 48 同型）；nit2 `get_meta` 两侧类型纪律不对称文档化（声明侧 panic / 携带侧 None）；nit3 component Rc 双重克隆——**无需修改**（apply 闭包与 Fiber 字段各需一份所有权）；nit4 `get_meta`/`intercept_in_place`/`intercept_set`/`intercept_set_boxed` 接收者 `&Rc<Self>` → `&self` | Def 30/31 | 修正（nit3 记录为无需修改） | 已修复 |
 | 2026-08-17 / PR #18 审查 | **记录（nit1，REVIEW-6e0fd1e）**：Def 30 的 `dom(d) ⊆ inject` 约束（组件声明的元数据限于依赖键）仅作文档断言、未强制——`Component::declared_metadata` 可对任意键声明（引擎不校验）；属组件义务（与 Def 48 读纪律同型，均不检查） | Def 30, Def 48 | 公开差异声明（义务不检查） | 记录 |
 | 2026-08-17 / PR #28 | **TS 参考实现对照：缺口分析（cordiverse/cordis v4 ↔ cordis-rs ↔ 论文）**——`docs/TS-REFERENCE-GAP.md`：通读 TS core/loader/hmr/include/group 后逐特性对照。真实功能缺口 9 项（G1 双向绑定（重新打开处置⑩：TS `Fiber.update` + `internal/update` 写回——§5.2.1 "runs in both directions" 的 loader 契约）、G2 每键注入配置（Def 30/31 ι 实用化，TS inject: {[key]: config}）、G3 per-key isolate 粒度、G4 hooks 最小集、G5 配置表达式插值、G6 include 文件树（watch/持久化/patch）、G7 config 校验 + 值级 diff、G8 set 就地改值、G9 Service check 谓词）；⑫ 发现零依赖可行路径（编排工具生成依赖清单文件 → HashMapGraph 消费）；已对应核验 18 项（Alg 2/3/5/6/7/8/9/10、失败模型、realm 语义等）；反向对照 5 项领先（wasm 沙箱/双语言 guest/形式化测试/类型化键/同步确定性） | §5.2.1, §5.2.2 | 完成（PR #28：缺口分析记录，行动建议排序见报告 §5） | 记录 |
+| 2026-08-17 / PR #29 | **G1 双向绑定 + G2 每键注入配置（TS 参考实现对照落地）**——core：`Fiber::update`（§5.2.1 双向绑定组件侧；换 config 闭包 + unload 链式重跑，fiber 身份保留、依赖者级联、L-Raise 同路径；仅 Active 可调用）+ `Runtime::update_fiber`/`set_update_hook`（`UpdateHook` 观察者先于重跑触发，TS `internal/update` 序）；loader：`update_entry`（条目书签 + 就地重跑，不递增 revision——同 revision apply 不清除 fiber 层写回）、`entry_config`、`register_update_hook`（fiber→条目递归反查写回，组内子条目命中）、`Entry.inject`（每键注入携带配置，遮蔽同键 intercept、组条目经派生链继承，读取方 `get_meta` 右偏合并——Def 30/31 ι 实用化；变更纪律同 config）。测试：core `update_binding.rs` 3（就地重跑身份保留/观察者序/非 Active panic）+ loader 6（update_entry 就地/自更新写回/组内映射/inject 消费/遮蔽序/组继承） | §5.2.1, Def 30/31 | 完成（PR #29：G1+G2 落地，TS 对照闭环） | 记录 |
 
 ## 里程碑走查记录
 
@@ -249,7 +250,7 @@
 | # | 处置项 | 去向 |
 |---|---|---|
 | ⑦ | §6.2 broker 示例（可表达性演示） | M3 案例素材 |
-| ⑩ | 双向写回（组件→条目方向） | **评估完成（M3-PR3，PR #26）**：条目权威为设计决策（desired 树由编排方持有）；组件侧杆杠 = `Fiber::retire`（运行时退役 + 级联卸载），退役**粘滞**跨未变 apply——语义钉死测试 `retired_component_persists_across_unchanged_apply`；写回方向属编排责任，公开差异关闭 |
+| ⑩ | 双向写回（组件→条目方向） | **重开并部分落地（G1，PR #29）**：M3-PR3 评估收口后被 TS 参考实现推翻（TS `Fiber.update` + `internal/update` 写回证明 §5.2.1 "runs in both directions" 是 loader 契约）——core `Fiber::update`（就地重跑、fiber 身份保留、依赖者级联、失败 = L-Raise）+ `Runtime::set_update_hook`（观察者先于重跑触发）+ loader `update_entry`/`entry_config`/`register_update_hook`（fiber→条目反查递归写回）。退役粘滞语义不变（retire 不改条目）；**剩余**：self-dispose → 条目 `disabled` 写回（TS `internal/plugin` 半段）；同 revision apply 不清除 fiber 层写回（书签回映 desired，协调记录非权威源） |
 | ⑪ | 组条目 isolate 注解 | **评估完成（M3-PR3，PR #26）**：论文 Def 74 声明 isolate 应用于 entry 的 context（组亦为 entry）但未展开组级继承传播；实现中组 isolate 因 GroupHolder 空键自然 no-op（与 Def 74 字面偏差）——候选语义"继承至子树（最近注解优先）"需 effective-isolate 穿透 instantiation 与 Algorithm 7 patch 两条路径（realm 脱同步风险）；记录为公开差异，随 typed world/编排工具层实现 |
 | ⑫ | cargo metadata / wit 模块图适配器 | **评估完成（M3-PR3，PR #26）**：算法 crate 无 TOML/JSON 解析器依赖（hmr 仅 anyhow 错误处理；serde 为 wasmtime 传递依赖不可用）；`HashMapGraph` 已证明算法数据驱动（适配器仅换数据源）；适配器随 typed world/构建工具 crate 落地（届时允许 serde_json/toml），公开差异关闭 |
 
