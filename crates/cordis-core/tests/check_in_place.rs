@@ -157,6 +157,83 @@ fn set_in_place_unbound_errors() {
 
 // ── G9：set_with_check ────────────────────────────────────────────────
 
+/// G9 撤销：set_with_check 的 disposer 撤销绑定（unbind + notify）→
+/// 依赖者恢复 Inactive（REVIEW-54814d0 nit-4）。
+#[test]
+fn check_binding_dispose_reverts_dependents() {
+    let runtime = Rc::new(Runtime::new());
+    let root = runtime.context();
+    let flag = Rc::new(Cell::new(true));
+    let flag2 = Rc::clone(&flag);
+    let provider = root
+        .use_component(Rc::new(Provider), Rc::new("v0".to_string()))
+        .expect("provider 注册");
+    let consumer = root
+        .use_component(Rc::new(Consumer), Rc::new(()))
+        .expect("consumer 注册");
+    provider.ctx().dispose_all();
+    let disposer = provider
+        .ctx()
+        .set_with_check::<DbKey>("v1".to_string(), move || flag2.get())
+        .expect("check 绑定");
+    assert!(matches!(
+        &*consumer.state(),
+        cordis_core::FiberState::Active { .. }
+    ));
+
+    // 撤销绑定（同 set 的逆）→ notify → 依赖者 Inactive。
+    disposer();
+    assert!(
+        matches!(&*consumer.state(), cordis_core::FiberState::Inactive(_)),
+        "撤销 check 绑定 → 依赖者停用"
+    );
+    assert!(runtime.is_quiet(), "静止");
+}
+
+/// G8 + G9 交互：`set_in_place` 只替换值，**check 谓词保留**（REVIEW-
+/// 54814d0 nit-4）——就地改值后谓词仍门控依赖者。
+#[test]
+fn set_in_place_keeps_check_predicate() {
+    let runtime = Rc::new(Runtime::new());
+    let root = runtime.context();
+    let flag = Rc::new(Cell::new(true));
+    let flag2 = Rc::clone(&flag);
+    let provider = root
+        .use_component(Rc::new(Provider), Rc::new("v0".to_string()))
+        .expect("provider 注册");
+    let consumer = root
+        .use_component(Rc::new(Consumer), Rc::new(()))
+        .expect("consumer 注册");
+    provider.ctx().dispose_all();
+    let _d = provider
+        .ctx()
+        .set_with_check::<DbKey>("v1".to_string(), move || flag2.get())
+        .expect("check 绑定");
+    assert!(matches!(
+        &*consumer.state(),
+        cordis_core::FiberState::Active { .. }
+    ));
+
+    // 就地改值：值替换、check 保留。
+    provider
+        .ctx()
+        .set_in_place::<DbKey>("v2".to_string())
+        .expect("就地改值");
+    assert_eq!(db_value(&runtime), "v2", "值已替换");
+    assert!(
+        matches!(&*consumer.state(), cordis_core::FiberState::Active { .. }),
+        "check 保留：true 仍激活"
+    );
+
+    // check 翻转 → 依赖者仍被门控。
+    flag.set(false);
+    runtime.refresh(&consumer);
+    assert!(
+        matches!(&*consumer.state(), cordis_core::FiberState::Inactive(_)),
+        "set_in_place 后 check 仍生效"
+    );
+}
+
 /// check 为假 → 依赖者解析不到（Inactive）；为真 → 恢复。变化即时生效
 ///（谓词每次求值），依赖者经 refresh 感知。
 #[test]

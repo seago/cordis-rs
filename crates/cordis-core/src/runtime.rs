@@ -537,15 +537,21 @@ impl Runtime {
     /// 绑定计入；根绑定（provider = None）与不活跃提供者视为未提供。
     fn provider_of(&self, ctx: &Context, key: Symbol) -> Option<FiberId> {
         let realm = ctx.resolve_realm(key);
-        let store = self.store.borrow();
-        let binding = store.binding(realm)?;
-        // G9：可用性谓词为假 → 视为未提供（TS `_checkImpl` 同型；每次
-        // 求值——谓词须纯，变化即时生效，无需 notify）。
-        if binding.check.as_ref().is_some_and(|check| !check()) {
+        // G9：先取出 (provider, check) 并**释放 store 借用**再求值谓词——
+        // 谓词若经 ctx 读 store（重入）会 borrow panic；文档约束见
+        // [`Context::set_with_check`]（REVIEW-54814d0 nit-2）。
+        let (provider, check) = {
+            let store = self.store.borrow();
+            let binding = store.binding(realm)?;
+            (binding.provider, binding.check.clone())
+        };
+        // 谓词为假 → 视为未提供（TS `_checkImpl` 同型；每次求值——谓词
+        // 翻转在依赖者下次 refresh/notify 时生效，翻转本身不触发 notify，
+        // REVIEW-54814d0 nit-3 措辞）。
+        if check.is_some_and(|check| !check()) {
             return None;
         }
-        let provider = binding.provider?;
-        drop(store);
+        let provider = provider?;
         self.is_active(provider).then_some(provider)
     }
 

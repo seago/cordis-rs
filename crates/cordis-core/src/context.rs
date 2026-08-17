@@ -309,9 +309,11 @@ impl Context {
         // 前置：绑定存在且安装者 = 本 fiber（TS "cannot set property in
         // multiple fibers" 同型）。
         let store = self.runtime.store.borrow();
-        let binding = store.binding(realm).ok_or(StoreError::NotBound(realm))?;
+        let binding = store.binding(realm).ok_or(StoreError::NotBound(key))?;
         if binding.provider != self.fiber {
-            return Err(StoreError::AlreadyBound(realm));
+            // REVIEW-54814d0 nit-1：错误载荷用 **key**（与 [`Context::set`]
+            // 的 `AlreadyBound(key)` 口径一致；realm 为内部解析产物）。
+            return Err(StoreError::AlreadyBound(key));
         }
         drop(store);
         self.runtime
@@ -323,6 +325,10 @@ impl Context {
     /// G9 带可用性谓词的绑定（TS `provide(name, value, check)` 参照）：
     /// 绑定值 + 谓词；谓词求值为假时消费者视为未提供（`provider_of` 每次
     /// 求值）。撤销语义与 [`Context::set`] 相同（可逆、notify）。
+    ///
+    /// **谓词约束（REVIEW-54814d0 nit-2/3）**：谓词须**纯**且不得经
+    /// ctx/store 重入（求值在 store 借用外进行，但重入仍有其他借用风险）；
+    /// 谓词翻转**不触发 notify**——依赖者在下次 refresh/notify 时感知。
     pub fn set_with_check<K: Key>(
         self: &Rc<Self>,
         value: K::Value,
