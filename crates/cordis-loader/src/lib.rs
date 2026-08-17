@@ -21,11 +21,19 @@
 //! **两阶段协调（审查 m1）**：`apply` 每层先做卸载侧（释放供给名）再做
 //! 实例化侧——同供给键的替换可在单次 `apply` 完成。
 //!
-//! **已知边界（M2-PR3 记录）**：① 双向写回未实现——条目为权威记录，
-//! 组件不能自行改配置/禁自身（§5.2.1 "the binding runs in both directions"
-//! 的组件→条目方向缺席）；② isolate 变更经 Algorithm 7 realm 重指派
-//!（M2-PR4，就地不重建）；③ 组条目自身的 isolate 注解不应用（组无声明键；
-//! 组 isolate 变更仍整棵重建）；
+//! **已知边界（M2-PR3 记录，⑩⑪ M3-PR3 评估收尾）**：① 双向写回未实现
+//! ——条目为权威记录，组件不能自行改配置/禁自身（§5.2.1 "the binding
+//! runs in both directions" 的组件→条目方向缺席）。**M3-PR3 评估结案**：
+//! 组件侧杆杠 = `Fiber::retire`（运行时退役 + 级联卸载）；退役**粘滞**
+//!（跨未变 apply 保持，见 `retired_component_persists_across_unchanged_apply`
+//! 测试）——编排方经 desired 树移除或 revision 递增才重建。写回方向属
+//! 编排责任（条目由调用方持有），按设计收尾为公开差异；
+//! ② isolate 变更经 Algorithm 7 realm 重指派（M2-PR4，就地不重建）；
+//! ③ 组条目自身的 isolate 注解不应用（组无声明键；组 isolate 变更仍整棵
+//! 重建）——**M3-PR3 评估结案**：组级 isolate 的候选语义"继承至子树"
+//!（最近注解优先）需把 effective-isolate 穿透 instantiation 与
+//! Algorithm 7 patch 两条路径（realm 脱同步风险），论文 §5.2.1 未声明
+//! 组级 realm 语义——记录为公开差异，随 typed world/编排工具层实现；
 //! ④ **失败 fiber 静默加载**（审查 nit7，REVIEW-32a913d）：L-Raise 后
 //! `use_component` 对组件失败返回 `Ok(fiber)`（`Inactive(Some(ζ))`）——
 //! loader 不检查失败态，静默记为"已加载"；调用方需自行 `fiber.state()`
@@ -1489,6 +1497,68 @@ mod tests {
                 FiberState::Inactive(_)
             ),
             "c 停用（依赖随 realm 迁移）"
+        );
+        assert!(runtime.is_quiet(), "静止");
+    }
+
+    /// M3-PR3 处置⑩ 语义钉死（**组件→条目写回缺席**）：`fiber.retire()`
+    /// 是**运行时杆杠**（退役标记 + 卸载级联），**不改写条目**——desired
+    /// 树保持权威：条目未变则 apply 是零操作（退役粘滞），编排方须改动
+    /// 条目（移除 / revision 递增）才恢复或重建。这是"双向写回未实现
+    ///（条目权威）"（M2-PR3 已知边界①、THEORY-MAP 处置⑩）的可观察语义。
+    #[test]
+    fn retired_component_persists_across_unchanged_apply() {
+        let (loader, runtime) = loader();
+        loader.apply(&[
+            entry("provider", "provider", "pg", 1, false),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        let provider = loader.fiber("provider").unwrap().clone();
+        provider.retire();
+        assert!(provider.retired(), "退役标记（组件侧杆杠）");
+        assert!(
+            matches!(
+                &*loader.fiber("consumer").unwrap().state(),
+                FiberState::Inactive(_)
+            ),
+            "退役级联：consumer 停用"
+        );
+        // 条目未变 → apply 零操作：退役粘滞（无写回——若存在组件→条目
+        // 写回方向，此处条目状态应被组件侧改动改写；现实是条目权威、
+        // 退役仅为运行时态）。
+        loader.apply(&[
+            entry("provider", "provider", "pg", 1, false),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        assert!(
+            provider.retired(),
+            "退役跨越未变 apply 粘滞（组件→条目写回缺席：条目为权威）"
+        );
+        assert!(
+            matches!(
+                &*loader.fiber("consumer").unwrap().state(),
+                FiberState::Inactive(_)
+            ),
+            "consumer 仍停用（未变 apply 不恢复）"
+        );
+        // 编排方改条目（revision 递增）→ 重建恢复。
+        loader.apply(&[
+            entry("provider", "provider", "pg", 2, false),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        assert!(
+            matches!(
+                &*loader.fiber("provider").unwrap().state(),
+                FiberState::Active { .. }
+            ),
+            "条目变更（revision）→ 退役 fiber 被重建"
+        );
+        assert!(
+            matches!(
+                &*loader.fiber("consumer").unwrap().state(),
+                FiberState::Active { .. }
+            ),
+            "consumer 随 provider 重建恢复"
         );
         assert!(runtime.is_quiet(), "静止");
     }

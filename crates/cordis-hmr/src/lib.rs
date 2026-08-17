@@ -26,6 +26,14 @@
 //! wasm 的 wit import 图解析为生产化适配器（M2 边界记录，THEORY-MAP
 //! PR #21 行）。
 //!
+//! **⑫ 评估结案（M3-PR3）**：生产化适配器 = 解析 cargo metadata（JSON）
+//! 或 Cargo.toml（TOML）→ 模块图。仓库零第三方依赖纪律下无 TOML/JSON
+//! 解析器可用，手写解析器对真实清单脆弱且高风险；`HashMapGraph` 已把
+//! 算法（`classify`/`detect`/`reload`）证明为数据驱动——适配器只是数据
+//! 来源替换，不触碰算法。结论：适配器随 typed world / 编排工具层（届时
+//! 允许 serde_json/toml 依赖）落地的构建工具 crate，本里程碑记录为公开
+//! 差异关闭。
+//!
 //! ## 事务语义与失败模型（M2-PR1 协同）
 //!
 //! 重载失败（组件加载/实例化失败，fiber 进入 `Inactive(Some(ζ))`）由
