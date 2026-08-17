@@ -58,6 +58,12 @@ pub enum RegistryError {
 /// 更新观察者（§5.2.1 双向绑定条目侧）：`(&Fiber, 新 config)`。
 pub type UpdateHook = dyn Fn(&Fiber, Rc<dyn Any>) + 'static;
 
+/// 退役观察者（§5.2.1 双向绑定条目侧；TS `internal/plugin` 半段参照）：
+/// [`Fiber::retire`] 触发，载荷为退役 fiber。loader 注册以写回条目
+/// `disabled`（组件自退役 = 禁用自身）；loader 驱动的退役由观察者内部
+/// 过滤（条目已移除/已 disabled）。
+pub type RetireHook = dyn Fn(&Fiber) + 'static;
+
 /// 运行时：共享共效应表 `σ`、fiber registry `Fγ` 与通知反应器。
 pub struct Runtime {
     /// `σ`：按 realm 键控的依赖表（Def 28）。
@@ -71,6 +77,10 @@ pub struct Runtime {
     /// 更新观察者（§5.2.1 双向绑定条目侧；TS `internal/update` 钩子参照）：
     /// [`Fiber::update`] 以新 config 触发，loader/编排方注册以写回条目。
     update_hook: RefCell<Option<Rc<UpdateHook>>>,
+    /// 退役观察者（§5.2.1 双向绑定条目侧；TS `internal/plugin` 半段参照）：
+    /// [`Fiber::retire`] 触发，loader 注册以写回条目 `disabled`。
+    /// `pub(crate)`：`Fiber::retire`（fiber.rs）同步触发。
+    pub(crate) retire_hook: RefCell<Option<Rc<RetireHook>>>,
 }
 
 impl Default for Runtime {
@@ -88,6 +98,7 @@ impl Runtime {
             fibers: RefCell::new(HashMap::new()),
             next: Cell::new(0),
             update_hook: RefCell::new(None),
+            retire_hook: RefCell::new(None),
         };
         runtime
             .reactors
@@ -379,6 +390,18 @@ impl Runtime {
     /// 组件失败 outcome）。
     pub fn set_update_hook(&self, hook: Option<Rc<UpdateHook>>) {
         *self.update_hook.borrow_mut() = hook;
+    }
+
+    /// 注册退役观察者（§5.2.1 双向绑定条目侧；TS `internal/plugin` 半段
+    /// 参照，loader/index.ts:88-124）。任何 [`Fiber::retire`] 触发（含
+    /// loader 驱动的 teardown）——**过滤是观察者的职责**：loader 侧只对
+    /// "条目仍在且未 disabled"（= 组件自退役）写回；loader 驱动的退役
+    /// 发生时条目已被移除或已置 disabled。
+    ///
+    /// 与 [`Self::set_update_hook`] 同约束：观察者运行于同步路径、panic =
+    /// 宿主 bug（传播），不得 [`FiberError::raise`]。
+    pub fn set_retire_hook(&self, hook: Option<Rc<RetireHook>>) {
+        *self.retire_hook.borrow_mut() = hook;
     }
 
     /// §5.2.1 双向绑定组件侧（TS `Fiber.update` 参照）：换 config 闭包 →

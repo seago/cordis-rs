@@ -26,9 +26,12 @@
 //! 已落地（G1，PR #29）**——`Fiber::update` 就地重跑（fiber 身份保留、
 //! 依赖者级联、失败态可复活）+ `Runtime::set_update_hook` + loader
 //! `update_entry`/`register_update_hook`（条目书签写回、fiber→条目反查）。
-//! **仍缺席**：组件自退役（`Fiber::retire`）→ 条目 `disabled` 写回（TS
-//! `internal/plugin` 半段）——退役**粘滞**跨未变 apply（见
-//! `retired_component_persists_across_unchanged_apply` 测试）；同 revision
+//! **已补齐（G1 剩余，PR #30）**：组件自退役（`Fiber::retire`）→ 退役观察者
+//! 写回条目 `disabled = true`（TS `internal/plugin` 半段；过滤：条目仍在且
+//! 未 disabled；apply 期间 teardown 延迟排空；`loader.fiber(id)` 对退役
+//! fiber 返回 None）。退役**粘滞**（无观察者时跨未变 apply 保持，见
+//! `retired_component_persists_across_unchanged_apply` 测试）；desired
+//! 显式 `disabled=false` 重新启用（disabled 为协调字段）；同 revision
 //! apply 不清除 fiber 层写回、书签回映 desired（协调记录非权威源）；
 
 //! ② isolate 变更经 Algorithm 7 realm 重指派（M2-PR4，就地不重建）；
@@ -50,7 +53,7 @@
 //! 组继承值——条目注解为权威的既定语义。
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
@@ -274,6 +277,11 @@ pub struct Loader {
     root: Rc<Context>,
     components: RefCell<HashMap<String, Rc<dyn Component>>>,
     entries: RefCell<HashMap<String, LoadedEntry>>,
+    /// 退役写回 pending 队列（apply 期间 teardown 触发的 retire 延迟处理——
+    /// hook 不能重借 entries；apply 末尾排空）。
+    retire_pending: RefCell<Vec<FiberId>>,
+    /// 是否正处于 apply 协调中（hook 据此选择 pending 或直写）。
+    in_apply: Cell<bool>,
 }
 
 impl Loader {
@@ -285,6 +293,8 @@ impl Loader {
             root,
             components: RefCell::new(HashMap::new()),
             entries: RefCell::new(HashMap::new()),
+            retire_pending: RefCell::new(Vec::new()),
+            in_apply: Cell::new(false),
         }
     }
 
@@ -317,11 +327,19 @@ impl Loader {
     /// `desired` 内重复 `id` 未定义（按 last-wins 处理，可能浪费一次
     /// 实例化）；调用方应保证 `id` 在整棵树内唯一。
     pub fn apply(&self, desired: &[Entry]) {
+        self.in_apply.set(true);
         self.apply_into(
             desired,
             Rc::clone(&self.root),
             &mut self.entries.borrow_mut(),
         );
+        self.in_apply.set(false);
+        // 排空退役写回（apply 期间 teardown 触发的 retire 延迟到协调结束后，
+        // 避免 hook 重借 entries）。
+        let pending = std::mem::take(&mut *self.retire_pending.borrow_mut());
+        for fid in pending {
+            self.writeback_retire(fid);
+        }
     }
 
     /// 注册名对应的组件实例（HMR 备份/恢复用，M2-PR5）。
@@ -355,6 +373,12 @@ impl Loader {
         find_loaded(&self.entries.borrow(), id).map(|l| Rc::clone(&l.config))
     }
 
+    /// 已加载条目当前 disabled 书签（自退役写回后可查询；None = 条目不存在）。
+    /// 整棵树递归查找。
+    pub fn entry_disabled(&self, id: &str) -> Option<bool> {
+        find_loaded(&self.entries.borrow(), id).map(|l| l.disabled)
+    }
+
     /// 注册更新观察者（loader 侧写回通道）：把 [`Runtime::set_update_hook`]
     /// 接到本 loader——组件侧 [`Fiber::update`] 触发时，自动把新 config 写入
     /// 该 fiber 所属条目的书签（TS `internal/update` 的 loader 半段）。
@@ -372,6 +396,44 @@ impl Loader {
             })));
     }
 
+    /// 注册退役观察者（§5.2.1 双向绑定条目侧；TS `internal/plugin` 半段
+    /// 参照，loader/index.ts:88-124）：组件自退役（[`Fiber::retire`]）→
+    /// 自动写回所属条目书签 `disabled = true`。
+    ///
+    /// **过滤语义**：任何 retire 均触发（含 loader 驱动 teardown）——仅当
+    /// 条目**仍在且未 disabled**（= 组件自退役；loader 驱动的退役发生时
+    /// 条目已被移除或已置 disabled）才写回。
+    ///
+    /// **协调语义**：`disabled` 是协调字段——desired 显式 `disabled=false`
+    /// 的 apply 会重新启用（与 update 写回不同：config 非协调字段、同
+    /// revision apply 不清除）。编排方作为树所有者决定持久化。
+    pub fn register_retire_hook(self: &Rc<Self>) {
+        let loader = Rc::clone(self);
+        self.runtime
+            .set_retire_hook(Some(Rc::new(move |fiber: &Fiber| {
+                if loader.in_apply.get() {
+                    // apply 协调期间（teardown 路径）：entries 已被 apply_into
+                    // 可变借用——延迟到 apply 末尾排空。
+                    loader.retire_pending.borrow_mut().push(fiber.id());
+                } else {
+                    // 组件自退役（apply 之外）：立即写回。
+                    loader.writeback_retire(fiber.id());
+                }
+            })));
+    }
+
+    /// 退役写回（TS `internal/plugin` 半段）：fiber 所属条目**仍在且未
+    /// disabled**（= 组件自退役）→ 书签 `disabled = true`。loader 驱动的
+    /// 退役发生时条目已被移除或已置位，`entry_of`/`!l.disabled` 自然过滤。
+    fn writeback_retire(&self, fid: FiberId) {
+        if let Some(id) = self.entry_of(fid)
+            && let Some(l) = find_loaded_mut(&mut self.entries.borrow_mut(), &id)
+            && !l.disabled
+        {
+            l.disabled = true;
+        }
+    }
+
     /// 条目当前 fiber（组 = 持有者 fiber；未加载 / 已卸载 / 未满足依赖时为
     /// `None`）。整棵树递归查找。
     pub fn fiber(&self, id: &str) -> Option<Rc<Fiber>> {
@@ -380,7 +442,9 @@ impl Loader {
 
     fn find_fiber(&self, id: &str, map: &HashMap<String, LoadedEntry>) -> Option<Rc<Fiber>> {
         if let Some(loaded) = map.get(id) {
-            return loaded.fiber.clone();
+            // 退役 = 已卸载（自退役写回后 LoadedEntry 仍持引用供 disabled
+            // 清除路径清理 registry，但查询语义为 None）。
+            return loaded.fiber.clone().filter(|f| !f.retired());
         }
         map.values().find_map(|l| self.find_fiber(id, &l.children))
     }
@@ -475,6 +539,14 @@ impl Loader {
                 }
             } else {
                 // disabled 清除：以 desired 重新实例化（叶子或整棵分支）。
+                // 自退役写回（G1 剩余）后旧 fiber 已退役未移除——先拆除
+                // 释放供给名（退役 fiber 仍在 registry，直接实例化会
+                // ProvisionClash），再重实例化。
+                if let Some(fiber) = map.get(&entry.id).and_then(|l| l.fiber.clone())
+                    && fiber.retired()
+                {
+                    self.unload_from(&entry.id, map);
+                }
                 let fresh = self.make_loaded(entry, parent_ctx);
                 map.insert(entry.id.clone(), fresh);
             }
@@ -1985,6 +2057,137 @@ mod tests {
             "同 revision inject 变更被忽略（纪律：随 revision 递增）"
         );
         assert!(rt1.is_quiet(), "静止");
+    }
+
+    // ── G4/G1 剩余（TS-REFERENCE-GAP）：退役写回（self-dispose → disabled）──
+
+    /// 组件自退役 → loader 观察者写回条目书签 `disabled = true`；随后
+    /// desired 显式 `disabled=false` 的 apply **重新启用**（disabled 是
+    /// 协调字段——与 update 写回不同：config 非协调字段、同 revision
+    /// apply 不清除）。
+    #[test]
+    fn self_retire_writes_back_disabled_to_entry() {
+        let (loader, runtime) = loader();
+        loader.register_retire_hook();
+        loader.apply(&[
+            entry("provider", "provider", "pg", 1, false),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        let first = loader.fiber("provider").unwrap().id();
+
+        // 组件自退役（TS ctx.fiber.dispose() 同型）。
+        loader.fiber("provider").unwrap().retire();
+        assert!(
+            matches!(
+                &*loader.fiber("consumer").unwrap().state(),
+                FiberState::Inactive(_)
+            ),
+            "退役级联：consumer 停用"
+        );
+        assert_eq!(
+            loader.entry_disabled("provider"),
+            Some(true),
+            "观察者已把自退役写回条目书签 disabled=true"
+        );
+        assert!(runtime.is_quiet(), "自退役后静止");
+
+        // desired 显式 disabled=false → 协调字段拉回：重新启用。
+        loader.apply(&[
+            entry("provider", "provider", "pg", 1, false),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        assert!(
+            matches!(
+                &*loader.fiber("provider").unwrap().state(),
+                FiberState::Active { .. }
+            ),
+            "desired disabled=false → 重新启用"
+        );
+        assert!(
+            loader.fiber("provider").unwrap().id() != first,
+            "重新启用 = 新 fiber（退役已卸载旧 fiber）"
+        );
+        assert_eq!(
+            loader.entry_disabled("provider"),
+            Some(false),
+            "书签随协调回映 desired"
+        );
+        assert!(runtime.is_quiet(), "重新启用后静止");
+
+        // 自退役 + desired disabled=true → 保持禁用（fiber 不存在）。
+        loader.fiber("provider").unwrap().retire();
+        loader.apply(&[
+            entry("provider", "provider", "pg", 1, true),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        assert!(
+            loader.fiber("provider").is_none(),
+            "desired disabled=true → 条目无 fiber"
+        );
+        assert!(runtime.is_quiet(), "禁用后静止");
+    }
+
+    /// loader 驱动的操作不写回 disabled（过滤语义）：revision 重建 /
+    /// disabled 切换 / 条目移除时条目已被移除或已置位，观察者忽略。
+    #[test]
+    fn loader_driven_operations_do_not_write_back_disabled() {
+        let (loader, runtime) = loader();
+        loader.register_retire_hook();
+        loader.apply(&[
+            entry("provider", "provider", "pg", 1, false),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+
+        // revision 重建（teardown 内 retire）→ 书签 disabled 不被写回。
+        loader.apply(&[
+            entry("provider", "provider", "pg", 2, false),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        assert_eq!(
+            loader.entry_disabled("provider"),
+            Some(false),
+            "重建不写回 disabled（条目已被移除 → 观察者忽略）"
+        );
+        assert!(
+            matches!(
+                &*loader.fiber("provider").unwrap().state(),
+                FiberState::Active { .. }
+            ),
+            "重建后 Active"
+        );
+
+        // disabled 切换（卸载路径）→ 书签为 desired 的 true（非写回产物）。
+        loader.apply(&[
+            entry("provider", "provider", "pg", 2, true),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        assert_eq!(loader.entry_disabled("provider"), Some(true));
+        assert!(loader.fiber("provider").is_none());
+
+        // 条目移除 → 无书签。
+        loader.apply(&[entry("consumer", "consumer", "ignored", 1, false)]);
+        assert_eq!(loader.entry_disabled("provider"), None, "条目已移除");
+        assert!(runtime.is_quiet(), "静止");
+    }
+
+    /// 组内子条目自退役 → 写回映射（entry_of）命中嵌套条目书签。
+    #[test]
+    fn group_child_self_retire_maps_to_nested_entry() {
+        let (loader, _runtime) = loader();
+        loader.register_retire_hook();
+        loader.apply(&[Entry::group(
+            "g",
+            vec![
+                entry("child", "provider", "pg", 1, false),
+                entry("consumer", "consumer", "ignored", 1, false),
+            ],
+        )]);
+        loader.fiber("child").unwrap().retire();
+        assert_eq!(
+            loader.entry_disabled("child"),
+            Some(true),
+            "组内子条目自退役写回其自身书签"
+        );
     }
 
     /// Algorithm 7 边界（审查 major1，REVIEW-ef57804）：Local → Global 与

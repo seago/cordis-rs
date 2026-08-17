@@ -185,6 +185,13 @@ impl Fiber {
     /// 幂等：已退役时 refresh 无操作。调用方需持有 `Rc<Fiber>`。
     pub fn retire(self: &Rc<Self>) {
         self.retired.set(true);
+        // 退役观察者（§5.2.1 双向绑定条目侧；TS `internal/plugin` 半段）：
+        // 组件自退役 → loader 写回条目 `disabled`。任何 retire 均触发
+        //（含 loader 驱动 teardown）——过滤在观察者内部（见
+        // [`Runtime::set_retire_hook`]）。
+        if let Some(hook) = &*self.ctx.runtime().retire_hook.borrow() {
+            hook(self);
+        }
         self.ctx.runtime().refresh(self);
     }
 
