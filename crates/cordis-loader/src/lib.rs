@@ -35,13 +35,11 @@
 //! apply 不清除 fiber 层写回、书签回映 desired（协调记录非权威源）；
 
 //! ② isolate 变更经 Algorithm 7 realm 重指派（M2-PR4，就地不重建）；
-//! ③ 组条目自身的 isolate 注解不应用（组无声明键；组 isolate 变更仍整棵
-//! 重建）——**M3-PR3 评估结案**：论文 Def 74 将 isolate 声明为应用于
-//! entry 的 context（组亦为 entry），但未展开组级 isolate 继承至子树的
-//! 传播语义；实现中组 isolate 因 GroupHolder 空键自然 no-op，构成与
-//! Def 74 的字面偏差。候选语义"继承至子树（最近注解优先）"需把
-//! effective-isolate 穿透 instantiation 与 Algorithm 7 patch 两条路径
-//!（realm 脱同步风险）——记录为公开差异，随 typed world/编排工具层实现；
+//! ③ 组条目 isolate 注解——**已收口（G3，PR #31）**：per-key isolate
+//!（[`Entry::isolate`]）在组条目上经派生链**拷贝继承**给子条目（组 ctx
+//! 重定向被 derive 继承）、子条目自己的注解**覆盖**（最近注解优先）——
+//! 无需 effective-isolate 穿透（拷贝继承免去 patch 复杂度）；组 isolate
+//! 变更仍整棵重建（保守路径，`group_isolate_change_rebuilds_subtree` 直证）；
 //! ④ **失败 fiber 静默加载**（审查 nit7，REVIEW-32a913d）：L-Raise 后
 //! `use_component` 对组件失败返回 `Ok(fiber)`（`Inactive(Some(ζ))`）——
 //! loader 不检查失败态，静默记为"已加载"；调用方需自行 `fiber.state()`
@@ -71,7 +69,8 @@ use cordis_core::{Component, Context, Disposer, Fiber, FiberId, FiberState, Runt
 /// - [`IsolateAnnotation::Global`]（字符串）：global realm——所有命名相同
 ///   字符串的条目共享该 realm（移动条目改变的是共享关系而非所属 realm）。
 ///
-/// 应用于条目组件全部声明键（`inject ∪ provide`）的 realm 解析。
+/// **per-key 应用（G3）**：只解析映射中的键（无注解键 = 裸键 realm）；
+/// 组条目上的注解经派生链继承给子条目（子条目覆盖 = 最近注解优先）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IsolateAnnotation {
     /// `true`：local realm（按条目 id 打标）。
@@ -567,11 +566,10 @@ impl Loader {
         }
 
         if entry.is_group() {
-            // 组自身 isolate 变更 → 整棵重建（M2-PR3 边界；Algorithm 7 随
-            // M2-PR4）；否则：组拦截注解就地更新 + 子列表 keyed diff。
+            // 组自身 isolate 变更 → 整棵重建（保守路径，G3 收口后组
+            // isolate 已应用——重建使子条目按新 realm 重装；叶子条目的
+            // isolate 变更走 Algorithm 7 重指派）。
             if loaded.isolate != entry.isolate {
-                // 组条目 isolate 变更仍整棵重建（组无声明键，M2-PR3 边界；
-                // 叶子条目的 isolate 变更走 Algorithm 7 重指派）。
                 self.unload_from(&entry.id, map);
                 let fresh = self.make_loaded(entry, parent_ctx);
                 map.insert(entry.id.clone(), fresh);
@@ -744,8 +742,9 @@ impl Loader {
     /// 组持有者实例化：无注入/供给的空组件（组的角色 = 子条目的父 fiber，
     /// Def 47 注册）。
     fn instantiate_group(&self, entry: &Entry, parent_ctx: &Rc<Context>) -> Rc<Fiber> {
-        // 组拦截注解经 annotated_ctx 应用（组 isolate 因 GroupHolder 空键
-        // 自然 no-op；REVIEW-24bfab5 nit4：复用而非手工复刻）。
+        // 组拦截/注入/isolate 注解经 annotated_ctx 应用（G3：per-key
+        // isolate 重定向组 ctx——子条目经 derive 拷贝继承；REVIEW-24bfab5
+        // nit4：复用而非手工复刻）。
         let ctx = self.annotated_ctx(parent_ctx, entry);
         let holder = ctx
             .use_component(Rc::new(GroupHolder), Rc::clone(&entry.config))
