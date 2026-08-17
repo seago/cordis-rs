@@ -67,7 +67,7 @@
 
 ### G9【低】Service `check` 可用性谓词（TS `Service[check]`：provider 在册但"不可用"→ 消费者不可见）
 
-- **TS 实现**：`provide(name, value, check)` 携带谓词；`_checkImpl` 谓词为假 → 消费者 epoch INACTIVE（reflect.ts:371-383、fiber.ts）。loader 的 `[Service.check]` 用其实现"有任务在跑时 loader 服务不可用"。
+- **TS 实现**：`provide(name, value, check)` 携带谓词；`_checkImpl` 谓词为假 → 消费者 epoch INACTIVE（fiber.ts:371-383；REVIEW-431fcf6 nit 修正行号）。loader 的 `[Service.check]` 用其实现"有任务在跑时 loader 服务不可用"。
 - **我们**：绑定存在即可用；无谓词。
 - **对照结论**：论文 §3.2 的满足谓词是"键在册"；逻辑可用性是额外能力。**缺口（低）**，可用于优雅降级/门控。
 - **建议**：`Key::Value` 绑定附加可选 `check`（值携带谓词或 provider 声明），`resolve` 时求值；先记录，按需实现。
