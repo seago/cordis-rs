@@ -9,7 +9,7 @@
 use cordis_core::effect::EffectIter;
 use cordis_core::keyset::KeySet;
 use cordis_core::symbol::Symbol;
-use cordis_core::{Component, Context, Disposer, Fiber, Key, Runtime, Step};
+use cordis_core::{Component, Context, Disposer, Fiber, FiberError, Key, Runtime, Step};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -61,6 +61,27 @@ impl Component for Provider {
                 .get::<DbKey>()
                 .map(|v| v.clone())
                 .unwrap_or_else(|_| "v0".to_string());
+            ctx.set::<DbKey>(value).expect("绑定 db")
+        }))
+    }
+}
+
+/// 按 config 决定成败的提供者："fail" → L-Raise；否则绑定 config 值。
+struct ConditionalProvider;
+
+impl Component for ConditionalProvider {
+    fn inject(&self) -> KeySet {
+        KeySet::new()
+    }
+    fn provide(&self) -> KeySet {
+        spec(&["db"])
+    }
+    fn apply(&self, ctx: Rc<Context>, config: &dyn std::any::Any) -> Box<dyn EffectIter> {
+        let value = config.downcast_ref::<String>().expect("String").clone();
+        Box::new(once_finished(move || {
+            if value == "fail" {
+                FiberError::new("组件失败（测试）").raise()
+            }
             ctx.set::<DbKey>(value).expect("绑定 db")
         }))
     }
@@ -167,9 +188,50 @@ fn update_hook_fires_with_new_config_before_rerun() {
     assert!(runtime.is_quiet(), "静止");
 }
 
-/// 协议违反：非 Active fiber 上调用 update = panic（INACTIVE_EFFECT 同型）。
+/// 失败 fiber 经 update **复活**（REVIEW-97bb598 major-1 采纳 TS 语义：
+/// `_error = undefined` + restart 同型）——清 ζ → refresh 重算 target →
+/// 链式 reload，fiber 身份保留、依赖者恢复。
 #[test]
-#[should_panic(expected = "仅 Active fiber 可用")]
+fn update_revives_failed_fiber() {
+    let runtime = Rc::new(Runtime::new());
+    let root = runtime.context();
+    let provider = root
+        .use_component(Rc::new(ConditionalProvider), Rc::new("fail".to_string()))
+        .expect("provider 注册");
+    let consumer = root
+        .use_component(Rc::new(Consumer), Rc::new(()))
+        .expect("consumer 注册");
+    assert!(
+        matches!(
+            &*provider.state(),
+            cordis_core::FiberState::Inactive(Some(_))
+        ),
+        "首次激活失败（L-Raise 终态）"
+    );
+    assert!(
+        matches!(&*consumer.state(), cordis_core::FiberState::Inactive(_)),
+        "依赖者停用"
+    );
+    let id = provider.id();
+
+    provider.update(Rc::new("pg".to_string()));
+    assert_eq!(provider.id(), id, "复活保持 fiber 身份");
+    assert!(
+        matches!(&*provider.state(), cordis_core::FiberState::Active { .. }),
+        "复活：新 config 下重跑成功"
+    );
+    assert!(
+        matches!(&*consumer.state(), cordis_core::FiberState::Active { .. }),
+        "依赖者随复活恢复"
+    );
+    assert_eq!(db_value(&runtime), "pg", "新配置生效");
+    assert!(runtime.is_quiet(), "复活后静止");
+}
+
+/// 协议违反：非 Active/失败态 fiber（退役 = Inactive(None)）上调用
+/// update = panic（INACTIVE_EFFECT 同型）。
+#[test]
+#[should_panic(expected = "仅 Active/失败态")]
 fn update_on_inactive_fiber_panics() {
     let (_runtime, provider, _consumer, _count) = setup();
     provider.retire();

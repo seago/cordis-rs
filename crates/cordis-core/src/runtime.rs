@@ -372,16 +372,25 @@ impl Runtime {
     ///
     /// 观察者在 [`Fiber::update`] 换闭包**之前**以新 config 触发（TS
     /// `internal/update` 瀑布先写回后重启的序）；回调 panic = 宿主 bug（传播）。
+    ///
+    /// **约束（REVIEW-97bb598 nit-1）**：观察者运行于 `reload` 的
+    /// `catch_unwind` **之外**，不参与 L-Raise 恢复通道——实现者不得在
+    /// 观察者内 [`FiberError::raise`]（那将被当作普通 panic 重抛，而非
+    /// 组件失败 outcome）。
     pub fn set_update_hook(&self, hook: Option<Rc<UpdateHook>>) {
         *self.update_hook.borrow_mut() = hook;
     }
 
     /// §5.2.1 双向绑定组件侧（TS `Fiber.update` 参照）：换 config 闭包 →
-    /// 强制重跑（[`unload`] 逆转当前效应 → 目标未变 → 链式 [`reload`]）。
+    /// 强制重跑。两条路径（REVIEW-97bb598 major-1 采纳 TS 语义）：
     ///
-    /// fiber **身份保留**（非重建）；依赖者因绑定撤销/重装级联停用/恢复
-    /// （与 TS `restart()` 行为一致）；新配置下的重跑失败 = L-Raise →
-    /// `Inactive(ζ)`（与 `reload` 同路径）。
+    /// - **Active** → [`unload`] 逆转当前效应 → 目标未变 → 链式 [`reload`]
+    ///   （fiber 身份保留；依赖者因绑定撤销/重装级联停用/恢复）；
+    /// - **失败态**（`Inactive(Some(ζ))`）→ 清除 ζ 后 [`refresh`] 重算
+    ///   target（满足 → 链式 reload = **复活**；TS `_error = undefined` +
+    ///   restart 同型）。
+    ///
+    /// 重跑失败 = L-Raise → `Inactive(ζ)`（与 `reload` 同路径）。
     pub fn update_fiber(&self, fiber: &Rc<Fiber>, config: Rc<dyn Any>) {
         // 写回观察者先行（TS `internal/update` 序：先写回后重启）。
         if let Some(hook) = &*self.update_hook.borrow() {
@@ -392,7 +401,19 @@ impl Runtime {
         let new_apply: Box<dyn Fn() -> Box<dyn EffectIter>> =
             Box::new(move || component.apply(Rc::clone(&ctx), config.as_ref()));
         *fiber.apply.borrow_mut() = new_apply;
-        self.unload(fiber);
+        // 状态借用只活在语句级（unload/refresh 内部 borrow_mut state——
+        // 审查 m4 同款约定）。
+        let active = matches!(&*fiber.state.borrow(), FiberState::Active { .. });
+        let failed = matches!(&*fiber.state.borrow(), FiberState::Inactive(Some(_)));
+        if active {
+            self.unload(fiber);
+        } else if failed {
+            // 复活：清 ζ（失败态由 target = ⊥ 承载，refresh 一并重算）。
+            *fiber.state.borrow_mut() = FiberState::Inactive(None);
+            self.refresh(fiber);
+        } else {
+            unreachable!("update 断言已保证 Active/失败态（INACTIVE_EFFECT）")
+        }
     }
 
     /// reload（Algorithm 5 第 12–23 行）：执行组件效应并承诺视图。

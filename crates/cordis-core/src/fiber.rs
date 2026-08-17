@@ -195,13 +195,19 @@ impl Fiber {
     /// → 以新配置重跑（fiber **身份保留**，非重建）→ 绑定重装（依赖者级联
     /// 恢复）。失败（L-Raise）→ `Inactive(ζ)`，与 `reload` 同路径。
     ///
-    /// 仅限 **Active** fiber 调用（TS `assertActive` 同型：非激活调用 =
-    /// 协议违反，panic = bug）。写回观察者（[`Runtime::set_update_hook`]）
-    /// 在重跑前以新 config 触发——loader 经此实现条目侧写回。
+    /// **Active** 或**失败态**（`Inactive(Some(ζ))`）可调用——与 TS
+    /// `assertActive`（`uid !== null`）+ `_error = undefined` 的"失败 fiber
+    /// 可经 update 复活"行为同型（REVIEW-97bb598 major-1 采纳）；退役/
+    /// 未注册（`Inactive(None)`）调用 = 协议违反，panic = bug。写回观察者
+    /// （[`Runtime::set_update_hook`]）在重跑前以新 config 触发——loader
+    /// 经此实现条目侧写回。
     pub fn update(self: &Rc<Self>, config: Rc<dyn Any>) {
         assert!(
-            matches!(&*self.state.borrow(), FiberState::Active { .. }),
-            "Fiber::update 仅 Active fiber 可用（§5.2.1 双向绑定；INACTIVE_EFFECT）"
+            matches!(
+                &*self.state.borrow(),
+                FiberState::Active { .. } | FiberState::Inactive(Some(_))
+            ),
+            "Fiber::update 仅 Active/失败态（Inactive(ζ)）可用（§5.2.1 双向绑定；INACTIVE_EFFECT）"
         );
         self.ctx.runtime().update_fiber(self, config);
     }

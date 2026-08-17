@@ -21,13 +21,16 @@
 //! **两阶段协调（审查 m1）**：`apply` 每层先做卸载侧（释放供给名）再做
 //! 实例化侧——同供给键的替换可在单次 `apply` 完成。
 //!
-//! **已知边界（M2-PR3 记录，⑩⑪ M3-PR3 评估收尾）**：① 双向写回未实现
-//! ——条目为权威记录，组件不能自行改配置/禁自身（§5.2.1 "the binding
-//! runs in both directions" 的组件→条目方向缺席）。**M3-PR3 评估结案**：
-//! 组件侧杆杠 = `Fiber::retire`（运行时退役 + 级联卸载）；退役**粘滞**
-//!（跨未变 apply 保持，见 `retired_component_persists_across_unchanged_apply`
-//! 测试）——编排方经 desired 树移除或 revision 递增才重建。写回方向属
-//! 编排责任（条目由调用方持有），按设计收尾为公开差异；
+//! **已知边界（M2-PR3 记录，⑩⑪ M3-PR3 评估 + PR #29 G1 落地）**：
+//! ① 双向绑定（§5.2.1 "the binding runs in both directions"）：**组件侧
+//! 已落地（G1，PR #29）**——`Fiber::update` 就地重跑（fiber 身份保留、
+//! 依赖者级联、失败态可复活）+ `Runtime::set_update_hook` + loader
+//! `update_entry`/`register_update_hook`（条目书签写回、fiber→条目反查）。
+//! **仍缺席**：组件自退役（`Fiber::retire`）→ 条目 `disabled` 写回（TS
+//! `internal/plugin` 半段）——退役**粘滞**跨未变 apply（见
+//! `retired_component_persists_across_unchanged_apply` 测试）；同 revision
+//! apply 不清除 fiber 层写回、书签回映 desired（协调记录非权威源）；
+
 //! ② isolate 变更经 Algorithm 7 realm 重指派（M2-PR4，就地不重建）；
 //! ③ 组条目自身的 isolate 注解不应用（组无声明键；组 isolate 变更仍整棵
 //! 重建）——**M3-PR3 评估结案**：论文 Def 74 将 isolate 声明为应用于
@@ -1943,6 +1946,45 @@ mod tests {
         };
         assert_eq!(value, "rw:/g", "组注入配置经派生继承给子条目");
         assert!(runtime.is_quiet(), "静止");
+    }
+
+    /// G2 变更纪律负例（REVIEW-97bb598 nit-3）：`LoadedEntry` 不存
+    /// `inject`，同 revision 的 inject 变更被 reconcile 忽略（须随
+    /// revision 递增才重建）——钉死该纪律为可观察契约。
+    #[test]
+    fn inject_change_without_revision_is_ignored() {
+        let (l1, rt1) = loader();
+        l1.register_component("m", meta_provider());
+        l1.apply(&[Entry::new("p", "m", Rc::new(()), 0, false)
+            .with_inject(Symbol::intern("fs"), path_meta(&["/a"], false))]);
+        let first = {
+            let store = rt1.store();
+            store
+                .get_value(Symbol::intern("fs"))
+                .expect("fs 绑定")
+                .downcast_ref::<String>()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(first, "rw:/a", "初始注入生效");
+
+        // 同 revision 换 inject（值不同）：reconcile 零操作，旧注入保持。
+        l1.apply(&[Entry::new("p", "m", Rc::new(()), 0, false)
+            .with_inject(Symbol::intern("fs"), path_meta(&["/b"], true))]);
+        let value = {
+            let store = rt1.store();
+            store
+                .get_value(Symbol::intern("fs"))
+                .expect("fs 绑定")
+                .downcast_ref::<String>()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(
+            value, "rw:/a",
+            "同 revision inject 变更被忽略（纪律：随 revision 递增）"
+        );
+        assert!(rt1.is_quiet(), "静止");
     }
 
     /// Algorithm 7 边界（审查 major1，REVIEW-ef57804）：Local → Global 与
