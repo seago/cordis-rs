@@ -54,7 +54,7 @@
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::rc::Rc;
 
@@ -142,8 +142,12 @@ pub struct Entry {
     /// 组件名（`url` 的原生版）：经 [`Loader::register_component`] 注册；
     /// 变更即重建条目（论文的 `id, url → rebuild`）。分支条目为空串。
     pub component: String,
-    /// 隔离注解（Def 74 的 `isolate`）。
-    pub isolate: Option<IsolateAnnotation>,
+    /// 隔离注解（Def 74 的 `isolate`；G3 per-key 粒度，TS
+    /// `EntryOptions.isolate: Dict<true | string>` 参照）：**键 → 注解**，
+    /// 只隔离映射中的键（混合粒度：`{val: Local, sum: Global("x")}`）；
+    /// 组条目上应用后经派生链拷贝继承给子条目（子条目自己的注解覆盖 =
+    /// 最近注解优先，⑪ 收口）。
+    pub isolate: BTreeMap<Symbol, IsolateAnnotation>,
     /// 拦截注解（Def 74 的 `intercept`：键 → 元数据，就地更新不重建）。
     pub intercept: Intercepts,
     /// **注入携带配置**（G2，TS `EntryOptions.inject` 参照）：键 → 拦截
@@ -191,7 +195,7 @@ impl Entry {
         Self {
             id: id.into(),
             component: component.into(),
-            isolate: None,
+            isolate: BTreeMap::new(),
             intercept: Intercepts::new(),
             inject: Intercepts::new(),
             config,
@@ -207,7 +211,7 @@ impl Entry {
         Self {
             id: id.into(),
             component: String::new(),
-            isolate: None,
+            isolate: BTreeMap::new(),
             intercept: Intercepts::new(),
             inject: Intercepts::new(),
             config: Rc::new(()),
@@ -223,9 +227,12 @@ impl Entry {
         Self::group(id, children)
     }
 
-    /// 设置隔离注解。
-    pub fn with_isolate(mut self, isolate: IsolateAnnotation) -> Self {
-        self.isolate = Some(isolate);
+    /// 设置键的隔离注解（G3 per-key）。
+    ///
+    /// **变更纪律（同 config）**：已加载条目的 isolate 变更走 Algorithm 7
+    /// realm 重指派（叶子）或整棵重建（组，保守路径）——不依赖 revision。
+    pub fn with_isolate(mut self, key: Symbol, isolate: IsolateAnnotation) -> Self {
+        self.isolate.insert(key, isolate);
         self
     }
 
@@ -259,7 +266,7 @@ struct LoadedEntry {
     config: Rc<dyn Any>,
     revision: u64,
     disabled: bool,
-    isolate: Option<IsolateAnnotation>,
+    isolate: BTreeMap<Symbol, IsolateAnnotation>,
     intercept: Intercepts,
     /// 条目上下文（注解派生；Algorithm 7 重指派时就地 patch ρ，
     /// M2-PR4）。
@@ -662,7 +669,7 @@ impl Loader {
     /// 分支 = 派生 + 组拦截注解（isolate 无声明键可应用，M2-PR3 边界）。
     fn entry_ctx(&self, entry: &Entry, parent_ctx: &Rc<Context>) -> Rc<Context> {
         if entry.is_group() {
-            let ctx = parent_ctx.derive();
+            let mut ctx = parent_ctx.derive();
             for (key, meta) in entry.intercept.iter() {
                 ctx.intercept_set_boxed(key, meta.clone_box());
             }
@@ -670,9 +677,24 @@ impl Loader {
             for (key, meta) in entry.inject.iter() {
                 ctx.intercept_set_boxed(key, meta.clone_box());
             }
+            // G3：组 per-key isolate——组 ctx 重定向经 derive 拷贝传给
+            // 子条目（子条目自己的注解覆盖 = 最近注解优先，⑪ 收口）。
+            for (key, iso) in entry.isolate.iter() {
+                let realm = match iso {
+                    IsolateAnnotation::Local => {
+                        Symbol::intern(&format!("local:{}:{}", entry.id, key.as_str()))
+                    }
+                    IsolateAnnotation::Global(name) => {
+                        Symbol::intern(&format!("global:{name}:{}", key.as_str()))
+                    }
+                };
+                ctx = ctx.isolate(*key, realm);
+            }
             ctx
         } else {
-            let component = self
+            // 查表副作用 = 未注册 panic；绑定不再用于注解（G3 per-key 后
+            // isolate 不再需要 keys）。
+            let _component = self
                 .components
                 .borrow()
                 .get(&entry.component)
@@ -683,12 +705,7 @@ impl Loader {
                         entry.component
                     )
                 });
-            let keys: KeySet = component
-                .inject()
-                .iter()
-                .chain(component.provide().iter())
-                .collect();
-            self.annotated_ctx(parent_ctx, entry, &keys)
+            self.annotated_ctx(parent_ctx, entry)
         }
     }
 
@@ -729,7 +746,7 @@ impl Loader {
     fn instantiate_group(&self, entry: &Entry, parent_ctx: &Rc<Context>) -> Rc<Fiber> {
         // 组拦截注解经 annotated_ctx 应用（组 isolate 因 GroupHolder 空键
         // 自然 no-op；REVIEW-24bfab5 nit4：复用而非手工复刻）。
-        let ctx = self.annotated_ctx(parent_ctx, entry, &KeySet::new());
+        let ctx = self.annotated_ctx(parent_ctx, entry);
         let holder = ctx
             .use_component(Rc::new(GroupHolder), Rc::clone(&entry.config))
             .unwrap_or_else(|err| panic!("组条目 `{}` 实例化失败：{err:?}（配置错误）", entry.id));
@@ -747,20 +764,19 @@ impl Loader {
 
     /// 注解 ctx：派生（隔离父上下文）→ isolate（派生）→ intercept
     /// （类型擦除替换，条目注解为权威）。
-    fn annotated_ctx(&self, parent: &Rc<Context>, entry: &Entry, keys: &KeySet) -> Rc<Context> {
+    fn annotated_ctx(&self, parent: &Rc<Context>, entry: &Entry) -> Rc<Context> {
         let mut ctx = parent.derive();
-        if let Some(iso) = &entry.isolate {
-            for key in keys.iter() {
-                let realm = match iso {
-                    IsolateAnnotation::Local => {
-                        Symbol::intern(&format!("local:{}:{}", entry.id, key.as_str()))
-                    }
-                    IsolateAnnotation::Global(name) => {
-                        Symbol::intern(&format!("global:{name}:{}", key.as_str()))
-                    }
-                };
-                ctx = ctx.isolate(key, realm);
-            }
+        // G3 per-key isolate：只隔离映射中的键（TS `isolate: Dict` 参照）。
+        for (key, iso) in entry.isolate.iter() {
+            let realm = match iso {
+                IsolateAnnotation::Local => {
+                    Symbol::intern(&format!("local:{}:{}", entry.id, key.as_str()))
+                }
+                IsolateAnnotation::Global(name) => {
+                    Symbol::intern(&format!("global:{name}:{}", key.as_str()))
+                }
+            };
+            ctx = ctx.isolate(*key, realm);
         }
         for (key, meta) in entry.intercept.iter() {
             ctx.intercept_set_boxed(key, meta.clone_box());
@@ -804,17 +820,22 @@ impl Loader {
     ) {
         let fiber = loaded.fiber.as_ref().expect("patch 仅在已激活条目");
         let component = fiber.component();
-        let keys: KeySet = component
+        // Δ 键域：组件声明键 ∪ 新旧 isolate 映射键（G3 per-key）。
+        let mut keys: Vec<Symbol> = component
             .inject()
             .iter()
             .chain(component.provide().iter())
             .collect();
+        keys.extend(entry.isolate.keys().copied());
+        keys.extend(loaded.isolate.keys().copied());
+        keys.sort_unstable();
+        keys.dedup();
 
         // Δ：变化键（s1 = 旧 realm，s2 = 新 realm）。
         let mut diff: Vec<(Symbol, Symbol, Symbol)> = Vec::new();
-        for key in keys.iter() {
-            let s1 = self.realm_of(loaded.isolate.as_ref(), &entry.id, key);
-            let s2 = self.realm_of(entry.isolate.as_ref(), &entry.id, key);
+        for key in keys {
+            let s1 = self.realm_of(&loaded.isolate, &entry.id, key);
+            let s2 = self.realm_of(&entry.isolate, &entry.id, key);
             if s1 != s2 {
                 diff.push((key, s1, s2));
             }
@@ -901,8 +922,13 @@ impl Loader {
     }
 
     /// isolate 注解 → 键的 realm 符号。
-    fn realm_of(&self, isolate: Option<&IsolateAnnotation>, id: &str, key: Symbol) -> Symbol {
-        match isolate {
+    fn realm_of(
+        &self,
+        isolate: &BTreeMap<Symbol, IsolateAnnotation>,
+        id: &str,
+        key: Symbol,
+    ) -> Symbol {
+        match isolate.get(&key) {
             None => key,
             Some(IsolateAnnotation::Local) => {
                 Symbol::intern(&format!("local:{id}:{}", key.as_str()))
@@ -1436,6 +1462,131 @@ mod tests {
         );
     }
 
+    // ── G3（TS-REFERENCE-GAP）：per-key isolate 粒度 ──────────────────
+
+    /// 双键提供者（a + b；G3 混合粒度用）。
+    fn dual_provider() -> Rc<TestComponent> {
+        Rc::new(TestComponent {
+            inject: spec(&[]),
+            provide: spec(&["a", "b"]),
+            effects: Box::new(|ctx, _config| {
+                Box::new(once(Box::new(move || {
+                    let _a = ctx
+                        .set_dyn(Symbol::intern("a"), Box::new("va".to_string()))
+                        .expect("绑定 a");
+                    let _b = ctx
+                        .set_dyn(Symbol::intern("b"), Box::new("vb".to_string()))
+                        .expect("绑定 b");
+                    Box::new(|| {}) as Disposer
+                })))
+            }),
+        })
+    }
+
+    /// G3 混合粒度（TS `isolate: { a: true, b: 'label' }` 同型）：同一
+    /// 条目对 `a` 用 Local、`b` 用 Global——per-key realm 各自独立。
+    #[test]
+    fn isolate_per_key_mixed_granularity() {
+        let (loader, runtime) = loader();
+        loader.register_component("dual", dual_provider());
+        loader.apply(&[Entry::new("p", "dual", Rc::new(()), 0, false)
+            .with_isolate(Symbol::intern("a"), IsolateAnnotation::Local)
+            .with_isolate(Symbol::intern("b"), IsolateAnnotation::Global("g".into()))]);
+        let store = runtime.store();
+        assert!(
+            store.contains(Symbol::intern("local:p:a")),
+            "a 键 → Local realm（按条目 id）"
+        );
+        assert!(
+            store.contains(Symbol::intern("global:g:b")),
+            "b 键 → Global realm（命名共享）"
+        );
+        assert!(!store.contains(Symbol::intern("a")), "a 不在裸键 realm");
+        drop(store);
+        assert!(runtime.is_quiet(), "静止");
+    }
+
+    /// G3 + ⑪ 收口：组条目的 per-key isolate 经派生链**继承**给子条目
+    ///（组 ctx 重定向被 derive 拷贝）；子条目自己的注解**覆盖**（最近
+    /// 注解优先）。
+    #[test]
+    fn group_isolate_inherits_to_children_and_child_overrides() {
+        // 继承：组 g 对 val 标 Local → 子条目提供者绑定 local:g:val。
+        let (l1, rt1) = loader();
+        l1.register_component("db", val_provider());
+        l1.apply(&[Entry::group(
+            "g",
+            vec![Entry::new("p", "db", Rc::new("v".to_string()), 0, false)],
+        )
+        .with_isolate(Symbol::intern("val"), IsolateAnnotation::Local)]);
+        assert!(
+            rt1.store().contains(Symbol::intern("local:g:val")),
+            "组 isolate 继承：子条目绑定落在组 local realm"
+        );
+        assert!(l1.fiber("p").is_some(), "子条目激活");
+        drop(rt1.store());
+        assert!(rt1.is_quiet(), "静止");
+
+        // 覆盖（最近注解优先）：子条目自己的 Global 注解覆盖组的 Local。
+        let (l2, rt2) = loader();
+        l2.register_component("db", val_provider());
+        l2.apply(&[Entry::group(
+            "g",
+            vec![
+                Entry::new("p", "db", Rc::new("v".to_string()), 0, false)
+                    .with_isolate(Symbol::intern("val"), IsolateAnnotation::Global("x".into())),
+            ],
+        )
+        .with_isolate(Symbol::intern("val"), IsolateAnnotation::Local)]);
+        assert!(
+            rt2.store().contains(Symbol::intern("global:x:val")),
+            "子条目注解覆盖组注解（最近优先）"
+        );
+        assert!(
+            !rt2.store().contains(Symbol::intern("local:g:val")),
+            "组的 Local 不再生效"
+        );
+        assert!(rt2.is_quiet(), "静止");
+    }
+
+    /// G3 组 isolate 变更：reconcile 组分支仍走整棵重建（保守路径）——
+    /// 子条目重建、绑定迁到新 realm。
+    #[test]
+    fn group_isolate_change_rebuilds_subtree() {
+        let (loader, runtime) = loader();
+        loader.register_component("db", val_provider());
+        loader.apply(&[Entry::group(
+            "g",
+            vec![Entry::new("p", "db", Rc::new("v".to_string()), 0, false)],
+        )
+        .with_isolate(Symbol::intern("val"), IsolateAnnotation::Local)]);
+        assert!(
+            runtime.store().contains(Symbol::intern("local:g:val")),
+            "初始：组 Local realm"
+        );
+        let child_first = loader.fiber("p").unwrap().id();
+
+        loader.apply(&[Entry::group(
+            "g",
+            vec![Entry::new("p", "db", Rc::new("v".to_string()), 0, false)],
+        )
+        .with_isolate(Symbol::intern("val"), IsolateAnnotation::Global("y".into()))]);
+        assert!(
+            runtime.store().contains(Symbol::intern("global:y:val")),
+            "组 isolate 变更 → 整棵重建、绑定迁 realm"
+        );
+        assert!(
+            !runtime.store().contains(Symbol::intern("local:g:val")),
+            "旧 realm 无绑定"
+        );
+        assert_ne!(
+            loader.fiber("p").unwrap().id(),
+            child_first,
+            "整棵重建 = 子条目新 fiber"
+        );
+        assert!(runtime.is_quiet(), "静止");
+    }
+
     #[test]
     fn isolate_local_creates_private_realms() {
         // Local：提供者与消费者各自私有 realm——消费者看不到绑定。
@@ -1445,9 +1596,9 @@ mod tests {
             loader.register_component("cons", sum_consumer());
             loader.apply(&[
                 Entry::new("p", "db", Rc::new("v".to_string()), 0, false)
-                    .with_isolate(IsolateAnnotation::Local),
+                    .with_isolate(Symbol::intern("val"), IsolateAnnotation::Local),
                 Entry::new("c", "cons", Rc::new(()), 0, false)
-                    .with_isolate(IsolateAnnotation::Local),
+                    .with_isolate(Symbol::intern("val"), IsolateAnnotation::Local),
             ]);
             assert!(loader.fiber("p").is_some(), "提供者激活");
             let c = loader
@@ -1465,10 +1616,14 @@ mod tests {
             loader.register_component("db", val_provider());
             loader.register_component("cons", sum_consumer());
             loader.apply(&[
-                Entry::new("p", "db", Rc::new("v".to_string()), 0, false)
-                    .with_isolate(IsolateAnnotation::Global("db".into())),
-                Entry::new("c", "cons", Rc::new(()), 0, false)
-                    .with_isolate(IsolateAnnotation::Global("db".into())),
+                Entry::new("p", "db", Rc::new("v".to_string()), 0, false).with_isolate(
+                    Symbol::intern("val"),
+                    IsolateAnnotation::Global("db".into()),
+                ),
+                Entry::new("c", "cons", Rc::new(()), 0, false).with_isolate(
+                    Symbol::intern("val"),
+                    IsolateAnnotation::Global("db".into()),
+                ),
             ]);
             assert!(loader.fiber("p").is_some(), "提供者激活");
             assert!(loader.fiber("c").is_some(), "Global realm 共享：消费者激活");
@@ -1568,10 +1723,14 @@ mod tests {
         let (loader, runtime) = loader();
         loader.register_component("db", val_provider());
         loader.register_component("cons", sum_consumer());
-        let base_p = Entry::new("p", "db", Rc::new("v".to_string()), 0, false)
-            .with_isolate(IsolateAnnotation::Global("db".into()));
-        let base_c = Entry::new("c", "cons", Rc::new(()), 0, false)
-            .with_isolate(IsolateAnnotation::Global("db".into()));
+        let base_p = Entry::new("p", "db", Rc::new("v".to_string()), 0, false).with_isolate(
+            Symbol::intern("val"),
+            IsolateAnnotation::Global("db".into()),
+        );
+        let base_c = Entry::new("c", "cons", Rc::new(()), 0, false).with_isolate(
+            Symbol::intern("val"),
+            IsolateAnnotation::Global("db".into()),
+        );
         loader.apply(&[base_p.clone(), base_c.clone()]);
         let p_first = loader.fiber("p").expect("p 激活").id();
         let c_first = loader.fiber("c").expect("c 激活（共享 realm）").id();
@@ -1583,9 +1742,10 @@ mod tests {
         // p 的 isolate 变更（Global db → db2）：**Algorithm 7 重指派**——
         // 不重建（fiber id 不变），绑定迁移到新 realm。
         loader.apply(&[
-            base_p
-                .clone()
-                .with_isolate(IsolateAnnotation::Global("db2".into())),
+            base_p.clone().with_isolate(
+                Symbol::intern("val"),
+                IsolateAnnotation::Global("db2".into()),
+            ),
             base_c.clone(),
         ]);
         assert_eq!(
@@ -1615,12 +1775,14 @@ mod tests {
 
         // c 也迁到 db2 → 重新激活（c 的 fiber 亦不变）。
         loader.apply(&[
-            base_p
-                .clone()
-                .with_isolate(IsolateAnnotation::Global("db2".into())),
-            base_c
-                .clone()
-                .with_isolate(IsolateAnnotation::Global("db2".into())),
+            base_p.clone().with_isolate(
+                Symbol::intern("val"),
+                IsolateAnnotation::Global("db2".into()),
+            ),
+            base_c.clone().with_isolate(
+                Symbol::intern("val"),
+                IsolateAnnotation::Global("db2".into()),
+            ),
         ]);
         assert_eq!(
             loader.fiber("c").expect("c 仍在").id(),
@@ -1644,12 +1806,16 @@ mod tests {
         let (loader, runtime) = loader();
         loader.register_component("db", val_provider());
         loader.register_component("cons", sum_consumer());
-        let child = Entry::new("a", "db", Rc::new("1".to_string()), 0, false)
-            .with_isolate(IsolateAnnotation::Global("db".into()));
+        let child = Entry::new("a", "db", Rc::new("1".to_string()), 0, false).with_isolate(
+            Symbol::intern("val"),
+            IsolateAnnotation::Global("db".into()),
+        );
         loader.apply(&[
             Entry::group("g", vec![child]),
-            Entry::new("c", "cons", Rc::new(()), 0, false)
-                .with_isolate(IsolateAnnotation::Global("db".into())),
+            Entry::new("c", "cons", Rc::new(()), 0, false).with_isolate(
+                Symbol::intern("val"),
+                IsolateAnnotation::Global("db".into()),
+            ),
         ]);
         assert!(loader.fiber("a").is_some(), "组内子条目激活");
         assert!(
@@ -1665,12 +1831,16 @@ mod tests {
             Entry::group(
                 "g",
                 vec![
-                    Entry::new("a", "db", Rc::new("1".to_string()), 0, false)
-                        .with_isolate(IsolateAnnotation::Global("db2".into())),
+                    Entry::new("a", "db", Rc::new("1".to_string()), 0, false).with_isolate(
+                        Symbol::intern("val"),
+                        IsolateAnnotation::Global("db2".into()),
+                    ),
                 ],
             ),
-            Entry::new("c", "cons", Rc::new(()), 0, false)
-                .with_isolate(IsolateAnnotation::Global("db".into())),
+            Entry::new("c", "cons", Rc::new(()), 0, false).with_isolate(
+                Symbol::intern("val"),
+                IsolateAnnotation::Global("db".into()),
+            ),
         ]);
         let store = runtime.store();
         assert!(
@@ -2201,15 +2371,19 @@ mod tests {
         let (loader, runtime) = loader();
         loader.register_component("db", val_provider());
         let local = Entry::new("p", "db", Rc::new("v".to_string()), 0, false)
-            .with_isolate(IsolateAnnotation::Local);
+            .with_isolate(Symbol::intern("val"), IsolateAnnotation::Local);
         loader.apply(&[local]);
         assert!(
             runtime.store().contains(Symbol::intern("local:p:val")),
             "绑定在 local realm"
         );
 
-        loader.apply(&[Entry::new("p", "db", Rc::new("v".to_string()), 0, false)
-            .with_isolate(IsolateAnnotation::Global("db".into()))]);
+        loader.apply(&[
+            Entry::new("p", "db", Rc::new("v".to_string()), 0, false).with_isolate(
+                Symbol::intern("val"),
+                IsolateAnnotation::Global("db".into()),
+            ),
+        ]);
         let store = runtime.store();
         assert!(
             store.contains(Symbol::intern("global:db:val")),
@@ -2234,8 +2408,12 @@ mod tests {
             "裸键 realm 绑定"
         );
 
-        loader.apply(&[Entry::new("p", "db", Rc::new("v".to_string()), 0, false)
-            .with_isolate(IsolateAnnotation::Global("db".into()))]);
+        loader.apply(&[
+            Entry::new("p", "db", Rc::new("v".to_string()), 0, false).with_isolate(
+                Symbol::intern("val"),
+                IsolateAnnotation::Global("db".into()),
+            ),
+        ]);
         let store = runtime.store();
         assert!(
             store.contains(Symbol::intern("global:db:val")),
