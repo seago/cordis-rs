@@ -122,7 +122,7 @@
 
 1. **G1 双向绑定**（重新打开处置⑩）：`Fiber::update` + loader 写回观察者——§5.2.1 明示语义，TS 有完整参照。✅ **已落地（PR #29 + PR #30）**：core `Fiber::update`（就地重跑、fiber 身份保留、依赖者级联）+ `Runtime::set_update_hook`/`set_retire_hook`；loader `update_entry`/`entry_config`/`register_update_hook`/`register_retire_hook`（fiber→条目反查写回）。**self-dispose → 条目 `disabled` 写回（TS `internal/plugin` 半段）已落地（PR #30）**：`Fiber::retire` 触发退役观察者，loader 过滤「条目仍在且未 disabled」（= 组件自退役）写回书签 `disabled=true`；apply 期间 teardown 的 retire 走 pending 队列延迟排空（防 entries 重借）；`loader.fiber(id)` 对退役 fiber 返回 None（已卸载语义）；desired 显式 `disabled=false` 重新启用（disabled 为协调字段）。G4 hooks 最小集 = `update_hook` + `retire_hook` 两观察者。
 2. **G2 每键注入配置**：`Entry.inject` / 宏扩展——Koishi 生态常态，论文 Def 30/31 的 ι 实用化。✅ **已落地（PR #29）**：`Entry.inject`（键 → 拦截元数据）+ `with_inject`，实例化应用（遮蔽同键 intercept、组条目经派生继承），读取方 `get_meta` 右偏合并；变更纪律同 config（revision 代行）。
-3. **G3 per-key isolate**：`Entry.isolate` 粒度化（顺带重估处置⑪：组的 isolate 落子条目）。
+3. **G3 per-key isolate**：`Entry.isolate` 粒度化（顺带重估处置⑪：组的 isolate 落子条目）。✅ **已落地（PR #31）**：`Entry.isolate` 改 `BTreeMap<Symbol, IsolateAnnotation>`（TS `Dict<true|string>` 同型，混合粒度 `{val: Local, sum: Global("x")}`）；`realm_of` 逐键查表、`patch_isolation` Δ 键域扩展为声明键 ∪ 新旧 isolate 映射键（Algorithm 7 重指派保持逐键）；**组条目 per-key isolate 经派生链拷贝继承给子条目、子条目注解覆盖（最近注解优先）——处置⑪ 顺势收口**；组 isolate 变更仍走整棵重建（保守路径，测试直证）。测试 loader +3（混合粒度 / 组继承与覆盖 / 组 isolate 变更重建）。
 4. **G4 hooks 最小集**（internal/update、internal/plugin、internal/service）——G1/G6 的工程底座。
 5. **G7 config 校验 + 值级 diff**（typed world 前置）。
 6. **G5 配置插值 / G6 include 文件树 / ⑫ 依赖清单文件**（工具层，零依赖可行路径已找到）。
