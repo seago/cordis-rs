@@ -10,6 +10,79 @@
 //! 严格性。TS 的"每次（重）加载时求值"语义由编排方承担（实例化前调用
 //! 本函数）。
 
+/// G7 配置协议（TS `Config` schema + `deepEqual` 参照，PR #33）：
+/// **可选实现**（opt-in）——激活前校验 + 值级相等（免重建）。
+///
+/// **公开差异**：
+/// - 校验失败：TS → fiber 失败态（可重试/复活）；Rust 侧配置校验失败 =
+///   宿主配置 bug（panic，与 ProvisionClash/未知组件同型）——组件**运行时**
+///   失败才走 L-Raise。
+/// - `same` 默认 `false`（未实现 = 保守，走 revision 语义）：实现方须
+///   承诺"同值 = 无重载需求"——**HMR 兼容纪律**：cordis-hmr 的 `reload`
+///   以 revision 递增 + 复用旧 config 触发重建（组件版本变化），若 config
+///   类型实现 `same` 且重载时同值会**免重建使 HMR 失效**——因此 `String`
+///   等常用类型不实现 `same`（保持 revision 语义）；需要值级幂等的类型
+///   自行实现并知悉上述纪律。
+pub trait Config: Any {
+    /// 校验（TS StandardSchema `validate` 参照）：`Err` = 拒绝激活。
+    fn validate(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// 值级相等（TS `deepEqual` 参照）：revision 递增但同值 → 免重建。
+    fn same(&self, other: &dyn Any) -> bool {
+        let _ = other;
+        false
+    }
+}
+
+/// `&dyn Any` → `&dyn Config` 的 cast 函数（注册表值：`downcast` 到具体
+/// 类型后 upcast——`Any::downcast_ref` 不接受 unsized 的 `dyn Config`，
+/// 故需调用方按类型注册，见 [`crate::Loader::register_config`]）。
+pub(crate) type ConfigCast = fn(&dyn Any) -> Option<&dyn Config>;
+
+/// 校验配置（G7）：经注册表取回 [`Config`]，`validate` 返回 `Err` →
+/// panic（配置错误 = bug，与 ProvisionClash/未知组件同型）。
+pub(crate) fn validate_config(
+    casts: &std::collections::HashMap<std::any::TypeId, ConfigCast>,
+    config: &dyn Any,
+    id: &str,
+) {
+    if let Some(c) = casts.get(&config.type_id()).and_then(|f| f(config))
+        && let Err(msg) = c.validate()
+    {
+        panic!("条目 `{id}` 配置校验失败：{msg}（配置错误 = bug）");
+    }
+}
+
+/// 值级相等（G7）：双方类型均注册且 `same` 为真 → 免重建；未注册/
+/// 默认 `false` → 保守走 revision 语义。
+pub(crate) fn configs_same(
+    casts: &std::collections::HashMap<std::any::TypeId, ConfigCast>,
+    a: &dyn Any,
+    b: &dyn Any,
+) -> bool {
+    match (
+        casts.get(&a.type_id()).and_then(|f| f(a)),
+        casts.get(&b.type_id()).and_then(|f| f(b)),
+    ) {
+        (Some(x), Some(_)) => x.same(b),
+        _ => false,
+    }
+}
+
+/// 注册 `C` 的 [`Config`] cast（G7）：启用该校验与值级 diff。
+/// 调用方为每个实现 [`Config`] 的 config 类型注册一次。
+pub fn register_config_cast<C: Config + 'static>(
+    casts: &mut std::collections::HashMap<std::any::TypeId, ConfigCast>,
+) {
+    casts.insert(std::any::TypeId::of::<C>(), |any: &dyn Any| {
+        any.downcast_ref::<C>().map(|c| c as &dyn Config)
+    });
+}
+
+use std::any::Any;
+
 /// 模板插值：把 `template` 中的 `{{name}}` 占位符替换为
 /// `resolve(name)` 的返回值；未解析的占位符保留原样。
 ///

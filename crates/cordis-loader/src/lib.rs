@@ -53,7 +53,8 @@
 mod config;
 mod patch;
 
-pub use config::interpolate;
+pub use config::{Config, interpolate};
+use config::{configs_same, validate_config};
 pub use patch::{Patch, apply_patches};
 
 use std::any::Any;
@@ -289,6 +290,8 @@ pub struct Loader {
     root: Rc<Context>,
     components: RefCell<HashMap<String, Rc<dyn Component>>>,
     entries: RefCell<HashMap<String, LoadedEntry>>,
+    /// G7 配置协议注册表（类型 → cast；`register_config` 注册）。
+    config_casts: RefCell<HashMap<std::any::TypeId, config::ConfigCast>>,
     /// 退役写回 pending 队列（apply 期间 teardown 触发的 retire 延迟处理——
     /// hook 不能重借 entries；apply 末尾排空）。
     retire_pending: RefCell<Vec<FiberId>>,
@@ -305,6 +308,7 @@ impl Loader {
             root,
             components: RefCell::new(HashMap::new()),
             entries: RefCell::new(HashMap::new()),
+            config_casts: RefCell::new(HashMap::new()),
             retire_pending: RefCell::new(Vec::new()),
             in_apply: Cell::new(false),
         }
@@ -392,6 +396,16 @@ impl Loader {
     /// 整棵树递归查找。
     pub fn entry_disabled(&self, id: &str) -> Option<bool> {
         find_loaded(&self.entries.borrow(), id).map(|l| l.disabled)
+    }
+
+    /// 注册 config 类型 `C` 的 [`Config`] 协议（G7）：启用该校验与值级
+    /// diff（`Config::validate` 失败 → apply panic；`Config::same` 为真 →
+    /// revision 递增免重建）。
+    ///
+    /// **HMR 兼容纪律**：见 [`Config`] 文档——实现 `same` 须承诺同值 =
+    /// 无重载需求（cordis-hmr 以 revision 递增 + 复用旧 config 触发重建）。
+    pub fn register_config<C: Config + 'static>(&self) {
+        config::register_config_cast::<C>(&mut self.config_casts.borrow_mut());
     }
 
     /// 注册更新观察者（loader 侧写回通道）：把 [`Runtime::set_update_hook`]
@@ -516,8 +530,16 @@ impl Loader {
                 continue;
             };
             let disabling = !l.disabled && entry.disabled;
-            let rebuilding =
-                !entry.disabled && (l.component != entry.component || l.revision != entry.revision);
+            // G7：revision 递增但 config 值级相等（Config::same opt-in）→
+            // 免重建（TS deepEqual 同型；未实现 same 的类型保守走 revision）。
+            let rebuilding = !entry.disabled
+                && (l.component != entry.component
+                    || (l.revision != entry.revision
+                        && !configs_same(
+                            &self.config_casts.borrow(),
+                            l.config.as_ref(),
+                            entry.config.as_ref(),
+                        )));
             // 注（M2-PR4）：isolate 变更**不走卸载侧**——经 Algorithm 7
             // realm 重指派（patch_isolation，reconcile_into 内处理）。
             if disabling || rebuilding {
@@ -606,7 +628,14 @@ impl Loader {
         // 已对重建条件卸载，此处在 reconcile 路径实际不可达，REVIEW-
         // 24bfab5 nit3）；isolate 变更 → **Algorithm 7 realm 重指派**
         //（M2-PR4，替代重建）。
-        if loaded.component != entry.component || loaded.revision != entry.revision {
+        if loaded.component != entry.component
+            || (loaded.revision != entry.revision
+                && !configs_same(
+                    &self.config_casts.borrow(),
+                    loaded.config.as_ref(),
+                    entry.config.as_ref(),
+                ))
+        {
             self.unload_from(&entry.id, map);
             let fresh = self.make_loaded(entry, parent_ctx);
             map.insert(entry.id.clone(), fresh);
@@ -716,6 +745,11 @@ impl Loader {
     /// 叶子实例化：在注解 ctx 上注册组件；若父为 fiber（组内），在父 ctx
     /// 注册级联退役（Def 47 注册逆——父退役 → O-Retire 本 fiber）。
     fn instantiate_leaf(&self, entry: &Entry, ctx: &Rc<Context>) -> Rc<Fiber> {
+        validate_config(
+            &self.config_casts.borrow(),
+            entry.config.as_ref(),
+            &entry.id,
+        );
         let component = self
             .components
             .borrow()
@@ -748,6 +782,11 @@ impl Loader {
     /// 组持有者实例化：无注入/供给的空组件（组的角色 = 子条目的父 fiber，
     /// Def 47 注册）。
     fn instantiate_group(&self, entry: &Entry, parent_ctx: &Rc<Context>) -> Rc<Fiber> {
+        validate_config(
+            &self.config_casts.borrow(),
+            entry.config.as_ref(),
+            &entry.id,
+        );
         // 组拦截/注入/isolate 注解经 annotated_ctx 应用（G3：per-key
         // isolate 重定向组 ctx——子条目经 derive 拷贝继承；REVIEW-24bfab5
         // nit4：复用而非手工复刻）。
@@ -1589,6 +1628,129 @@ mod tests {
             child_first,
             "整棵重建 = 子条目新 fiber"
         );
+        assert!(runtime.is_quiet(), "静止");
+    }
+
+    // ── G7（TS-REFERENCE-GAP）：config 校验 + 值级 diff ──────────────
+
+    /// G7 测试配置：validate（空串 = Err）+ same（值级比较）。
+    #[derive(Clone, Debug)]
+    struct ValConfig(String);
+
+    impl Config for ValConfig {
+        fn validate(&self) -> Result<(), String> {
+            if self.0.is_empty() {
+                Err("empty config".into())
+            } else {
+                Ok(())
+            }
+        }
+        fn same(&self, other: &dyn Any) -> bool {
+            other
+                .downcast_ref::<ValConfig>()
+                .is_some_and(|o| o.0 == self.0)
+        }
+    }
+
+    /// 读 [`ValConfig`] 的 provider（覆盖 `loader()` 的 String 版）。
+    fn val_config_provider() -> Rc<TestComponent> {
+        Rc::new(TestComponent {
+            inject: spec(&[]),
+            provide: spec(&["val"]),
+            effects: Box::new(|ctx, config| {
+                let value = config
+                    .downcast_ref::<ValConfig>()
+                    .expect("ValConfig")
+                    .0
+                    .clone();
+                Box::new(once(Box::new(move || {
+                    ctx.set::<ValKey>(value).expect("绑定 val")
+                })))
+            }),
+        })
+    }
+
+    fn val_config(v: &str, revision: u64) -> Entry {
+        Entry::new(
+            "p",
+            "provider",
+            Rc::new(ValConfig(v.to_string())),
+            revision,
+            false,
+        )
+    }
+
+    /// G7 值级 diff：注册 Config 后，revision 递增但同值 → 免重建
+    ///（TS deepEqual 同型）；值变 → 重建。
+    #[test]
+    fn config_same_skips_rebuild_on_identical_value() {
+        let (loader, runtime) = loader();
+        loader.register_component("provider", val_config_provider());
+        loader.register_config::<ValConfig>();
+        loader.apply(&[
+            val_config("pg", 1),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        let first = loader.fiber("p").unwrap().id();
+
+        loader.apply(&[
+            val_config("pg", 2),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        assert_eq!(
+            loader.fiber("p").unwrap().id(),
+            first,
+            "revision 递增但值级相同 → 免重建"
+        );
+        assert!(runtime.is_quiet(), "静止");
+
+        loader.apply(&[
+            val_config("pg2", 3),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        assert_ne!(loader.fiber("p").unwrap().id(), first, "值变化 → 重建");
+        assert!(runtime.is_quiet(), "静止");
+    }
+
+    /// G7 未注册类型保守走 revision：String config revision 递增同值仍
+    /// 重建（HMR 兼容纪律——cordis-hmr 依赖 revision 递增触发重载）。
+    #[test]
+    fn unregistered_config_keeps_revision_semantics() {
+        let (loader, _runtime) = loader();
+        loader.apply(&[
+            entry("p", "provider", "pg", 1, false),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        let first = loader.fiber("p").unwrap().id();
+        loader.apply(&[
+            entry("p", "provider", "pg", 2, false),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+        assert_ne!(
+            loader.fiber("p").unwrap().id(),
+            first,
+            "未注册类型不参与值级 diff（String revision 语义保持）"
+        );
+    }
+
+    /// G7 校验失败 = 配置错误（panic；与 ProvisionClash 同型）。
+    #[test]
+    #[should_panic(expected = "配置校验失败")]
+    fn config_validate_failure_panics() {
+        let (loader, _runtime) = loader();
+        loader.register_config::<ValConfig>();
+        loader.apply(&[
+            val_config("", 1),
+            entry("consumer", "consumer", "ignored", 1, false),
+        ]);
+    }
+
+    /// G7 未注册类型无校验（opt-in）。
+    #[test]
+    fn unregistered_config_not_validated() {
+        let (loader, runtime) = loader();
+        loader.apply(&[entry("p", "provider", "", 1, false)]);
+        assert!(loader.fiber("p").is_some(), "未注册类型不校验（激活）");
         assert!(runtime.is_quiet(), "静止");
     }
 
