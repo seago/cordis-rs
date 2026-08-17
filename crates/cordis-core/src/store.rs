@@ -4,6 +4,7 @@
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::rc::Rc;
 
 use crate::fiber::FiberId;
 use crate::key::Key;
@@ -56,6 +57,10 @@ pub(crate) struct Binding {
     pub(crate) value: Box<dyn Any + Send + Sync>,
     /// 安装该绑定的 fiber（None = 根/外部；不参与 `σγ`，Def 45）。
     pub(crate) provider: Option<FiberId>,
+    /// G9 可用性谓词（TS `provide(name, value, check)` 参照）：`Some` 且
+    /// 求值为假 → 该绑定**视为未提供**（消费者解析不到；`provider_of`
+    /// 每次求值，谓词须**纯**、无副作用）。
+    pub(crate) check: Option<Rc<dyn Fn() -> bool>>,
 }
 
 impl Store {
@@ -80,6 +85,7 @@ impl Store {
             Binding {
                 value: Box::new(value),
                 provider,
+                check: None,
             },
         );
         Ok(())
@@ -95,10 +101,47 @@ impl Store {
         value: Box<dyn Any + Send + Sync>,
         provider: Option<FiberId>,
     ) -> Result<(), StoreError> {
+        self.bind_value_checked(realm, value, provider, None)
+    }
+
+    /// 带 G9 可用性谓词的绑定（`bind_value` 的超集）。
+    pub(crate) fn bind_value_checked(
+        &mut self,
+        realm: Symbol,
+        value: Box<dyn Any + Send + Sync>,
+        provider: Option<FiberId>,
+        check: Option<Rc<dyn Fn() -> bool>>,
+    ) -> Result<(), StoreError> {
         if self.bindings.contains_key(&realm) {
             return Err(StoreError::AlreadyBound(realm));
         }
-        self.bindings.insert(realm, Binding { value, provider });
+        self.bindings.insert(
+            realm,
+            Binding {
+                value,
+                provider,
+                check,
+            },
+        );
+        Ok(())
+    }
+
+    /// G8 就地改值（TS `reflect.set` 变异参照；论文 "overwriting its own
+    /// binding in place is therefore not observed"）：替换绑定值，**不
+    /// notify、不追踪**（无逆——idΓ 式；teardown 不恢复旧值）。
+    pub(crate) fn replace_value<K: Key>(
+        &mut self,
+        realm: Symbol,
+        value: K::Value,
+    ) -> Result<(), StoreError> {
+        let binding = self
+            .bindings
+            .get_mut(&realm)
+            .ok_or(StoreError::NotBound(realm))?;
+        if binding.value.downcast_ref::<K::Value>().is_none() {
+            return Err(StoreError::TypeMismatch(realm));
+        }
+        binding.value = Box::new(value);
         Ok(())
     }
 
