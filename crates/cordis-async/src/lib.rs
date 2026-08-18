@@ -660,7 +660,9 @@ impl AsyncFiberHandle {
     }
 
     /// 解引用 fiber（已释放 = `None`）。返回临时强引（方法结束即释放，
-    /// 不延长 fiber 生命周期——弱引封装不变）；编排方取 fiber 读状态用。
+    /// 不延长 fiber 生命周期——弱引封装不变；**警示（REVIEW-fa44fd6
+    /// nit-2）**：调用方不得长期持有返回的强引克隆——那会延长 fiber
+    /// 生命周期、破坏弱引语义，仅限读状态等瞬时使用）。
     pub fn fiber(&self) -> Option<Rc<Fiber>> {
         self.fiber.upgrade()
     }

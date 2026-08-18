@@ -24,7 +24,7 @@
 
 | # | 决策 | 默认建议 | 影响 |
 |---|---|---|---|
-| D-1 | **AsyncFiberHandle 形态** | `{ fiber: Weak<Fiber>, generation: u64 }`（弱化防环 + 代次校验，防串代）；`use_component -> Result<AsyncFiberHandle, RegistryError>`；`retire(&AsyncFiberHandle)` / `update(&AsyncFiberHandle, config)` | 门面 API 正式化；既有 `Rc<Fiber>` 用法迁移（M0.5 测试适配） |
+| D-1 | **AsyncFiberHandle 形态** | `{ fiber: Weak<Fiber>, generation: u64 }`（弱化防环；`generation` 为**审计元数据**——换代不失效、不作家淘汰，防串代由条目内部代次机制承担，H1 实现定稿 REVIEW-fa44fd6 Minor-1 回写）；`use_component -> Result<AsyncFiberHandle, RegistryError>`；`retire(&AsyncFiberHandle)` / `update(&AsyncFiberHandle, config)` | 门面 API 正式化；既有 `Rc<Fiber>` 用法迁移（M0.5 测试适配） |
 | D-2 | **O-2 auto-settle 模式** | 框架层**保持显式 settle**（现状）；`AutoSettle`/每批次自动 settle 的 app 层封装**不做**，仅文档说明（草案 O-2 倾向） | 若用户选「提供 app 层封装」则加一个小工具函数 + 测试 |
 | D-3 | **O-3 lifecycle observer hook** | **不启用** core `update_hook`/`retire_hook` 作门面 hook（草案默认）；记录「若 C-4 频繁违反再启用」 | 仅文档记录 |
 | D-4 | **O-4 Failed 载荷富化** | **保持 `String`**（草案 O-4：等首个真实失败场景再定）；`AsyncFiberError` 预留扩展点（`message()` 不变） | 仅文档记录 |
