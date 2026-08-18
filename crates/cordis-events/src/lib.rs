@@ -569,6 +569,10 @@ impl Component for EventsProvider {
 ///
 /// **前置**：总线须经 [`EventsProvider`]（或等价）在可达 ctx 绑定
 /// `EventsKey`；未绑定返回 [`cordis_core::StoreError`]。
+///
+/// **ctx 语义**：`ctx` 应为**订阅者所属 fiber 上下文**（订阅随之卸载自动
+/// 退订）；传入共享/根 ctx 则订阅挂其累加器，不随具体 fiber 卸载，需手动
+/// dispose（REVIEW-f8541f1 nit-3）。
 pub fn subscribe<P: Event>(
     ctx: &Rc<Context>,
     listener: impl Fn(&P::Payload) + Send + Sync + 'static,
@@ -579,7 +583,7 @@ pub fn subscribe<P: Event>(
         let bus = Arc::clone(&bus);
         Box::new(cordis_core::once(Box::new(move || {
             let d = bus.on::<P>(listener);
-            d as Disposer
+            d
         })))
     });
     Ok(armed)
@@ -595,7 +599,7 @@ pub fn subscribe_waterfall<P: Event>(
         let bus = Arc::clone(&bus);
         Box::new(cordis_core::once(Box::new(move || {
             let d = bus.on_waterfall::<P>(listener);
-            d as Disposer
+            d
         })))
     }))
 }
@@ -613,7 +617,7 @@ where
         let bus = Arc::clone(&bus);
         Box::new(cordis_core::once(Box::new(move || {
             let d = bus.on_serial::<P, R>(listener);
-            d as Disposer
+            d
         })))
     }))
 }
@@ -631,7 +635,7 @@ where
         let bus = Arc::clone(&bus);
         Box::new(cordis_core::once(Box::new(move || {
             let d = bus.on_bail::<P, R>(listener);
-            d as Disposer
+            d
         })))
     }))
 }
