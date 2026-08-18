@@ -379,12 +379,18 @@ mod m03 {
                 // 的就绪条件（如 Notify），勿依赖本自旋基数。
                 for _ in 0..64 {
                     tokio::task::yield_now().await;
-                    if matches!(*consumer.state(), FiberState::Active { .. }) {
+                    if matches!(
+                        *consumer.fiber().expect("fiber").state(),
+                        FiberState::Active { .. }
+                    ) {
                         break;
                     }
                 }
                 assert!(
-                    matches!(*consumer.state(), FiberState::Active { .. }),
+                    matches!(
+                        *consumer.fiber().expect("fiber").state(),
+                        FiberState::Active { .. }
+                    ),
                     "依赖满足后 consumer 激活"
                 );
                 for _ in 0..8 {
@@ -397,7 +403,7 @@ mod m03 {
                 );
 
                 // 退役提供者：core 级联 consumer 先卸载（逆先入队），provider 后卸载。
-                provider.retire();
+                rt.retire(&provider);
                 rt.settle().await;
 
                 assert_eq!(
@@ -479,7 +485,7 @@ mod m03 {
                                         .expect("收尾中挂载 B");
                                     // 让 B 的 drive 完成（slot 填账）再退役入队。
                                     tokio::task::yield_now().await;
-                                    b.retire();
+                                    rt.retire(&b);
                                 }) as LocalBoxFuture<()>
                             }) as AsyncDisposer)
                         })
@@ -501,7 +507,7 @@ mod m03 {
                 for _ in 0..8 {
                     tokio::task::yield_now().await;
                 }
-                a.retire();
+                rt.retire(&a);
                 rt.settle().await;
 
                 assert_eq!(
@@ -582,7 +588,7 @@ mod m03 {
                                         )
                                         .expect("收尾中再挂载");
                                     tokio::task::yield_now().await;
-                                    next.retire();
+                                    rt.retire(&next);
                                 }) as LocalBoxFuture<()>
                             }) as AsyncDisposer)
                         })
@@ -604,7 +610,7 @@ mod m03 {
                 for _ in 0..8 {
                     tokio::task::yield_now().await;
                 }
-                first.retire();
+                rt.retire(&first);
                 rt.settle().await; // 每轮逆再挂一个 → 第 65 轮守卫 panic
             })
             .await;
@@ -844,7 +850,7 @@ mod m05 {
         AsyncBehavior, AsyncCx, AsyncDisposer, AsyncEffectIter, AsyncFiberState, AsyncRuntime,
         AsyncStep, LocalBoxFuture,
     };
-    use cordis_core::Context;
+    use cordis_core::{Context, FiberState};
     use std::any::Any;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
@@ -992,7 +998,9 @@ mod m05 {
                 );
                 assert!(
                     matches!(
-                        rt.entry(fiber.id()).expect("条目").state(),
+                        rt.entry(fiber.id().expect("fiber 存活"))
+                            .expect("条目")
+                            .state(),
                         AsyncFiberState::Running { generation: 2 }
                     ),
                     "代次递增（gen=2），fiber 身份保留"
@@ -1011,7 +1019,9 @@ mod m05 {
                 );
                 assert!(
                     matches!(
-                        rt.entry(fiber.id()).expect("条目").state(),
+                        rt.entry(fiber.id().expect("fiber 存活"))
+                            .expect("条目")
+                            .state(),
                         AsyncFiberState::Running { generation: 2 }
                     ),
                     "settle 后新代仍运行"
@@ -1111,7 +1121,9 @@ mod m05 {
                 assert!(log.borrow().iter().any(|l| l == "a:pending"));
                 assert!(
                     matches!(
-                        rt.entry(b.id()).expect("B 条目").state(),
+                        rt.entry(b.id().expect("fiber 存活"))
+                            .expect("B 条目")
+                            .state(),
                         AsyncFiberState::Failed(_)
                     ),
                     "B：失败静止终态（Failed slot 留空前件）"
@@ -1186,6 +1198,49 @@ mod m05 {
                     .count();
                 assert_eq!(rev_c, 1, "shutdown 收账：在途尾巴的逆恰一次 await");
                 assert!(rt.is_quiet(), "shutdown 后静止");
+            })
+            .await;
+    }
+
+    /// P1.2 H1：`AsyncFiberHandle` 语义——创建代次审计 + `id`/`fiber`
+    /// 存活期查询（弱引封装：`fiber()` 临时强引不延长生命周期）。
+    #[tokio::test]
+    async fn async_fiber_handle_generation_and_id() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let ctx = Context::new();
+                let rt = AsyncRuntime::new(&ctx);
+                let log: Log = Rc::new(RefCell::new(Vec::new()));
+
+                let handle = rt
+                    .use_component(
+                        &ctx,
+                        Rc::new(Shell::empty()),
+                        OneShotBehavior {
+                            label: "svc",
+                            log: Rc::clone(&log),
+                            provide_dep: false,
+                        },
+                        Rc::new(()) as Rc<dyn Any>,
+                    )
+                    .expect("挂载");
+                // use_component 内已同步激活（apply 换代）→ 审计代次 = 1。
+                assert_eq!(handle.generation(), 1, "H1：创建代次审计（首激活代）");
+                // id 存活期 Some；fiber 临时强引可读状态。
+                let fid = handle.id().expect("存活期 id");
+                assert!(rt.entry(fid).is_some(), "H1：handle.id() 可查条目");
+                assert!(
+                    matches!(
+                        *handle.fiber().expect("存活").state(),
+                        FiberState::Active { .. }
+                    ),
+                    "H1：fiber() 临时强引读状态（不延长生命周期）"
+                );
+
+                // retire 经 Handle（门面 C-4）+ 收账。
+                rt.retire(&handle);
+                rt.settle().await;
+                assert!(rt.is_quiet(), "Handle 退役路径完整");
             })
             .await;
     }
@@ -1524,13 +1579,18 @@ mod m07 {
                 assert!(log.borrow().iter().any(|l| l == "panic:run"));
                 assert!(
                     matches!(
-                        rt.entry(a.id()).expect("A 条目").state(),
+                        rt.entry(a.id().expect("fiber 存活"))
+                            .expect("A 条目")
+                            .state(),
                         AsyncFiberState::Idle
                     ),
                     "panic 不进入失败通道（状态非 Failed，on_failed 未触发）"
                 );
                 assert!(
-                    matches!(*b.state(), FiberState::Active { .. }),
+                    matches!(
+                        *b.fiber().expect("fiber").state(),
+                        FiberState::Active { .. }
+                    ),
                     "panic 不级联：邻组件 B 不受影响"
                 );
 

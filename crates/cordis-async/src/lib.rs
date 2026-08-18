@@ -636,6 +636,47 @@ impl Component for AsyncRegistrar {
     }
 }
 
+/// 门面句柄（草案 §5，P1.2 H1）：async 组件的弱引用身份 + 创建代次审计。
+///
+/// 由 [`AsyncRuntime::use_component`] 返回；[`AsyncRuntime::retire`] /
+/// [`AsyncRuntime::update`] 经此操作（契约 C-4：生命周期变更走门面）。
+///
+/// - 内部持 `Weak<Fiber>`——**弱引用**，不延长 fiber 生命周期（防环，评审
+///   点 B；句柄失效 = fiber 已释放 = 宿主使用失效句柄 = panic=bug 诊断）；
+/// - `generation` 为**审计元数据**（use_component 时捕获的代次；注：换代
+///   不使句柄失效——`retire`/`update` 操作 fiber 本体，防串代由条目内部
+///   代次机制承担，实现注记 P1.2 H1）。
+pub struct AsyncFiberHandle {
+    fiber: Weak<Fiber>,
+    generation: u64,
+}
+
+impl AsyncFiberHandle {
+    fn new(fiber: &Rc<Fiber>, generation: u64) -> Self {
+        Self {
+            fiber: Rc::downgrade(fiber),
+            generation,
+        }
+    }
+
+    /// 解引用 fiber（已释放 = `None`）。返回临时强引（方法结束即释放，
+    /// 不延长 fiber 生命周期——弱引封装不变）；编排方取 fiber 读状态用。
+    pub fn fiber(&self) -> Option<Rc<Fiber>> {
+        self.fiber.upgrade()
+    }
+
+    /// 创建代次（审计元数据；换代不失效）。
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// fiber id（存活期 `Some`；已释放 `None`——配合 [`AsyncRuntime::entry`]
+    /// 查询条目状态）。
+    pub fn id(&self) -> Option<FiberId> {
+        self.fiber().map(|f| f.id())
+    }
+}
+
 /// async 视图的运行时门面（草案 §5 的 M0.3–M0.4 部分：挂载 + settle +
 /// 失败通道 + 关停）。
 ///
@@ -681,13 +722,16 @@ impl AsyncRuntime {
     /// 挂载 async 组件（草案 §3.1）：sync 包装（`d/p` 取自 `comp`）+
     /// 注册表条目 + core 注册。依赖满足即激活并 spawn drive 任务；卸载时
     /// 注册器逆 cancel + 入队，由 [`Self::settle`] 收账。
+    ///
+    /// 返回 [`AsyncFiberHandle`]（弱引用句柄；P1.2 H1 收口，取代 M0.5 临时
+    /// `Rc<Fiber>`）。条目登记由 apply 自登记完成。
     pub fn use_component(
         &self,
         ctx: &Rc<Context>,
         comp: Rc<dyn Component>,
         behavior: impl AsyncBehavior,
         config: Rc<dyn Any>,
-    ) -> Result<Rc<Fiber>, RegistryError> {
+    ) -> Result<AsyncFiberHandle, RegistryError> {
         let entry = AsyncFiberEntry::new(Rc::clone(&self.tails));
         entry.attach_registry(Rc::clone(&self.entries));
         let registrar = Rc::new(AsyncRegistrar::new(
@@ -697,9 +741,9 @@ impl AsyncRuntime {
             self.remote.borrow().clone(),
         ));
         let fiber = ctx.use_component(registrar, config)?;
-        // 条目登记由 apply 自登记完成（fiber id 已知时刻）；此处只返回。
-        let _ = entry;
-        Ok(fiber)
+        // use_component 内已同步激活（apply 换代）——捕获审计代次。
+        let generation = entry.generation.get();
+        Ok(AsyncFiberHandle::new(&fiber, generation))
     }
 
     /// 构造「sync 组件 + async 行为」的注册器组件（loader 集成用：
@@ -729,8 +773,13 @@ impl AsyncRuntime {
     /// 退役门面（契约 C-4：生命周期变更走门面）——转发 core
     /// [`Fiber::retire`]；async 尾巴由注册器逆 cancel + 入队、
     /// [`Self::settle`] 收账。
-    pub fn retire(&self, fiber: &Rc<Fiber>) {
-        fiber.retire();
+    ///
+    /// 句柄失效（fiber 已释放）= 宿主使用失效句柄 = panic = bug。
+    pub fn retire(&self, handle: &AsyncFiberHandle) {
+        handle
+            .fiber()
+            .expect("AsyncFiberHandle：fiber 已释放（使用失效句柄 = 宿主 bug）")
+            .retire();
     }
 
     /// 更新门面（契约 C-4；草案 §3.1 update 闭环）：换 config → core
@@ -738,14 +787,19 @@ impl AsyncRuntime {
     /// 入队）→ 链式 reload（新代 `begin_activation` + 新 drive spawn，
     /// fiber 身份保留）；编排方随后 [`Self::settle`] 排空旧代尾巴。
     ///
+    /// 句柄失效 = 宿主 bug（同 [`Self::retire`]）。
+    ///
     /// **时序注记（REVIEW-23383f3 nit-1）**：core 的 `update_fiber` 是
     /// unload+reload **原子同步**实例——新代 spawn 与旧尾巴 settle 之间
     /// 无同步边界，故观测序为「新代先激活（run:2）、旧尾巴后 settle
     /// （rev:1）」。草案 §9 测试 8「旧尾巴先 settle」的措辞是理论/祈愿态
     /// （core 冻结零改动下不可达）；实际语义是**新旧代尾巴独立收账、无
     /// 串代**（I-2），由 FIFO settle 保证。
-    pub fn update(&self, fiber: &Rc<Fiber>, config: Rc<dyn Any>) {
-        self.core.update_fiber(fiber, config);
+    pub fn update(&self, handle: &AsyncFiberHandle, config: Rc<dyn Any>) {
+        let fiber = handle
+            .fiber()
+            .expect("AsyncFiberHandle：fiber 已释放（使用失效句柄 = 宿主 bug）");
+        self.core.update_fiber(&fiber, config);
     }
 
     /// 两阶段卸载阶段 2（草案 §3.2）：FIFO 排空收尾队列（I-3 序免费来自
