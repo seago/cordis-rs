@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/cordis",
     "crates/cordis-core",
+    "crates/cordis-events",
     "crates/cordis-hmr",
     "crates/cordis-loader",
     "crates/cordis-macro",

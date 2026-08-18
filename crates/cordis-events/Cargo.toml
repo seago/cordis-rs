@@ -1,0 +1,15 @@
+[package]
+name = "cordis-events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "cordis-events 层（草案 v0.3.1）：类型化事件 + 四种 sync 派发 + 订阅即效应"
+
+[lints]
+workspace = true
+
+[dependencies]
+# 零第三方：仅依赖 cordis-core（计划 §5 纪律）。
+cordis-core = { path = "../cordis-core" }
