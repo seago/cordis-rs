@@ -1,4 +1,4 @@
-# `cordis-async` 协议草案（v1.1）评审意见
+# `cordis-async` 协议草案（v1.1 / v1.2）评审意见
 
 **日期**：2026-08-18 ｜ **评审对象**：`docs/cordis-async-protocol-draft.md` v1.1（工作文件，**未受版本管理**；评审意见以独立文档记录，不外改草案）
 **评审性质**：草案设计评审（非实现审查）——对照本仓库已落地的 sync core/loader 语义（G1–G9 全部完成），评估 async 层草案的可行性与正确性。
@@ -51,3 +51,33 @@
 1. 补记评审点 H 到草案（或由其起草人采纳）；
 2. Phase 0 开工：`cordis-async` crate 骨架 + I-1 单测 + 3 spike 门禁按草案 §9 执行；
 3. 可选：将 `Fiber::target_view()` 与 loader hook 引用环小修并入既有工作线（约 1 commit）。
+
+---
+
+# 增补：v1.2 核对（2026-08-18 追审）
+
+**对象**：草案 v1.2（361 行，采纳评审点 H 处置 + 上次次要建议落点）。**结论：H 处置正确且彻底，无新引入阻塞问题；1 个 shutdown-core 小点建议 §5 明示。**
+
+## 6. 评审点 H 采纳方案核对（§3.1 + settle + 测试 10）
+
+修订把记账统一为 **drive 与 tail 共享的 `Rc<RefCell<Option<AsyncDisposer>>>` 槽** + settle 恰一次 take。核验两点（草案未显式写、但成立）：
+
+1. **slot 的 Rc 生命周期成立**：slot 被三处持有——drive 闭包（写）、注册器**逆闭包**（move 捕获，卸载时 `Rc::clone` 记账）、settle 的 tail 条目。drive 写完释放自身 Rc 后，**逆闭包仍持有**（它是 `once` 产出的 Disposer，随 fiber ctx 累加器存活到卸载）→ slot 在卸载时必然仍活着，`enqueue_tail(..., Rc::clone(&slot))` 安全；settle take 后 tail 条目 drop → 计数归零 → 无泄漏。**Rc 双持正确**。
+
+2. **恰一次 / 无泄漏 / 失败路径正确**：settle 对每条尾巴 `await handle` → `slot.take()` → `d?.await()`——slot 为 `Option`（take 后 None）、drive 只写一次、Failed 分支 slot 恒空 → **无 double-run、无残留**；`await handle` 兜住"drive 在 cancel 后、settle 排空前才完成"的竞态窗口。
+
+`mark_running` 退化为纯状态标记（代次不匹配跳过、不影响记账）——**竞态消除彻底**，收账唯一通道是 settle 的 take。测试 10 直证（含 Failed slot 留空 + shutdown 补账）。**采纳正确。**
+
+## 7. 次要建议采纳核对（准确）
+
+- O-3 雏形（`update_hook`/`retire_hook` = G1/G4）——准确（已落地）；
+- loader 引用环登记 + B 方案作后继参照——准确（`register_update_hook`/`register_retire_hook` 闭包捕获 `Rc<Loader>` 确为同类环）；
+- O-1 落地形态（`pub fn target_view(&self) -> Option<View>`，borrow 克隆）——与 `target: RefCell<Option<View>>` 兼容 ✓。
+
+## 8. 新小点（非阻塞，建议 §5 明示）
+
+**shutdown 与 core 侧的退役关系**：草案 "shutdown：cancel 全部 + settle 到静止"，对仍 Active 的 fiber 补 enqueue 保证收账——但未明说这些 fiber 的 **core 侧是否一同退役**。若只 cancel+settle 而 core fiber 仍 Active，则 `AsyncRuntime.is_quiet()`（async 视图）与 `core Runtime.is_quiet()` 会不一致。建议 §5 明示：shutdown = **core retire-all + settle**（或明确二者一致性契约）。
+
+## 9. 总判定
+
+草案自 v1.0 → v1.2 三轮迭代（A–G → H → 收尾）已闭合：**可行性、正确性、与现有代码衔接均无阻塞**。Phase 0 出口标准（§9：10 协议单测 + 3 spike）门槛合理，建议按草案推进。遗留唯一待明示项 = §8 的 shutdown-core 关系（属实现细节，不阻塞开工）。
