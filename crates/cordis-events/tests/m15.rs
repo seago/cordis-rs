@@ -33,6 +33,8 @@ async fn async_listener_delivery_via_spawn_local() {
         .run_until(async {
             let bus = Arc::new(EventBus::new());
             let log: Arc<RwLock<Vec<String>>> = Arc::new(RwLock::new(Vec::new()));
+            // 监听器 disposer 演示性保留（退订语义已由 M1.3 双路径直证，
+            // 此处仅展示 async 投递模式——REVIEW-b6ebd25 nit-1）。
             let _d = bus.on::<Tick>({
                 let log = Arc::clone(&log);
                 move |p: &u32| {
@@ -51,6 +53,9 @@ async fn async_listener_delivery_via_spawn_local() {
                 log.read().unwrap().iter().any(|l| l == "sync:7"),
                 "同步段立即执行（不阻塞派发）"
             );
+            // 投递任务在下一轮 yield 内即可完成（单线程 LocalSet FIFO）；
+            // 8 次 yield 预算充裕。若极端调度慢导致断言失败，属调度依赖
+            // 而非 flaky 主诉（REVIEW-b6ebd25 nit-2）。
             for _ in 0..8 {
                 tokio::task::yield_now().await;
             }
