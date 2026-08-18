@@ -613,6 +613,13 @@ impl AsyncRuntime {
     /// `update_fiber` 强制重跑——旧代 unload（注册器逆 cancel + 旧尾巴
     /// 入队）→ 链式 reload（新代 `begin_activation` + 新 drive spawn，
     /// fiber 身份保留）；编排方随后 [`Self::settle`] 排空旧代尾巴。
+    ///
+    /// **时序注记（REVIEW-23383f3 nit-1）**：core 的 `update_fiber` 是
+    /// unload+reload **原子同步**实例——新代 spawn 与旧尾巴 settle 之间
+    /// 无同步边界，故观测序为「新代先激活（run:2）、旧尾巴后 settle
+    /// （rev:1）」。草案 §9 测试 8「旧尾巴先 settle」的措辞是理论/祈愿态
+    /// （core 冻结零改动下不可达）；实际语义是**新旧代尾巴独立收账、无
+    /// 串代**（I-2），由 FIFO settle 保证。
     pub fn update(&self, fiber: &Rc<Fiber>, config: Rc<dyn Any>) {
         self.core.update_fiber(fiber, config);
     }

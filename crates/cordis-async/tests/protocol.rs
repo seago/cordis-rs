@@ -963,16 +963,26 @@ mod m05 {
                         Rc::new(1u8) as Rc<dyn Any>,
                     )
                     .expect("挂载");
-                for _ in 0..8 {
+                // 决定论约定（REVIEW-23383f3 nit-3）：`UpdateIter::next()` 无
+                // 中途 await、单 poll 落盘——条件轮询即就绪即停，不依赖固定
+                // spin 基数。若日后在 next() 内引入 await，须改造成可 await
+                // 的就绪条件。
+                for _ in 0..64 {
                     tokio::task::yield_now().await;
+                    if log.borrow().iter().any(|l| l == "run:1") {
+                        break;
+                    }
                 }
                 assert_eq!(*log.borrow(), vec!["run:1".to_string()], "首代 drive 完成");
 
                 // 更新：旧代 unload（逆 cancel + 旧尾巴入队）→ 链式 reload
                 // （新代 spawn）；fiber 身份保留。
                 rt.update(&fiber, Rc::new(2u8) as Rc<dyn Any>);
-                for _ in 0..8 {
+                for _ in 0..64 {
                     tokio::task::yield_now().await;
+                    if log.borrow().iter().any(|l| l == "run:2") {
+                        break;
+                    }
                 }
                 assert_eq!(
                     *log.borrow(),
@@ -1009,10 +1019,14 @@ mod m05 {
             .await;
     }
 
-    /// 测试 9（草案 §5 无环关停）：shutdown 后 AsyncRuntime 可完整 drop
-    /// （Weak 计数归零——条目/fiber 无回边，评审点 B 成立）；core 侧安静。
+    /// 测试 9（草案 §5 无环关停）：AsyncRuntime 可完整 drop（Weak 计数
+    /// 归零——条目/fiber 无回边，评审点 B 成立）；core 侧安静。
+    ///
+    /// 走 retire+settle 而非 shutdown()（REVIEW-23383f3 nit-2 命名对齐）：
+    /// 释放性验证（强计数归零）两路径等价；shutdown 双真路径已由 m04
+    /// 测试 11 覆盖，此处不重复。
     #[tokio::test]
-    async fn shutdown_releases_runtime_no_cycle() {
+    async fn retired_settled_runtime_releases_no_cycle() {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let ctx = Context::new();
