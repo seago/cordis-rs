@@ -408,10 +408,10 @@ impl Runtime {
     /// 强制重跑（Algorithm 5 的 reload/unload 强制实例）。两条路径
     ///（REVIEW-97bb598 major-1 采纳 TS 语义）：
     ///
-    /// - **Active** → [`unload`] 逆转当前效应 → 目标未变 → 链式 [`reload`]
+    /// - **Active** → [`Self::unload`] 逆转当前效应 → 目标未变 → 链式 [`Self::reload`]
     ///   （fiber 身份保留；依赖者因绑定撤销/重装级联停用/恢复）；
-    /// - **失败态**（`Inactive(Some(ζ))`）→ 清除 ζ 后 [`refresh`] 重算
-    ///   target（满足 → 链式 reload = **复活**；TS `_error = undefined` +
+    /// - **失败态**（`Inactive(Some(ζ))`）→ 清除 ζ 后 [`Self::refresh`] 重算
+    ///   target（满足 → 链式 [`Self::reload`] = **复活**；TS `_error = undefined` +
     ///   restart 同型）。
     ///
     /// 重跑失败 = L-Raise → `Inactive(ζ)`（与 `reload` 同路径）。

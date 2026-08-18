@@ -178,7 +178,7 @@ impl Fiber {
     /// 记录的目标摘要 `target_n(γ)`（Def 46 式 (41)）的只读视图
     ///（borrow 克隆；评审动作 3 / cordis-async 草案 O-1 落地形态）。
     ///
-    /// **只读**：与 [`Runtime::refresh`] 的重算路径解耦，调用方不得据此
+    /// **只读**：与 [`crate::runtime::Runtime::refresh`] 的重算路径解耦，调用方不得据此
     /// 直接驱动生命周期（目标仍由 `refresh` 权威重算）。与 reload 的
     /// `guard_target`（`fiber.target.borrow() == target0`）同款语义。
     pub fn target_view(&self) -> Option<View> {
@@ -218,7 +218,7 @@ impl Fiber {
     /// `assertActive`（`uid !== null`）+ `_error = undefined` 的"失败 fiber
     /// 可经 update 复活"行为同型（REVIEW-97bb598 major-1 采纳）；退役/
     /// 未注册（`Inactive(None)`）调用 = 协议违反，panic = bug。写回观察者
-    /// （[`Runtime::set_update_hook`]）在重跑前以新 config 触发——loader
+    /// （[`crate::runtime::Runtime::set_update_hook`]）在重跑前以新 config 触发——loader
     /// 经此实现条目侧写回。
     pub fn update(self: &Rc<Self>, config: Rc<dyn Any>) {
         assert!(

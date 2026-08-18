@@ -17,7 +17,8 @@ use std::pin::Pin;
 /// 组合线程本地 future（非 Send；仅在本线程 LocalSet 内 await）。
 pub type LocalBoxFuture<T> = Pin<Box<dyn Future<Output = T> + 'static>>;
 
-/// 异步逆：撤销一步 async 效应（可 await；对应 core [`Disposer`] 的
+/// 异步逆：撤销一步 async 效应（可 await；对应 core
+/// [`cordis_core::effect::Disposer`] 的
 /// `FnOnce()` 形态）。
 pub type AsyncDisposer = Box<dyn FnOnce() -> LocalBoxFuture<()> + 'static>;
 
@@ -30,7 +31,7 @@ pub trait AsyncEffectIter: 'static {
     fn next(&mut self) -> LocalBoxFuture<AsyncStep>;
 }
 
-/// 单步结果（core [`Step`] 的 async 等价物）。
+/// 单步结果（core [`cordis_core::effect::Step`] 的 async 等价物）。
 pub enum AsyncStep {
     /// 产出逆并继续（core `Step::Yielded` 的 async 版）。
     Yielded(AsyncDisposer),
@@ -40,7 +41,7 @@ pub enum AsyncStep {
     Failed(AsyncFiberError),
 }
 
-/// 组件失败载荷（对应 core [`FiberError`]；async 世界以值传播，不经 panic）。
+/// 组件失败载荷（对应 core [`cordis_core::fiber::FiberError`]；async 世界以值传播，不经 panic）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AsyncFiberError(String);
 
