@@ -371,6 +371,12 @@ mod m03 {
                     .expect("consumer 挂载");
 
                 // 等 provider 绑定落地 → consumer 激活 → 两个 drive 完成填账。
+                //
+                // 决定论约定（REVIEW-83c254a nit-1）：`OneShotIter::next()`
+                // 内日志与步完成同步、**无中途 await**——drive 一次 poll 即
+                // 自启动到完成，故固定轮数 yield 头寸充裕、无 flaky 风险。
+                // 若日后在 `next()` 内引入 await/多步，须同步改造成可 await
+                // 的就绪条件（如 Notify），勿依赖本自旋基数。
                 for _ in 0..64 {
                     tokio::task::yield_now().await;
                     if matches!(*consumer.state(), FiberState::Active { .. }) {

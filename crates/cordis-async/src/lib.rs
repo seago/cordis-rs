@@ -227,7 +227,7 @@ struct Tail {
 }
 
 /// drain 自再生守卫（§3.4）：settle 单轮排空（一代）后仍出现新尾巴，
-/// 最多 [`MAX_DRAIN_ROUNDS`] 轮；超限 = 收尾逆持续注册新效应且不收敛
+/// 最多 `MAX_DRAIN_ROUNDS` 轮；超限 = 收尾逆持续注册新效应且不收敛
 /// = 宿主 bug，panic 并诊断（死锁守卫）。
 const MAX_DRAIN_ROUNDS: u32 = 64;
 
@@ -248,7 +248,7 @@ impl TailQueue {
 
     /// FIFO 排空（阶段 2）：逐个 await drive 任务收尾 → take 共享槽 →
     /// await 异步逆。逆可能注册**新的** async 效应（合法收尾逻辑）→ 入队
-    /// → 下一轮排空；超过 [`MAX_DRAIN_ROUNDS`] 轮 = 尾巴自再生死循环，
+    /// → 下一轮排空；超过 `MAX_DRAIN_ROUNDS` 轮 = 尾巴自再生死循环，
     /// panic（死锁守卫）。
     ///
     /// drive 任务 panic（宿主 bug）经 JoinHandle 捕获、记录诊断，不进入
@@ -448,6 +448,11 @@ pub struct AsyncRuntime {
 impl AsyncRuntime {
     /// 新建门面：与 `ctx` 所属 core runtime 对齐（契约 C-3：进程内唯一
     /// 组合线程，所有生命周期操作在其 LocalSet 上下文内进行）。
+    ///
+    /// **签名偏离（REVIEW-83c254a nit-2）**：草案 §5 的 `new() -> Self`
+    /// 无渠道获取进程单例 [`Runtime`]——本实现取 `&Rc<Context>` 推导并
+    /// 核对 LocalSet 对齐，更安全；`use_component` 返回 `Rc<Fiber>` 是
+    /// M0.5 引入 `AsyncFiberHandle` 前的合理临时形态。
     pub fn new(ctx: &Rc<Context>) -> Rc<Self> {
         Rc::new(Self {
             core: Rc::clone(ctx.runtime()),
