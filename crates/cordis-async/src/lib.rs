@@ -166,6 +166,9 @@ impl CancelFlag {
 ///
 /// `Send`：跨线程从 worker 回灌组合线程（O-6 纪律：跨线程经 join/channel
 /// 通信，不触碰组合线程资源）。
+///
+/// **API 冻结（P1.2 H3）**：本桥 API 面在 P1.3（Send-future 分池形态 /
+/// WasmRemote 接入）扩展前冻结。
 pub type RemoteValue = Box<dyn Any + Send>;
 
 /// 远端 join（组合线程本地 future：await 即等待远端完成并回灌值）。
@@ -173,6 +176,10 @@ pub type RemoteJoin<T> = LocalBoxFuture<T>;
 
 /// 远端请求载荷：Send 闭包（在 worker 侧执行；v1 经
 /// [`TokioRemote`] `spawn_blocking` 运行）。
+///
+/// **P1.3 扩展点**：扩展为「Send-future 分池」形态（`submit` 接受 Send
+/// async future，草案 §4）时，本类型将增设 future 表述变体——v1 闭包
+/// 形态语义不变（API 冻结见 [`Remote`] 注）。
 pub struct RemoteRequest(Box<dyn FnOnce() -> RemoteValue + Send>);
 
 impl RemoteRequest {
@@ -197,6 +204,10 @@ where
 /// 为 M1 宿主驱动协议（PR #11–13）的接入点——guest 无自发线程，
 /// `submit` = 请求入队、宿主在 step 边界驱动并回填，语义不变。
 /// Phase 0 不实现 WasmRemote，接入位置即本 trait。
+///
+/// **API 冻结（P1.2 H3）**：`submit(RemoteRequest) -> RemoteJoin<RemoteValue>`
+/// 签名在 P1.3 扩展（Send-future 分池形态 / WasmRemote 接入）前冻结——
+/// 是 P1.3 的稳定接入面；扩展以新增表述变体进行，不破坏既有签名。
 pub trait Remote: 'static {
     /// 提交请求，返回可 await 的 join。
     fn submit(&self, req: RemoteRequest) -> RemoteJoin<RemoteValue>;
