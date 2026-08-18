@@ -9,8 +9,29 @@
 //!（retire/update、测试 8/9/10）于 M0.5 实现；Remote 桥（Remote/
 //! TokioRemote/spawn_remote）于 M0.6 实现。
 //!
+//! ## 门面纪律（契约 C-4，P1.2 H2 文档化）
+//!
+//! 生命周期变更（`retire` / `update` / `use_component`）**必须走门面**
+//! （[`AsyncRuntime`]）；绕过门面直接调 core 的 sync API（如
+//! `Fiber::retire`）对 sync-only 组件是允许的，但**其 async 尾巴不会被
+//! settle 记账**（`AsyncFiberHandle` 解引用出的 fiber 亦应经门面操作）。
+//! 此分界是插件作者文档的明示项。
+//!
+//! ## 开放项决策状态（P1.2，H2 记录）
+//!
+//! - **O-2（settle 粒度）**：保持**显式 `settle()`**（框架层不提供自动
+//!   settle 封装；「每次 retire/update 自动 settle」的模式由 app 层封装，
+//!   草案 O-2 决议采纳）；
+//! - **O-3（lifecycle observer hook）**：**不启用** core 既有
+//!   `update_hook`/`retire_hook` 作门面 hook（草案默认；若 C-4 被频繁
+//!   违反再启用，逃生口常态化）；
+//! - **O-4（Failed 载荷富化）**：保持 `String`（`AsyncFiberError` 不
+//!   变）；结构化错误（错误码/可重试）等首个真实失败场景再定（草案 O-4
+//!   决议采纳）。
+//!
 //! 依据：`docs/cordis-async-protocol-draft.md` v1.4（冻结）；
-//! 执行计划 `docs/cordis-async-PHASE0-PLAN.md`（含里程碑间独立审查硬门禁）。
+//! 执行计划 `docs/cordis-async-PHASE0-PLAN.md`（含里程碑间独立审查硬门禁）
+//! 与 `docs/cordis-async-PHASE1-P2-PLAN.md`（P1.2 完善线）。
 
 #![deny(missing_docs)]
 
