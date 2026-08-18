@@ -53,7 +53,7 @@
 
 - **目标**：AsyncRegistrar 挂 core 生命周期；settle/drain/代次；I-3（依赖者 async 逆先 settle）与 drain 重入直证。
 - **任务**：
-  1. `AsyncCx`（ctx/fiber/cancel/generation + `get_cloned`/`set`/`cancellation`/`fiber`/`spawn_remote` 签名）；
+  1. `AsyncCx`（ctx/fiber/cancel/generation + `get_cloned`/`set`/`cancellation`/`fiber`；`spawn_remote` **延迟至 Step 5/M0.6**——Remote 桥完整实现（REVIEW-83c254a nit-2 traceability 注记））；
   2. `AsyncRegistrar`（sync 包装组件：`once` 中 spawn drive + 共享 disposer 槽 + 逆 = cancel + enqueue_tail；捕获 `Rc<AsyncFiberEntry>` 防环，逆契约 C-6）；
   3. `AsyncFiberEntry`（slot/tail 队列/代次/状态）；
   4. `settle`（FIFO 排空：await handle → slot.take → d?.await；drain 重入 → 下一代队列 + 最大轮数 64 守卫；slot Rc 三处持有 liveness）；
@@ -68,9 +68,10 @@
 - **目标**：`Failed(e)` → 静止终态 + 自退役（disabled 写回）+ 复活；shutdown 一致性。
 - **任务**：
   1. `AsyncFiberState::Failed` + `on_failed`（复用 core/loader G1 通道：`fiber.retire()` → retire hook 写回 disabled；复活 = 重启用 → `update_fiber` → 新代 spawn）；
-  2. `AsyncRuntime::shutdown`（契约 C-7：编排方先退役；本方法兜底 cancel + enqueue + settle；双真断言——**按评审建议至少一处正式 assert**，见开放项 §4）；
-  3. 测试 4（I-4）：Failed 后 settle 恒完成、is_quiet 真、disabled 写回、重启用复活；
-  4. 测试 11：编排方退役 → shutdown 双真；未退役 → 违约捕获；退役零配置污染。
+  2. **entries 桶淘汰（REVIEW-83c254a nit-3）**：`AsyncRuntime.entries` 随 retire/remove 同步移除对应条目（或改 `Weak` 值），避免长驻进程挂大量已退役条目；
+  3. `AsyncRuntime::shutdown`（契约 C-7：编排方先退役；本方法兜底 cancel + enqueue + settle；双真断言——**按评审建议至少一处正式 assert**，见开放项 §4）；
+  4. 测试 4（I-4）：Failed 后 settle 恒完成、is_quiet 真、disabled 写回、重启用复活；
+  5. 测试 11：编排方退役 → shutdown 双真；未退役 → 违约捕获；退役零配置污染。
 - **产出**：失败/关停 + 2 条单测。
 - **验证**：累计 6 条。
 - **风险**：failed 时 slot 留空语义、复活路径的新代 spawn 与旧尾巴 settle 的时序。
