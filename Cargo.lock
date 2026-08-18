@@ -217,6 +217,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cordis-events"
+version = "0.1.0"
+dependencies = [
+ "cordis-core",
+]
+
+[[package]]
 name = "cordis-hmr"
 version = "0.1.0"
 dependencies = [
