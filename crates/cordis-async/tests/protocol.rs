@@ -43,7 +43,6 @@ impl SeqIter {
             log: Rc::clone(log),
         }
     }
-
 }
 
 impl AsyncEffectIter for SeqIter {
@@ -124,4 +123,75 @@ async fn i2_guard_false_immediately_yields_empty_composite() {
     let disposer = drive(Box::new(iter), || false).await.expect("立即退场");
     disposer().await;
     assert!(log.borrow().is_empty(), "零步：无逆执行");
+}
+
+/// I-2 真实在途用例（REVIEW-91254a9 nit-2）：第 2 步 `next()` 返回一个
+/// **挂起 future**（await 外部信号）；drive 停在步挂起期间，guard 翻假——
+/// 在途步**不受中断**，待信号完成后退场、其逆照常入账（复合逆含在途步）。
+#[tokio::test(flavor = "current_thread")]
+async fn i2_guard_flips_while_inflight_step_pending() {
+    let log: Log = Rc::new(RefCell::new(Vec::new()));
+    let guard = Rc::new(Cell::new(true));
+
+    // 挂起迭代器：a 步立即 Yielded；b 步 next() 返回 await oneshot 的 future。
+    struct PendingIter {
+        sent_a: bool,
+        rx: Option<tokio::sync::oneshot::Receiver<()>>,
+        log: Log,
+    }
+    impl AsyncEffectIter for PendingIter {
+        fn next(&mut self) -> cordis_async::LocalBoxFuture<AsyncStep> {
+            if !self.sent_a {
+                self.sent_a = true;
+                let log = Rc::clone(&self.log);
+                return Box::pin(async move {
+                    // 触一下调度器让 drive 外层循环可推进（模拟第 1 步异步性）。
+                    tokio::task::yield_now().await;
+                    AsyncStep::Yielded(step_disposer(&log, "a"))
+                });
+            }
+            let rx = self.rx.take().expect("b 的 oneshot 接收端");
+            let log = Rc::clone(&self.log);
+            Box::pin(async move {
+                rx.await.expect("信号到达");
+                AsyncStep::Finished(step_disposer(&log, "b"))
+            })
+        }
+    }
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let iter = PendingIter {
+        sent_a: false,
+        rx: Some(rx),
+        log: Rc::clone(&log),
+    };
+    let guard_cell = Rc::clone(&guard);
+    let local = tokio::task::LocalSet::new();
+    let handle =
+        local.spawn_local(async move { drive(Box::new(iter), move || guard_cell.get()).await });
+
+    // 推进 drive 到 b 挂起（多轮 yield 让 a 完成、b 进入 rx.await）。
+    local
+        .run_until(async move {
+            for _ in 0..50 {
+                tokio::task::yield_now().await;
+                if tx.is_closed() {
+                    break;
+                }
+            }
+            // b 仍在挂起：此刻 guard 翻假——在途步不应被中断。
+            guard.set(false);
+            tx.send(()).expect("完成 b");
+            let disposer = handle
+                .await
+                .expect("任务本身未 panic")
+                .expect("drive 正常退场（guard 步界）");
+            disposer().await;
+            assert_eq!(
+                *log.borrow(),
+                vec!["rev:b", "rev:a"],
+                "I-2 在途：b 挂起期间 guard 翻假不中断其完成；逆照常入账"
+            );
+        })
+        .await;
 }
