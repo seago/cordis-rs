@@ -81,6 +81,9 @@ impl AsyncBehavior for SubBehavior {
         let bus = Rc::clone(&self.bus);
         let log = Rc::clone(&self.log);
         // 订阅经 cx.effect 注册：订阅立即生效，逆（退订）随 fiber 卸载执行。
+        // 返回的 Disposer 故意 drop（REVIEW-68f0c80 nit-2）：订阅步骤的逆
+        // 已入 fiber ctx 累加器（卸载 dispose_all 自动执行）——手动持有该
+        // 句柄会形成第二条撤销路径（双路径安全但此处无必要）。
         drop(cx.effect(move || -> Box<dyn cordis_core::EffectIter> {
             let bus = Rc::clone(&bus);
             let log = Rc::clone(&log);
@@ -412,6 +415,9 @@ async fn spike_s3_agent_loop_flushes_session_on_unload() {
                     .any(|l| l.starts_with("token:tool:send_email")),
                 "S3：取消后不再消费剩余流 token"
             );
+            // 注（REVIEW-68f0c80 nit-3）：`is_quiet` 是注册器级静止检查
+            //（无尾巴/无 Active async 组件）——业务对象级 flush 完整性由
+            // 上面的 `flush:session` 日志断言直证；此处为无泄漏佐证。
             assert!(rt.is_quiet(), "S3：收账后静止（无泄漏）");
         })
         .await;
