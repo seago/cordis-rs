@@ -11,7 +11,8 @@
 //!
 //! ## 门面纪律（契约 C-4，P1.2 H2 文档化）
 //!
-//! 生命周期变更（`retire` / `update` / `use_component`）**必须走门面**
+//! 生命周期变更（`retire` / `update` / `use_component`——即草案 C-4 的
+//! `apply` 域对应物，语义等价注记 REVIEW-23b75fa nit-1）**必须走门面**
 //! （[`AsyncRuntime`]）；绕过门面直接调 core 的 sync API（如
 //! `Fiber::retire`）对 sync-only 组件是允许的，但**其 async 尾巴不会被
 //! settle 记账**（`AsyncFiberHandle` 解引用出的 fiber 亦应经门面操作）。
@@ -24,7 +25,7 @@
 //!   草案 O-2 决议采纳）；
 //! - **O-3（lifecycle observer hook）**：**不启用** core 既有
 //!   `update_hook`/`retire_hook` 作门面 hook（草案默认；若 C-4 被频繁
-//!   违反再启用，逃生口常态化）；
+//!   违反，按需启用逃生口——REVIEW-23b75fa nit-2 措辞对齐）；
 //! - **O-4（Failed 载荷富化）**：保持 `String`（`AsyncFiberError` 不
 //!   变）；结构化错误（错误码/可重试）等首个真实失败场景再定（草案 O-4
 //!   决议采纳）。
