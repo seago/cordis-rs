@@ -229,13 +229,13 @@ mod m03 {
     }
 
     impl Shell {
-        fn inject_only(keys: &[&'static str]) -> Self {
+        pub(super) fn inject_only(keys: &[&'static str]) -> Self {
             Self {
                 inject: keys.to_vec(),
                 provide: Vec::new(),
             }
         }
-        fn provide_only(keys: &[&'static str]) -> Self {
+        pub(super) fn provide_only(keys: &[&'static str]) -> Self {
             Self {
                 inject: Vec::new(),
                 provide: keys.to_vec(),
@@ -1428,5 +1428,266 @@ mod m06 {
                 .await;
         });
         // worker 在此 drop——block_on 已返回（非 async 上下文）✓
+    }
+}
+
+// ── 协议单测补齐（草案 §9）：测试 6（panic 隔离）/ 7（快照纪律）──────
+
+mod m07 {
+    use super::Log;
+    use super::m03::{OneShotBehavior, Shell};
+    use cordis_async::{
+        AsyncBehavior, AsyncCx, AsyncDisposer, AsyncEffectIter, AsyncFiberState, AsyncRuntime,
+        AsyncStep, LocalBoxFuture,
+    };
+    use cordis_core::{Context, FiberState, Key};
+    use std::any::Any;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    /// 测试 6 用：drive 任务内 panic（宿主 bug 模拟）。
+    struct PanicBehavior {
+        log: Log,
+    }
+
+    impl AsyncBehavior for PanicBehavior {
+        fn apply_async(&self, _cx: AsyncCx, _config: &dyn Any) -> Box<dyn AsyncEffectIter> {
+            Box::new(PanicIter {
+                log: Rc::clone(&self.log),
+                done: false,
+            })
+        }
+    }
+
+    struct PanicIter {
+        log: Log,
+        done: bool,
+    }
+
+    impl AsyncEffectIter for PanicIter {
+        fn next(&mut self) -> LocalBoxFuture<AsyncStep> {
+            assert!(!self.done, "单步迭代器至多一步");
+            self.done = true;
+            let log = Rc::clone(&self.log);
+            Box::pin(async move {
+                log.borrow_mut().push("panic:run".into());
+                panic!("async 宿主 bug（测试 6 模拟）");
+            })
+        }
+    }
+
+    /// 测试 6（草案 §9）：panic 隔离——async 效应 panic **不进入**失败
+    /// 通道（状态非 Failed）、不级联（邻组件不受影响）、进程存活；settle
+    /// 经 JoinHandle 记录诊断后正常排空。
+    #[tokio::test]
+    async fn async_panic_is_isolated_not_failed_not_cascaded() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let ctx = Context::new();
+                let rt = AsyncRuntime::new(&ctx);
+                let log: Log = Rc::new(RefCell::new(Vec::new()));
+
+                let a = rt
+                    .use_component(
+                        &ctx,
+                        Rc::new(Shell::empty()),
+                        PanicBehavior {
+                            log: Rc::clone(&log),
+                        },
+                        Rc::new(()) as Rc<dyn Any>,
+                    )
+                    .expect("挂载 A");
+                let b = rt
+                    .use_component(
+                        &ctx,
+                        Rc::new(Shell::empty()),
+                        OneShotBehavior {
+                            label: "b",
+                            log: Rc::clone(&log),
+                            provide_dep: false,
+                        },
+                        Rc::new(()) as Rc<dyn Any>,
+                    )
+                    .expect("挂载 B");
+
+                // 等 A 的 drive 任务 panic 落地（一次 poll 即 panic）与 B 完成。
+                for _ in 0..64 {
+                    tokio::task::yield_now().await;
+                    if log.borrow().iter().any(|l| l == "b:run") {
+                        break;
+                    }
+                }
+                assert!(log.borrow().iter().any(|l| l == "panic:run"));
+                assert!(
+                    matches!(
+                        rt.entry(a.id()).expect("A 条目").state(),
+                        AsyncFiberState::Idle
+                    ),
+                    "panic 不进入失败通道（状态非 Failed，on_failed 未触发）"
+                );
+                assert!(
+                    matches!(*b.state(), FiberState::Active { .. }),
+                    "panic 不级联：邻组件 B 不受影响"
+                );
+
+                // settle：await A 的 handle 得 JoinError → eprintln 诊断 → 排空。
+                rt.settle().await;
+
+                // 收尾：退役全部 + settle → 全部收账；进程存活由测试继续证明。
+                rt.retire(&a);
+                rt.retire(&b);
+                rt.settle().await;
+                assert!(
+                    log.borrow().iter().any(|l| l == "b:inverse"),
+                    "B 逆正常收账（panic 组件未污染收账路径）"
+                );
+            })
+            .await;
+    }
+
+    /// 测试 7 用键：提供者绑 Arc 值、消费者步创建时捕获克隆。
+    struct SnapKey;
+    impl Key for SnapKey {
+        type Value = Arc<String>;
+        const SYMBOL: &'static str = "m07.snap";
+    }
+
+    /// 测试 7 用：提供者（绑定 SnapKey）+ 消费者（捕获快照、逆内读快照）。
+    struct SnapProviderBehavior {
+        log: Log,
+    }
+
+    impl AsyncBehavior for SnapProviderBehavior {
+        fn apply_async(&self, cx: AsyncCx, _config: &dyn Any) -> Box<dyn AsyncEffectIter> {
+            let log = Rc::clone(&self.log);
+            Box::new(once_finished_async(move || {
+                drop(
+                    cx.set::<SnapKey>(Arc::new(String::from("v")))
+                        .expect("提供绑定"),
+                );
+                log.borrow_mut().push("p:run".into());
+                async_inverse_snap(&log, "p:rev")
+            }))
+        }
+    }
+
+    struct SnapConsumerBehavior {
+        log: Log,
+    }
+
+    impl AsyncBehavior for SnapConsumerBehavior {
+        fn apply_async(&self, cx: AsyncCx, _config: &dyn Any) -> Box<dyn AsyncEffectIter> {
+            let log = Rc::clone(&self.log);
+            Box::new(once_finished_async(move || {
+                // 步创建时捕获 Arc 克隆（Running 期读活 store，立即克隆释放借用）。
+                let snap: Arc<String> = cx
+                    .get_cloned::<SnapKey>()
+                    .expect("依赖已满足（提供者绑定在位）");
+                log.borrow_mut().push("c:run".into());
+                // 逆：不触活 store（提供者绑定已撤销）——只读捕获的快照。
+                let log = Rc::clone(&log);
+                Box::new(move || {
+                    let log = Rc::clone(&log);
+                    Box::pin(async move {
+                        tokio::task::yield_now().await;
+                        assert_eq!(&**snap, "v", "快照纪律：卸载后仍能从捕获 Arc 读到依赖值");
+                        log.borrow_mut().push("snap:ok".into());
+                    }) as LocalBoxFuture<()>
+                }) as AsyncDisposer
+            }))
+        }
+    }
+
+    /// 单步 Finished 行为（闭包内执行步骤并产出逆）。
+    fn once_finished_async(step: impl FnOnce() -> AsyncDisposer + 'static) -> impl AsyncEffectIter {
+        struct OnceFinished<F>(Option<F>)
+        where
+            F: FnOnce() -> AsyncDisposer;
+        impl<F> AsyncEffectIter for OnceFinished<F>
+        where
+            F: FnOnce() -> AsyncDisposer + 'static,
+        {
+            fn next(&mut self) -> LocalBoxFuture<AsyncStep> {
+                let step = self.0.take().expect("单步迭代器至多一步");
+                Box::pin(async move { AsyncStep::Finished(step()) })
+            }
+        }
+        OnceFinished(Some(step))
+    }
+
+    /// String 标签异步逆（本模块局部）。
+    fn async_inverse_snap(log: &Log, label: &'static str) -> AsyncDisposer {
+        let log = Rc::clone(log);
+        Box::new(move || {
+            let log = Rc::clone(&log);
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                log.borrow_mut().push(label.to_string());
+            }) as LocalBoxFuture<()>
+        }) as AsyncDisposer
+    }
+
+    /// 测试 7（草案 §9，评审点 C）：快照纪律——提供者卸载后（活 store
+    /// 绑定已撤销），依赖者尾巴仍能从**步创建时捕获**的 Arc 读到依赖值；
+    /// 且依赖者逆先于提供者逆 settle（I-3 顺带直证）。
+    #[tokio::test]
+    async fn dependent_tail_reads_captured_snapshot_after_provider_gone() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let ctx = Context::new();
+                let rt = AsyncRuntime::new(&ctx);
+                let log: Log = Rc::new(RefCell::new(Vec::new()));
+
+                let p = rt
+                    .use_component(
+                        &ctx,
+                        Rc::new(Shell::provide_only(&["m07.snap"])),
+                        SnapProviderBehavior {
+                            log: Rc::clone(&log),
+                        },
+                        Rc::new(()) as Rc<dyn Any>,
+                    )
+                    .expect("挂载提供者");
+                let _c = rt
+                    .use_component(
+                        &ctx,
+                        Rc::new(Shell::inject_only(&["m07.snap"])),
+                        SnapConsumerBehavior {
+                            log: Rc::clone(&log),
+                        },
+                        Rc::new(()) as Rc<dyn Any>,
+                    )
+                    .expect("挂载消费者");
+
+                // 等提供者绑定落地 → 消费者激活 → 两个 drive 完成（快照已捕获）。
+                for _ in 0..64 {
+                    tokio::task::yield_now().await;
+                    if log.borrow().iter().any(|l| l == "c:run") {
+                        break;
+                    }
+                }
+                assert_eq!(
+                    *log.borrow(),
+                    vec!["p:run".to_string(), "c:run".to_string()],
+                    "提供者绑定 → 消费者捕获快照"
+                );
+
+                // 退役提供者：级联卸载消费者（逆先入队）→ settle。
+                rt.retire(&p);
+                rt.settle().await;
+
+                assert_eq!(
+                    *log.borrow(),
+                    vec![
+                        "p:run".to_string(),
+                        "c:run".to_string(),
+                        "snap:ok".to_string(),
+                        "p:rev".to_string(),
+                    ],
+                    "快照纪律：C 逆在提供者绑定撤销后仍读到捕获值（snap:ok）；且先于 P 逆（I-3）"
+                );
+            })
+            .await;
     }
 }
