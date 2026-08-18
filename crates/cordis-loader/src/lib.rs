@@ -412,7 +412,11 @@ impl Loader {
     /// 接到本 loader——组件侧 [`Fiber::update`] 触发时，自动把新 config 写入
     /// 该 fiber 所属条目的书签（TS `internal/update` 的 loader 半段）。
     ///
-    /// 需要 `Rc<Loader>`（观察者闭包持有 loader 引用）。
+    /// 需要 `Rc<Loader>`（观察者闭包持有 loader 弱引用）。
+    ///
+    /// **Runtime 复用（REVIEW-1005c8b m3）**：hook 为单槽覆盖，且闭包持有
+    /// `Weak<Loader>`——同一 `Runtime` 换用新 `Loader` 时**须重新调用本方法**
+    ///（否则旧钩子指向已亡 loader、写回空转）。
     pub fn register_update_hook(self: &Rc<Self>) {
         // P2（评审动作 3）：闭包捕获 **弱引用**而非 `Rc<Loader>`——消除
         // `Loader → runtime.hook → 闭包 → Loader` 引用环（关停泄漏；
@@ -434,6 +438,9 @@ impl Loader {
     /// 注册退役观察者（§5.2.1 双向绑定条目侧；TS `internal/plugin` 半段
     /// 参照，loader/index.ts:88-124）：组件自退役（[`Fiber::retire`]）→
     /// 自动写回所属条目书签 `disabled = true`。
+    ///
+    /// **Runtime 复用（REVIEW-1005c8b m3）**：同 update hook——单槽覆盖 +
+    /// `Weak<Loader>`，换用新 `Loader` 时**须重新调用本方法**。
     ///
     /// **过滤语义**：任何 retire 均触发（含 loader 驱动 teardown）——仅当
     /// 条目**仍在且未 disabled**（= 组件自退役；loader 驱动的退役发生时
