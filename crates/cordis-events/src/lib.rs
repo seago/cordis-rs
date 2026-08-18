@@ -358,7 +358,7 @@ impl EventBus {
     pub fn emit<P: Event>(&self, payload: &P::Payload) {
         let name = Symbol::intern(P::SYMBOL);
         let any = payload as &dyn Any;
-        let snap: Vec<EmitAnyFn> = {
+        let snap: Vec<(Arc<AtomicBool>, EmitAnyFn)> = {
             let listeners = self.listeners.read().unwrap();
             match listeners.get(&name) {
                 None => Vec::new(),
@@ -366,14 +366,21 @@ impl EventBus {
                     .iter()
                     .filter(|e| e.alive())
                     .filter_map(|e| match e {
-                        ListenerEntry::Emit { f, .. } => Some(Arc::clone(f)),
+                        ListenerEntry::Emit { alive, f, .. } => {
+                            Some((Arc::clone(alive), Arc::clone(f)))
+                        }
                         _ => None,
                     })
                     .collect(),
             }
         };
-        for f in snap {
-            f(any);
+        // E-1 一致性（REVIEW-866407c minor-1）：与 waterfall/serial/bail
+        // 同款 alive 调用期检查——派发中途被退订的 emit 监听器（已入快照）
+        // 本轮不再调用。
+        for (alive, f) in snap {
+            if alive.load(Ordering::SeqCst) {
+                f(any);
+            }
         }
     }
 
