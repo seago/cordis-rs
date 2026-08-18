@@ -9,7 +9,6 @@
 //! 执行计划 `docs/cordis-async-PHASE0-PLAN.md`（含里程碑间独立审查硬门禁）。
 
 #![deny(missing_docs)]
-#![allow(dead_code)] // M0.1 骨架：协议类型占位未被使用；各里程碑逐项启用
 
 use std::future::Future;
 use std::pin::Pin;
@@ -55,4 +54,45 @@ impl AsyncFiberError {
     pub fn message(&self) -> &str {
         &self.0
     }
+}
+
+/// 驱动引擎（草案 §1；Algorithm 1 的 async 转写）。
+///
+/// 逐步 await 迭代器：guard 在每个**步界**检查（§4.3.2 步界中断同语义）；
+/// `Failed` → 先 LIFO await 恢复已完成步骤再报失败；正常终止 → 折叠
+/// 复合逆（以应用逆序 await 各步逆，I-1）。
+///
+/// guard 为 `false` 时的退场：在途步完成、其逆照常入账并参与复合逆
+///（I-2）——不中断在途的 `next()` 挂起。
+pub async fn drive(
+    mut iter: Box<dyn AsyncEffectIter>,
+    guard: impl Fn() -> bool,
+) -> Result<AsyncDisposer, AsyncFiberError> {
+    let mut acc: Vec<AsyncDisposer> = Vec::new();
+    loop {
+        if !guard() {
+            break;
+        }
+        match iter.next().await {
+            AsyncStep::Yielded(d) => acc.push(d),
+            AsyncStep::Finished(d) => {
+                acc.push(d);
+                break;
+            }
+            AsyncStep::Failed(e) => {
+                // LIFO 恢复已完成步骤，再上报失败。
+                for d in acc.into_iter().rev() {
+                    d().await;
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(Box::new(move || {
+        Box::pin(async move {
+            for d in acc.into_iter().rev() {
+                d().await;
+            }
+        }) as LocalBoxFuture<()>
+    }) as AsyncDisposer)
 }
