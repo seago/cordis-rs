@@ -120,7 +120,9 @@
 | M0.6 | Step 5 Remote 桥 | M0.5 | 1 天 |
 | M0.7 | Step 6 spike 1–3 + 出口判定 | 全部 | 2–3 周（草案量级） |
 
-**每个里程碑门禁**：`cargo fmt --check` + `cargo clippy -p cordis-async --all-targets -- -D warnings` + 该里程碑单测全绿 + （后续）`cargo test --workspace` 无回归。
+**每个里程碑门禁（含硬性审查门禁）**：
+- **门禁 A（代码门禁）**：`cargo fmt --check` + `cargo clippy -p cordis-async --all-targets -- -D warnings` + 该里程碑单测全绿 + （后续）`cargo test --workspace` 无回归。
+- **门禁 B（里程碑间独立审查门禁——强制）**：每个里程碑 M0.N 完成后，**必须先做独立代码审查**（报告入 `docs/reviews/`），评审通过（含修复 split commit 闭环）后**才允许开工下一里程碑 M0.(N+1)**；审查不通过 → 修复循环，**不得跨里程碑推进**。此硬门禁贯穿 M0.1–M0.7（Phase 0 出口判定亦需审查闭环）。
 
 ## 4. 开放事项（执行期处理或记录，不阻塞开工）
 
@@ -134,4 +136,4 @@
 
 - 零第三方依赖纪律仅约束 sync 侧（cordis-core/loader/hmr/macro 保持零第三方）；`cordis-async` 按草案引入 tokio（run-dependency）——**是新 crate 自身依赖，不污染既有 crate**；wasm 桥复用 M1 宿主驱动协议。
 - `unsafe_code=deny`、`clippy -D warnings`、`#![deny(missing_docs)]` 全程生效。
-- 每里程碑：commit 分 code/docs；独立审查报告入 `docs/reviews/`；修复 split commit。
+- 每里程碑：commit 分 code/docs；独立审查报告入 `docs/reviews/`；修复 split commit。**里程碑间独立审查为硬门禁**（见 §3 门禁 B）——审查未闭环不得进入下一里程碑。
