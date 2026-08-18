@@ -135,6 +135,8 @@ impl ListenerEntry {
 struct ModeRecord {
     type_id: TypeId,
     type_name: &'static str,
+    /// 本模式是否有 R（Emit/Waterfall 无）。显式标志，免字符串哨兵（Nit-1）。
+    has_r: bool,
     r_type_id: TypeId,
     r_name: &'static str,
 }
@@ -330,6 +332,7 @@ impl EventBus {
                     ModeRecord {
                         type_id: spec.type_id,
                         type_name: spec.type_name,
+                        has_r: spec.r_type_id.is_some(),
                         r_type_id: spec.r_type_id.unwrap_or_else(TypeId::of::<()>),
                         r_name: spec.r_name.unwrap_or("()"),
                     },
@@ -380,7 +383,7 @@ impl EventBus {
         terminal: impl Fn(&mut P::Payload),
     ) {
         let name = Symbol::intern(P::SYMBOL);
-        let snap: Vec<WaterfallAnyFn> = {
+        let snap: Vec<(Arc<AtomicBool>, WaterfallAnyFn)> = {
             let listeners = self.listeners.read().unwrap();
             match listeners.get(&name) {
                 None => Vec::new(),
@@ -388,7 +391,9 @@ impl EventBus {
                     .iter()
                     .filter(|e| e.alive())
                     .filter_map(|e| match e {
-                        ListenerEntry::Waterfall { f, .. } => Some(Arc::clone(f)),
+                        ListenerEntry::Waterfall { alive, f, .. } => {
+                            Some((Arc::clone(alive), Arc::clone(f)))
+                        }
                         _ => None,
                     })
                     .collect(),
@@ -416,7 +421,8 @@ impl EventBus {
         let snap = self.snapshot_reply(name, Mode::Serial);
         let any = payload as &dyn Any;
         snap.into_iter()
-            .map(|f| *f(any).downcast::<R>().expect("派发 R 与订阅写定的 R 一致"))
+            .filter(|(alive, _)| alive.load(Ordering::SeqCst))
+            .map(|(_, f)| *f(any).downcast::<R>().expect("派发 R 与订阅写定的 R 一致"))
             .collect()
     }
 
@@ -430,7 +436,10 @@ impl EventBus {
         self.check_dispatch_r::<R>(name, Mode::Bail);
         let snap = self.snapshot_reply(name, Mode::Bail);
         let any = payload as &dyn Any;
-        for f in snap {
+        for (alive, f) in snap {
+            if !alive.load(Ordering::SeqCst) {
+                continue;
+            }
             let option: Option<R> = *f(any)
                 .downcast::<Option<R>>()
                 .expect("派发 R 与订阅写定的 R 一致");
@@ -446,7 +455,7 @@ impl EventBus {
     fn check_dispatch_r<R: Send + Sync + 'static>(&self, name: Symbol, mode: Mode) {
         let modes = self.modes.read().unwrap();
         if let Some(rec) = modes.get(&(name, mode))
-            && rec.r_name != "()"
+            && rec.has_r
             && rec.r_type_id != TypeId::of::<R>()
         {
             panic!(
@@ -458,7 +467,7 @@ impl EventBus {
     }
 
     /// reply 监听器快照（Serial/Bail 按 mode 过滤；release-then-invoke）。
-    fn snapshot_reply(&self, name: Symbol, mode: Mode) -> Vec<ReplyAnyFn> {
+    fn snapshot_reply(&self, name: Symbol, mode: Mode) -> Vec<(Arc<AtomicBool>, ReplyAnyFn)> {
         let listeners = self.listeners.read().unwrap();
         match listeners.get(&name) {
             None => Vec::new(),
@@ -466,8 +475,9 @@ impl EventBus {
                 .iter()
                 .filter(|e| e.alive() && e.mode() == mode)
                 .filter_map(|e| match e {
-                    ListenerEntry::Serial { f, .. } | ListenerEntry::Bail { f, .. } => {
-                        Some(Arc::clone(f))
+                    ListenerEntry::Serial { alive, f, .. }
+                    | ListenerEntry::Bail { alive, f, .. } => {
+                        Some((Arc::clone(alive), Arc::clone(f)))
                     }
                     _ => None,
                 })
@@ -478,7 +488,7 @@ impl EventBus {
 
 /// waterfall next 链（递归展开下游），最内层 = terminal。
 fn waterfall_link(
-    fs: &[WaterfallAnyFn],
+    fs: &[(Arc<AtomicBool>, WaterfallAnyFn)],
     i: usize,
     p: &mut dyn Any,
     terminal: &dyn Fn(&mut dyn Any),
@@ -487,8 +497,15 @@ fn waterfall_link(
         (terminal)(p);
         return;
     }
+    // E-1（Minor-1 落地）：派发中途被退订的 waterfall 监听器跳过（等效
+    // 未订阅），但**不短路**——下游与 terminal 照常（退订 ≠ 拒绝）。
+    if !fs[i].0.load(Ordering::SeqCst) {
+        waterfall_link(fs, i + 1, p, terminal);
+        return;
+    }
+    let f = &fs[i].1;
     let next: &dyn Fn(&mut dyn Any) = &|x: &mut dyn Any| waterfall_link(fs, i + 1, x, terminal);
-    (fs[i])(p, next);
+    (f)(p, next);
 }
 
 impl Default for EventBus {
