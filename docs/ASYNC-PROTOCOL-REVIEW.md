@@ -1,4 +1,4 @@
-# `cordis-async` 协议草案（v1.1 / v1.2）评审意见
+# `cordis-async` 协议草案（v1.1 / v1.2 / v1.3）评审意见
 
 **日期**：2026-08-18 ｜ **评审对象**：`docs/cordis-async-protocol-draft.md` v1.1（工作文件，**未受版本管理**；评审意见以独立文档记录，不外改草案）
 **评审性质**：草案设计评审（非实现审查）——对照本仓库已落地的 sync core/loader 语义（G1–G9 全部完成），评估 async 层草案的可行性与正确性。
@@ -81,3 +81,32 @@
 ## 9. 总判定
 
 草案自 v1.0 → v1.2 三轮迭代（A–G → H → 收尾）已闭合：**可行性、正确性、与现有代码衔接均无阻塞**。Phase 0 出口标准（§9：10 协议单测 + 3 spike）门槛合理，建议按草案推进。遗留唯一待明示项 = §8 的 shutdown-core 关系（属实现细节，不阻塞开工）。
+
+---
+
+# 增补：v1.3 核对（2026-08-18 终审）
+
+**对象**：草案 v1.3（371 行，采纳上轮 §8 shutdown-core 小点 → 契约 C-7；slot Rc liveness 注记；测试 11）。**结论：采纳正确、无新问题；1 条 release 加固建议（不阻塞）。**
+
+## 10. C-7（shutdown 语义）核对 —— 设计正确
+
+- **分工清晰**：core 侧退役由**编排方先行**（facade retire-all / loader teardown）；`AsyncRuntime::shutdown` **只兜底** cancel 残留 + settle 到静止，不代做 core 退役——职责不再含糊。
+- **双真断言**（`core.is_quiet() ∧ async.is_quiet()`）正确固化两视图一致性契约；未退役即关停 = 调用方违约（debug_assert 暴露）。
+- **"退役不污染持久化配置"衔接准确**：与仓库 G1/PR #30 的 retire-hook 过滤语义（loader 驱动退役不写回 disabled）一致。
+- **定位正确**：双真断言只放 shutdown（终态）而非 settle（中间态允许延迟卸载的合法 tails）——未误伤正常批次。
+
+## 11. slot Rc liveness 注记（§3.1）核对
+
+三处持有（drive 闭包 / 注册器逆闭包 / tail 条目）写成显式 liveness 链——与核验结论一致。
+
+## 12. 测试 11 核对
+
+三条：编排方先行退役 → 双真；未退役即关停 → debug_assert 捕获；退役路径不触发 disabled 写回（零污染）——直击 C-7 全部承诺。
+
+## 13. 一条加固建议（不阻塞，可记开放问题或留 Phase 1）
+
+**release 下双真断言折损**：草案用 `debug_assert`——release 构建中"调用方未退役即关停"会**静默**产生 async 已收账、core fibers 仍挂的不一致。对**关停路径**（终态、频率低、审计价值高）建议至少一处 `assert`（正式断言），或明确文档化"release 下编排方对退役负全责"。中间 settle 继续用 debug 不必改。
+
+## 14. 总判定
+
+v1.0 → v1.3 四轮迭代（A–G → H → shutdown-core → 收尾）**全部闭合**：评审点逐条被正确采纳，无遗留阻塞。草案具备完整正确性论证 + 11 协议单测 + 3 spike 出口标准，**建议按 §9 进入 Phase 0**（建 `cordis-async` crate 骨架 + I-1 单测 + spike）。遗留唯一建议项 = §13 release 断言加固（实现细节）。
