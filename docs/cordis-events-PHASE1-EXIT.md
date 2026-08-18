@@ -26,7 +26,7 @@
 
 | 项 | 落地 | 状态 |
 |---|---|---|
-| async 监听器投递（§4.1 / async C-5） | `m15::async_listener_delivery_via_spawn_local`——sync 闭包内 `spawn_local` 投递、不阻塞派发、任务可追溯 | ✅ |
+| async 监听器投递（§4.1 / async C-5） | `m15::async_listener_delivery_via_spawn_local`——sync 闭包内 `spawn_local` 投递、不阻塞派发（JoinHandle 演示性丢弃；C-5 可追溯由消费方 async 层落实——REVIEW-PHASE1-EXIT nit-1） | ✅ |
 | 活变化通道（§4.1，与 C-1' 快照互补） | 订阅即效应（M1.3）即该通道的落地形态；async 层消费方（Phase 1 后） | ✅（语义对齐） |
 | loader 集成（§4.2） | `m15::events_provider_mounts_via_loader`——`EventsProvider` 根条目挂载、总线可达、订阅/emit 回路、teardown 零污染 | ✅ |
 | scope 模式（§4.3） | 草案仅给接入面（realm 隔离实例），无代码；app 层后续 | ✅（按草案范围） |
@@ -39,6 +39,12 @@
 - `cargo +1.97.0 test --workspace` ✅ 无回归（events 17 条 + 既有 cordis-async 21 / core / loader / hmr / wasm 全绿）
 - 零第三方：`cargo tree -p cordis-events` run 分支仅 `cordis-core`；tokio/cordis-loader 在 dev-dependencies（计划 §5）
 - 里程碑审查闭环：M1.1–M1.5 全部独立审查 PASS（REVIEW-85d2379 / -a0963ab / -f8541f1 / -866407c / -b6ebd25），0 Masajor / 0 Minor 未决
+
+## 3.5 走查 Nit 处理记录（REVIEW-PHASE1-EXIT）
+
+- nit-1（EXIT「任务可追溯」措辞）——已精化（§2 async 行）。
+- nit-2（「派发中途退订已入快照者本轮跳过」无专属单测）——由 #2 直证 + 四派发 alive 调用期检查实现（REVIEW-a0963ab/866407c）支持；不另设单测（pub API 无 Send 退订句柄，构造不可达）。
+- nit-3（git 卫生：0fc7d93/de0a9d7 重复）——**接受不 squash**：重写历史会变更 M1.2–M1.5 已审查 commit 的 hash，破坏 `docs/reviews/REVIEW-<hash>.md` 文件名与历史的关联约定（审查可追溯性优先于历史整洁）。
 
 ## 4. 出口判定
 
