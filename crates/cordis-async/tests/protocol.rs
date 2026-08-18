@@ -694,6 +694,12 @@ mod m04 {
                 let fid = loader.fiber("failing").expect("已激活").id();
 
                 // 等失败落地：drive → Failed → on_failed 自退役 → loader 写回。
+                //
+                // 决定论约定（REVIEW-596125d nit-1）：`FailOnceIter::next()`
+                // 内日志与步完成同步、**无中途 await**——失败/复活日志在
+                // spawn 后下一次 poll 即落盘，固定轮数 yield 头寸充裕、无
+                // flaky。若日后在 `next()` 内引入 await/多步，须改造成可
+                // await 的就绪条件，勿依赖本自旋基数。
                 for _ in 0..64 {
                     tokio::task::yield_now().await;
                     if loader.entry_disabled("failing") == Some(true) {
@@ -730,6 +736,10 @@ mod m04 {
                     log.borrow().iter().any(|l| l == "revive:run"),
                     "复活：新代 drive 成功运行"
                 );
+                // entry/registrar 经 `wrap_component` 单实例恒共享（REVIEW-596125d
+                // nit-3）：loader 重建产生新 fiber（可能新 fid），但同一注册器
+                // 复用同一 entry——原 fid 的弱引用仍 upgrade 到它，换代递推
+                // 由 begin_activation 保证，故按原 fid 查询成立。
                 assert!(
                     matches!(
                         rt.entry(fid).expect("条目存在").state(),

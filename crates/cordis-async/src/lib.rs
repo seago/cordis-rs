@@ -615,6 +615,11 @@ impl AsyncRuntime {
     /// core 把 `Active` 视为静止（无在途转换）；async 视图要求关停后
     /// 不再有任何运行的 async 组件——编排方未退役即关停时本方法为假，
     /// 双真断言得以暴露违约。
+    ///
+    /// **合取限定（REVIEW-596125d nit-2）**：本方法不排除 core 在途转换
+    /// （`Reloading`/`Unloading` 视为非 Active 即通过）——仅在
+    /// `&& core.is_quiet()` 合取下才是整体静止判定（`shutdown` 双真断言
+    /// 即此用法）；单独复用本方法作通用静止谓词时须自行合取 core 侧。
     pub fn is_quiet(&self) -> bool {
         self.tails.is_empty()
             && self.entries.borrow().values().all(|w| {
