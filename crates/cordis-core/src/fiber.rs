@@ -175,6 +175,16 @@ impl Fiber {
         self.retired.get()
     }
 
+    /// 记录的目标摘要 `target_n(γ)`（Def 46 式 (41)）的只读视图
+    ///（borrow 克隆；评审动作 3 / cordis-async 草案 O-1 落地形态）。
+    ///
+    /// **只读**：与 [`Runtime::refresh`] 的重算路径解耦，调用方不得据此
+    /// 直接驱动生命周期（目标仍由 `refresh` 权威重算）。与 reload 的
+    /// `guard_target`（`fiber.target.borrow() == target0`）同款语义。
+    pub fn target_view(&self) -> Option<View> {
+        self.target.borrow().clone()
+    }
+
     /// 组件实例（读取 `d(k)` 声明元数据；M2-PR2）。
     pub fn component(&self) -> &Rc<dyn Component> {
         &self.component

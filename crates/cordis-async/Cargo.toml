@@ -1,0 +1,18 @@
+[package]
+name = "cordis-async"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "cordis-async 层（草案 v1.4）：一等 async 效应协议、取消/卸载编排、Remote 桥"
+
+[lints]
+workspace = true
+
+[dependencies]
+cordis-core = { path = "../cordis-core" }
+tokio = { version = "1", features = ["rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "sync"] }

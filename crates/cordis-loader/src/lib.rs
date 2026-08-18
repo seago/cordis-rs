@@ -414,9 +414,15 @@ impl Loader {
     ///
     /// 需要 `Rc<Loader>`（观察者闭包持有 loader 引用）。
     pub fn register_update_hook(self: &Rc<Self>) {
-        let loader = Rc::clone(self);
+        // P2（评审动作 3）：闭包捕获 **弱引用**而非 `Rc<Loader>`——消除
+        // `Loader → runtime.hook → 闭包 → Loader` 引用环（关停泄漏；
+        // cordis-async 草案 B 方案同型）。loader 已 drop → 回调升级失败即跳过。
+        let loader = Rc::downgrade(self);
         self.runtime
             .set_update_hook(Some(Rc::new(move |fiber: &Fiber, config: Rc<dyn Any>| {
+                let Some(loader) = loader.upgrade() else {
+                    return;
+                };
                 if let Some(id) = loader.entry_of(fiber.id())
                     && let Some(l) = find_loaded_mut(&mut loader.entries.borrow_mut(), &id)
                 {
@@ -437,9 +443,13 @@ impl Loader {
     /// 的 apply 会重新启用（与 update 写回不同：config 非协调字段、同
     /// revision apply 不清除）。编排方作为树所有者决定持久化。
     pub fn register_retire_hook(self: &Rc<Self>) {
-        let loader = Rc::clone(self);
+        // P2（评审动作 3）：同 update hook——捕获弱引用消除引用环。
+        let loader = Rc::downgrade(self);
         self.runtime
             .set_retire_hook(Some(Rc::new(move |fiber: &Fiber| {
+                let Some(loader) = loader.upgrade() else {
+                    return;
+                };
                 if loader.in_apply.get() {
                     // apply 协调期间（teardown 路径）：entries 已被 apply_into
                     // 可变借用——延迟到 apply 末尾排空。
