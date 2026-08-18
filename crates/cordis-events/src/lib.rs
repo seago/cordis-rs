@@ -67,6 +67,8 @@ impl EventBus {
 }
 
 impl Default for EventBus {
+    // 骨架期保留（REVIEW-85d2379 nit-1）：默认空实例；M1.2 填充内部字段后
+    // 仍为默认构造入口，语义不变。
     fn default() -> Self {
         Self::new()
     }
