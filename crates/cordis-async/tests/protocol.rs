@@ -1,8 +1,12 @@
 //! M0.2（草案 §1）：`drive` 引擎 + 不变量 I-1（LIFO 逆）/ I-2（步界 guard）。
+//! M0.3（草案 §3）：两阶段卸载——I-3（依赖者 async 逆先 settle）+ drain 重入。
 //!
 //! - I-1：drive 折叠的复合逆以**应用逆序** await 各步逆（Thm 16 的 async 版）。
 //! - I-2：guard 仅在步界检查；await 挂起期间 guard 翻假不中断在途步——
 //!   在途步完成后其逆照常入账并参与恢复。
+//! - I-3：async 尾巴按依赖序收尾（core 级联入队序 + settle FIFO）。
+//! - drain 重入：收尾逆可注册新 async 效应（下一代队列排空）；自再生死
+//!   循环触发 64 轮守卫 panic。
 
 use cordis_async::{AsyncDisposer, AsyncEffectIter, AsyncFiberError, AsyncStep, drive};
 use std::cell::{Cell, RefCell};
@@ -194,4 +198,409 @@ async fn i2_guard_flips_while_inflight_step_pending() {
             );
         })
         .await;
+}
+
+// ── M0.3（草案 §3）：两阶段卸载——I-3 + drain 重入 ─────────────────────
+
+mod m03 {
+    use super::Log;
+    use cordis_async::{
+        AsyncBehavior, AsyncCx, AsyncDisposer, AsyncEffectIter, AsyncRuntime, AsyncStep,
+        LocalBoxFuture,
+    };
+    use cordis_core::{
+        Component, Context, Disposer, EffectIter, FiberState, Key, KeySet, Symbol, once,
+    };
+    use std::any::Any;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// 依赖键：I-3 用例中 provider 提供、consumer 注入。
+    struct KeyDep;
+    impl Key for KeyDep {
+        type Value = String;
+        const SYMBOL: &'static str = "m0.3.dep";
+    }
+
+    /// sync 壳组件：只贡献 d/p（AsyncRegistrar 不调用内层 apply）。
+    struct Shell {
+        inject: Vec<&'static str>,
+        provide: Vec<&'static str>,
+    }
+
+    impl Shell {
+        fn inject_only(keys: &[&'static str]) -> Self {
+            Self {
+                inject: keys.to_vec(),
+                provide: Vec::new(),
+            }
+        }
+        fn provide_only(keys: &[&'static str]) -> Self {
+            Self {
+                inject: Vec::new(),
+                provide: keys.to_vec(),
+            }
+        }
+        fn empty() -> Self {
+            Self {
+                inject: Vec::new(),
+                provide: Vec::new(),
+            }
+        }
+    }
+
+    impl Component for Shell {
+        fn inject(&self) -> KeySet {
+            let mut ks = KeySet::new();
+            for k in &self.inject {
+                ks.insert(Symbol::intern(k));
+            }
+            ks
+        }
+        fn provide(&self) -> KeySet {
+            let mut ks = KeySet::new();
+            for k in &self.provide {
+                ks.insert(Symbol::intern(k));
+            }
+            ks
+        }
+        fn apply(&self, _ctx: Rc<Context>, _config: &dyn Any) -> Box<dyn EffectIter> {
+            // AsyncRegistrar 只用 d/p；内层 apply 不应被调用（防御性空效应）。
+            Box::new(once(Box::new(|| Box::new(|| {}) as Disposer)))
+        }
+    }
+
+    /// 异步逆：yield 一拍后记录 `{label}:inverse`（settle 的 async 逆路径）。
+    fn async_inverse(log: &Log, label: &'static str) -> AsyncDisposer {
+        let log = Rc::clone(log);
+        Box::new(move || {
+            let log = Rc::clone(&log);
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                log.borrow_mut().push(format!("{label}:inverse"));
+            }) as LocalBoxFuture<()>
+        }) as AsyncDisposer
+    }
+
+    /// 单步行为：`run` 时记 `{label}:run`（可选：顺带绑定 KeyDep），
+    /// 逆记 `{label}:inverse`（真实 async 逆）。
+    struct OneShotBehavior {
+        label: &'static str,
+        log: Log,
+        provide_dep: bool,
+    }
+
+    impl AsyncBehavior for OneShotBehavior {
+        fn apply_async(&self, cx: AsyncCx, _config: &dyn Any) -> Box<dyn AsyncEffectIter> {
+            Box::new(OneShotIter {
+                cx,
+                label: self.label,
+                log: Rc::clone(&self.log),
+                provide_dep: self.provide_dep,
+                done: false,
+            })
+        }
+    }
+
+    struct OneShotIter {
+        cx: AsyncCx,
+        label: &'static str,
+        log: Log,
+        provide_dep: bool,
+        done: bool,
+    }
+
+    impl AsyncEffectIter for OneShotIter {
+        fn next(&mut self) -> LocalBoxFuture<AsyncStep> {
+            assert!(!self.done, "单步迭代器至多一步");
+            self.done = true;
+            let cx = self.cx.clone();
+            let label = self.label;
+            let log = Rc::clone(&self.log);
+            let provide_dep = self.provide_dep;
+            Box::pin(async move {
+                if provide_dep {
+                    // 绑定逆已入 fiber ctx 累加器（core 卸载时经 dispose_all
+                    // 执行）；返回的 disposer 句柄故意丢弃（与 core register
+                    // 同款意图）。
+                    drop(
+                        cx.set::<KeyDep>(String::from("v"))
+                            .expect("provider 绑定依赖键"),
+                    );
+                }
+                log.borrow_mut().push(format!("{label}:run"));
+                AsyncStep::Finished(async_inverse(&log, label))
+            })
+        }
+    }
+
+    /// I-3（草案 §3.2）：async 提供者 + async 消费者；退役提供者 →
+    /// core 级联（依赖者先撤，Thm 63）→ 消费者注册器逆先入队 → settle
+    /// FIFO 排空：消费者的 async 逆先 settle、提供者后 settle（日志序直证）。
+    #[tokio::test]
+    async fn i3_dependent_async_inverse_settles_first() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let ctx = Context::new();
+                let rt = AsyncRuntime::new(&ctx);
+                let log: Log = Rc::new(RefCell::new(Vec::new()));
+
+                let provider = rt
+                    .use_component(
+                        &ctx,
+                        Rc::new(Shell::provide_only(&["m0.3.dep"])),
+                        OneShotBehavior {
+                            label: "provider",
+                            log: Rc::clone(&log),
+                            provide_dep: true,
+                        },
+                        Rc::new(()) as Rc<dyn Any>,
+                    )
+                    .expect("provider 挂载");
+                let consumer = rt
+                    .use_component(
+                        &ctx,
+                        Rc::new(Shell::inject_only(&["m0.3.dep"])),
+                        OneShotBehavior {
+                            label: "consumer",
+                            log: Rc::clone(&log),
+                            provide_dep: false,
+                        },
+                        Rc::new(()) as Rc<dyn Any>,
+                    )
+                    .expect("consumer 挂载");
+
+                // 等 provider 绑定落地 → consumer 激活 → 两个 drive 完成填账。
+                for _ in 0..64 {
+                    tokio::task::yield_now().await;
+                    if matches!(*consumer.state(), FiberState::Active { .. }) {
+                        break;
+                    }
+                }
+                assert!(
+                    matches!(*consumer.state(), FiberState::Active { .. }),
+                    "依赖满足后 consumer 激活"
+                );
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(
+                    *log.borrow(),
+                    vec!["provider:run".to_string(), "consumer:run".to_string()],
+                    "两个 drive 均已完成（slot 填账）"
+                );
+
+                // 退役提供者：core 级联 consumer 先卸载（逆先入队），provider 后卸载。
+                provider.retire();
+                rt.settle().await;
+
+                assert_eq!(
+                    *log.borrow(),
+                    vec![
+                        "provider:run".to_string(),
+                        "consumer:run".to_string(),
+                        "consumer:inverse".to_string(),
+                        "provider:inverse".to_string(),
+                    ],
+                    "I-3：依赖者的 async 逆先 settle，提供者的后 settle"
+                );
+            })
+            .await;
+    }
+
+    /// drain 重入（§3.4）：settle 期间某尾巴的 async 逆注册**新的** async
+    /// 效应（合法收尾逻辑）→ 入下一代队列 → settle 循环排空至队列空。
+    #[tokio::test]
+    async fn drain_reentry_next_generation_is_drained() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let ctx = Context::new();
+                let rt = AsyncRuntime::new(&ctx);
+                let log: Log = Rc::new(RefCell::new(Vec::new()));
+
+                struct ReentryBehavior {
+                    rt: Rc<AsyncRuntime>,
+                    root: Rc<Context>,
+                    log: Log,
+                }
+                impl AsyncBehavior for ReentryBehavior {
+                    fn apply_async(
+                        &self,
+                        _cx: AsyncCx,
+                        _config: &dyn Any,
+                    ) -> Box<dyn AsyncEffectIter> {
+                        Box::new(ReentryIter {
+                            rt: Rc::clone(&self.rt),
+                            root: Rc::clone(&self.root),
+                            log: Rc::clone(&self.log),
+                            done: false,
+                        })
+                    }
+                }
+                struct ReentryIter {
+                    rt: Rc<AsyncRuntime>,
+                    root: Rc<Context>,
+                    log: Log,
+                    done: bool,
+                }
+                impl AsyncEffectIter for ReentryIter {
+                    fn next(&mut self) -> LocalBoxFuture<AsyncStep> {
+                        assert!(!self.done, "单步");
+                        self.done = true;
+                        let rt = Rc::clone(&self.rt);
+                        let root = Rc::clone(&self.root);
+                        let log = Rc::clone(&self.log);
+                        Box::pin(async move {
+                            log.borrow_mut().push("A:run".into());
+                            AsyncStep::Finished(Box::new(move || {
+                                let rt = Rc::clone(&rt);
+                                let root = Rc::clone(&root);
+                                let log = Rc::clone(&log);
+                                Box::pin(async move {
+                                    // 收尾中注册新 async 效应（合法收尾逻辑）。
+                                    log.borrow_mut().push("A:inverse".into());
+                                    let b = rt
+                                        .use_component(
+                                            &root,
+                                            Rc::new(Shell::empty()),
+                                            OneShotBehavior {
+                                                label: "B",
+                                                log: Rc::clone(&log),
+                                                provide_dep: false,
+                                            },
+                                            Rc::new(()) as Rc<dyn Any>,
+                                        )
+                                        .expect("收尾中挂载 B");
+                                    // 让 B 的 drive 完成（slot 填账）再退役入队。
+                                    tokio::task::yield_now().await;
+                                    b.retire();
+                                }) as LocalBoxFuture<()>
+                            }) as AsyncDisposer)
+                        })
+                    }
+                }
+
+                let a = rt
+                    .use_component(
+                        &ctx,
+                        Rc::new(Shell::empty()),
+                        ReentryBehavior {
+                            rt: Rc::clone(&rt),
+                            root: Rc::clone(&ctx),
+                            log: Rc::clone(&log),
+                        },
+                        Rc::new(()) as Rc<dyn Any>,
+                    )
+                    .expect("挂载 A");
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+                a.retire();
+                rt.settle().await;
+
+                assert_eq!(
+                    *log.borrow(),
+                    vec![
+                        "A:run".to_string(),
+                        "A:inverse".to_string(),
+                        "B:run".to_string(),
+                        "B:inverse".to_string(),
+                    ],
+                    "drain 重入：新一代队列被排空（A 逆中注册的 B 完整收尾）"
+                );
+            })
+            .await;
+    }
+
+    /// drain 重入死锁守卫（§3.4）：收尾逆持续注册"又一个自身"且不收敛 →
+    /// settle 超过 64 轮 → panic（宿主 bug 诊断）。
+    #[tokio::test]
+    #[should_panic(expected = "drain 自再生死循环守卫")]
+    async fn drain_self_regeneration_triggers_guard_panic() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let ctx = Context::new();
+                let rt = AsyncRuntime::new(&ctx);
+                let log: Log = Rc::new(RefCell::new(Vec::new()));
+
+                struct SelfRegenBehavior {
+                    rt: Rc<AsyncRuntime>,
+                    root: Rc<Context>,
+                    log: Log,
+                }
+                impl AsyncBehavior for SelfRegenBehavior {
+                    fn apply_async(
+                        &self,
+                        _cx: AsyncCx,
+                        _config: &dyn Any,
+                    ) -> Box<dyn AsyncEffectIter> {
+                        Box::new(SelfRegenIter {
+                            rt: Rc::clone(&self.rt),
+                            root: Rc::clone(&self.root),
+                            log: Rc::clone(&self.log),
+                            done: false,
+                        })
+                    }
+                }
+                struct SelfRegenIter {
+                    rt: Rc<AsyncRuntime>,
+                    root: Rc<Context>,
+                    log: Log,
+                    done: bool,
+                }
+                impl AsyncEffectIter for SelfRegenIter {
+                    fn next(&mut self) -> LocalBoxFuture<AsyncStep> {
+                        assert!(!self.done, "单步");
+                        self.done = true;
+                        let rt = Rc::clone(&self.rt);
+                        let root = Rc::clone(&self.root);
+                        let log = Rc::clone(&self.log);
+                        Box::pin(async move {
+                            log.borrow_mut().push("self:run".into());
+                            AsyncStep::Finished(Box::new(move || {
+                                let rt = Rc::clone(&rt);
+                                let root = Rc::clone(&root);
+                                let log = Rc::clone(&log);
+                                Box::pin(async move {
+                                    // 收尾逆再挂一个自身 → 无限链 → 守卫 panic。
+                                    let next = rt
+                                        .use_component(
+                                            &root,
+                                            Rc::new(Shell::empty()),
+                                            SelfRegenBehavior {
+                                                rt: Rc::clone(&rt),
+                                                root: Rc::clone(&root),
+                                                log: Rc::clone(&log),
+                                            },
+                                            Rc::new(()) as Rc<dyn Any>,
+                                        )
+                                        .expect("收尾中再挂载");
+                                    tokio::task::yield_now().await;
+                                    next.retire();
+                                }) as LocalBoxFuture<()>
+                            }) as AsyncDisposer)
+                        })
+                    }
+                }
+
+                let first = rt
+                    .use_component(
+                        &ctx,
+                        Rc::new(Shell::empty()),
+                        SelfRegenBehavior {
+                            rt: Rc::clone(&rt),
+                            root: Rc::clone(&ctx),
+                            log: Rc::clone(&log),
+                        },
+                        Rc::new(()) as Rc<dyn Any>,
+                    )
+                    .expect("挂载首个");
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+                first.retire();
+                rt.settle().await; // 每轮逆再挂一个 → 第 65 轮守卫 panic
+            })
+            .await;
+    }
 }
