@@ -850,7 +850,8 @@ mod m05 {
     use std::rc::Rc;
 
     /// 带 String 标签的异步逆（yield 一拍后记录 `rev:{label}`）。
-    fn async_inverse_owned(log: &Log, label: String) -> AsyncDisposer {
+    /// m06 复用故 pub(super)。
+    pub(super) fn async_inverse_owned(log: &Log, label: String) -> AsyncDisposer {
         let log = Rc::clone(log);
         Box::new(move || {
             let log = Rc::clone(&log);
@@ -1187,5 +1188,123 @@ mod m05 {
                 assert!(rt.is_quiet(), "shutdown 后静止");
             })
             .await;
+    }
+}
+
+// ── M0.6（草案 §2/§4）：Remote 桥——spawn_remote 提交 + join 回灌 ─────
+
+mod m06 {
+    use super::Log;
+    use super::m03::Shell;
+    use super::m05::async_inverse_owned;
+    use cordis_async::{
+        AsyncBehavior, AsyncCx, AsyncEffectIter, AsyncRuntime, AsyncStep, LocalBoxFuture,
+        RemoteValue, TokioRemote,
+    };
+    use cordis_core::Context;
+    use std::any::Any;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// 远端计算行为：第一步把 6×7 交给远端 worker（spawn_blocking），
+    /// join 回灌后 downcast 校验并记 `joined`；逆记 `rev:remote`。
+    struct RemoteBehavior {
+        log: Log,
+    }
+
+    impl AsyncBehavior for RemoteBehavior {
+        fn apply_async(&self, cx: AsyncCx, _config: &dyn Any) -> Box<dyn AsyncEffectIter> {
+            Box::new(RemoteIter {
+                cx,
+                log: Rc::clone(&self.log),
+                done: false,
+            })
+        }
+    }
+
+    struct RemoteIter {
+        cx: AsyncCx,
+        log: Log,
+        done: bool,
+    }
+
+    impl AsyncEffectIter for RemoteIter {
+        fn next(&mut self) -> LocalBoxFuture<AsyncStep> {
+            assert!(!self.done, "单步迭代器至多一步");
+            self.done = true;
+            let cx = self.cx.clone();
+            let log = Rc::clone(&self.log);
+            Box::pin(async move {
+                log.borrow_mut().push("submit".into());
+                // 远端计算（worker blocking pool；O-6：不触碰组合线程资源）。
+                let join = cx.spawn_remote(|| -> RemoteValue { Box::new(6u32 * 7) });
+                let value = join.await;
+                let n = value.downcast::<u32>().expect("远端结果类型");
+                assert_eq!(*n, 42, "远端计算回灌正确");
+                log.borrow_mut().push("joined".into());
+                AsyncStep::Finished(async_inverse_owned(&log, "remote".into()))
+            })
+        }
+    }
+
+    /// spawn_remote：提交 + join 回灌（同步壳 = 组件 apply；远端计算 =
+    /// worker blocking pool）。断言日志序（submit → joined）与结果值。
+    ///
+    /// 用 `#[test]` + 手动组合 runtime：worker runtime 不能在 async 上下文
+    /// drop（tokio：Cannot drop a runtime in a context where blocking is
+    /// not allowed）——`block_on` 返回后（非 async 上下文）drop 才安全。
+    #[test]
+    fn spawn_remote_submits_to_worker_and_joins_back() {
+        let worker = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .build()
+            .expect("worker runtime");
+        let combo = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("组合 runtime");
+        combo.block_on(async {
+            tokio::task::LocalSet::new()
+                .run_until(async {
+                    let ctx = Context::new();
+                    let rt = AsyncRuntime::new(&ctx);
+                    // 宿主 worker runtime（多线程；比桥存活更久）。
+                    rt.set_remote(Rc::new(TokioRemote::new(worker.handle().clone())));
+                    let log: Log = Rc::new(RefCell::new(Vec::new()));
+
+                    let fiber = rt
+                        .use_component(
+                            &ctx,
+                            Rc::new(Shell::empty()),
+                            RemoteBehavior {
+                                log: Rc::clone(&log),
+                            },
+                            Rc::new(()) as Rc<dyn Any>,
+                        )
+                        .expect("挂载");
+                    // 决定论约定：`RemoteIter::next()` 内 await join（组合
+                    // 线程），回灌完成后才记 `joined`——条件轮询即就绪即停。
+                    for _ in 0..64 {
+                        tokio::task::yield_now().await;
+                        if log.borrow().iter().any(|l| l == "joined") {
+                            break;
+                        }
+                    }
+                    assert_eq!(
+                        *log.borrow(),
+                        vec!["submit".to_string(), "joined".to_string()],
+                        "spawn_remote：提交 → 远端计算 → join 回灌（日志序）"
+                    );
+
+                    // 收尾：退役 + settle（逆 rev:remote 经共享槽收账）。
+                    rt.retire(&fiber);
+                    rt.settle().await;
+                    assert!(
+                        log.borrow().iter().any(|l| l == "rev:remote"),
+                        "远端桥组件正常卸载收账"
+                    );
+                })
+                .await;
+        });
+        // worker 在此 drop——block_on 已返回（非 async 上下文）✓
     }
 }

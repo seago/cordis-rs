@@ -5,7 +5,9 @@
 //! 卸载 + settle + 代次）、Remote 桥。驱动引擎（`drive`/I-1/I-2）于
 //! M0.2 实现；生命周期核心（AsyncRegistrar/AsyncFiberEntry/TailQueue/
 //! settle，I-3 + drain 重入）于 M0.3 实现；失败通道（I-4 自退役 +
-//! disabled 写回 + 复活、C-7 shutdown 双真）于 M0.4 实现。
+//! disabled 写回 + 复活、C-7 shutdown 双真）于 M0.4 实现；门面完善
+//!（retire/update、测试 8/9/10）于 M0.5 实现；Remote 桥（Remote/
+//! TokioRemote/spawn_remote）于 M0.6 实现。
 //!
 //! 依据：`docs/cordis-async-protocol-draft.md` v1.4（冻结）；
 //! 执行计划 `docs/cordis-async-PHASE0-PLAN.md`（含里程碑间独立审查硬门禁）。
@@ -136,6 +138,77 @@ impl CancelFlag {
     }
 }
 
+// ── M0.6：Remote 桥（草案 §2/§4）——spawn_remote ──────────────────────
+
+/// 远端结果（类型擦除；join 侧 `downcast` 取回具体值）。
+///
+/// `Send`：跨线程从 worker 回灌组合线程（O-6 纪律：跨线程经 join/channel
+/// 通信，不触碰组合线程资源）。
+pub type RemoteValue = Box<dyn Any + Send>;
+
+/// 远端 join（组合线程本地 future：await 即等待远端完成并回灌值）。
+pub type RemoteJoin<T> = LocalBoxFuture<T>;
+
+/// 远端请求载荷：Send 闭包（在 worker 侧执行；v1 经
+/// [`TokioRemote`] `spawn_blocking` 运行）。
+pub struct RemoteRequest(Box<dyn FnOnce() -> RemoteValue + Send>);
+
+impl RemoteRequest {
+    /// 构造请求（结果自动装箱为 [`RemoteValue`]）。
+    pub fn boxed<T: Any + Send>(f: impl FnOnce() -> T + Send + 'static) -> Self {
+        Self(Box::new(move || Box::new(f()) as RemoteValue))
+    }
+}
+
+impl<F> From<F> for RemoteRequest
+where
+    F: FnOnce() -> RemoteValue + Send + 'static,
+{
+    fn from(f: F) -> Self {
+        Self(Box::new(f))
+    }
+}
+
+/// 远端执行器（草案 §2 的 pending-set 泛化；评审点 G）。
+///
+/// v1 唯一实现 [`TokioRemote`]（`spawn_blocking` 分池）；**WasmRemote**
+/// 为 M1 宿主驱动协议（PR #11–13）的接入点——guest 无自发线程，
+/// `submit` = 请求入队、宿主在 step 边界驱动并回填，语义不变。
+/// Phase 0 不实现 WasmRemote，接入位置即本 trait。
+pub trait Remote: 'static {
+    /// 提交请求，返回可 await 的 join。
+    fn submit(&self, req: RemoteRequest) -> RemoteJoin<RemoteValue>;
+}
+
+/// TokioRemote v1：把 Send 闭包提交到宿主提供的多线程 worker runtime 的
+/// blocking pool（`Handle::spawn_blocking`），join 回灌组合线程。
+///
+/// **生命周期**：`worker`（[`tokio::runtime::Handle`]）须比本桥存活更久
+/// （worker runtime 关闭后 submit 会 panic = 宿主配置错误 = bug）。
+/// **O-6 纪律**：worker 侧不得触碰组合线程资源（core/LocalSet）——仅限
+/// 纯外部 IO / CPU 密集计算，否则死锁。
+pub struct TokioRemote {
+    worker: tokio::runtime::Handle,
+}
+
+impl TokioRemote {
+    /// 以宿主 worker runtime 的句柄构造。
+    pub fn new(worker: tokio::runtime::Handle) -> Self {
+        Self { worker }
+    }
+}
+
+impl Remote for TokioRemote {
+    fn submit(&self, req: RemoteRequest) -> RemoteJoin<RemoteValue> {
+        let handle = self.worker.spawn_blocking(move || req.0());
+        Box::pin(async move {
+            handle
+                .await
+                .expect("远端任务 panic = 宿主 bug（O-6：远端不得触碰组合线程资源）")
+        }) as LocalBoxFuture<RemoteValue>
+    }
+}
+
 /// async 段可用的上下文（草案 §2）。
 ///
 /// 持有组合线程 `Rc<Context>`（非 Send，仅本线程 LocalSet 内使用）；
@@ -146,6 +219,8 @@ pub struct AsyncCx {
     pub(crate) fiber: FiberId,
     pub(crate) cancel: CancelFlag,
     pub(crate) generation: u64,
+    /// Remote 桥（M0.6；未安装时 `spawn_remote` panic = 宿主配置错误）。
+    pub(crate) remote: Option<Rc<dyn Remote>>,
 }
 
 impl AsyncCx {
@@ -171,6 +246,21 @@ impl AsyncCx {
     /// 取消通道（卸载/目标变更时触发——注册器逆 cancel）。
     pub fn cancellation(&self) -> &CancelFlag {
         &self.cancel
+    }
+
+    /// pending-set 泛化（草案 §2）：把请求交给远端 worker，返回可 await
+    /// 的 join（组合线程 await，跨线程回灌；O-6：worker 侧不触碰组合线程
+    /// 资源）。v1 唯一实现 [`TokioRemote`]；WasmRemote 为 M1 接入点。
+    ///
+    /// **前置**：宿主须先 `AsyncRuntime::set_remote`——未安装时 panic
+    /// （宿主配置错误 = bug，契约 C-3 同款诊断）。
+    pub fn spawn_remote(&self, req: impl Into<RemoteRequest>) -> RemoteJoin<RemoteValue> {
+        match &self.remote {
+            Some(remote) => remote.submit(req.into()),
+            None => panic!(
+                "spawn_remote：未安装 Remote（宿主须先 AsyncRuntime::set_remote；配置错误 = bug）"
+            ),
+        }
     }
 
     /// 本 fiber 名。
@@ -426,6 +516,7 @@ struct AsyncRegistrar {
     inner: Rc<dyn Component>,
     behavior: Box<dyn AsyncBehavior>,
     entry: Rc<AsyncFiberEntry>,
+    remote: Option<Rc<dyn Remote>>,
 }
 
 impl AsyncRegistrar {
@@ -433,11 +524,13 @@ impl AsyncRegistrar {
         inner: Rc<dyn Component>,
         behavior: Box<dyn AsyncBehavior>,
         entry: Rc<AsyncFiberEntry>,
+        remote: Option<Rc<dyn Remote>>,
     ) -> Self {
         Self {
             inner,
             behavior,
             entry,
+            remote,
         }
     }
 }
@@ -468,6 +561,7 @@ impl Component for AsyncRegistrar {
             fiber: fiber_id,
             cancel: cancel.clone(),
             generation,
+            remote: self.remote.clone(),
         };
         let iter = self.behavior.apply_async(cx.clone(), config);
         let entry = Rc::clone(&self.entry);
@@ -542,6 +636,7 @@ pub struct AsyncRuntime {
     core: Rc<Runtime>,
     tails: Rc<TailQueue>,
     entries: Rc<EntryRegistry>,
+    remote: RefCell<Option<Rc<dyn Remote>>>,
 }
 
 impl AsyncRuntime {
@@ -557,7 +652,15 @@ impl AsyncRuntime {
             core: Rc::clone(ctx.runtime()),
             tails: Rc::new(TailQueue::default()),
             entries: Rc::new(RefCell::new(HashMap::new())),
+            remote: RefCell::new(None),
         })
+    }
+
+    /// 安装 Remote 桥（M0.6；v1：[`TokioRemote`]，WasmRemote 为 M1 接入
+    /// 点）。须在 [`Self::use_component`] / [`Self::wrap_component`] 之前
+    /// 调用（注册器捕获桥句柄）；覆盖幂等。
+    pub fn set_remote(&self, remote: Rc<dyn Remote>) {
+        *self.remote.borrow_mut() = Some(remote);
     }
 
     /// 挂载 async 组件（草案 §3.1）：sync 包装（`d/p` 取自 `comp`）+
@@ -576,6 +679,7 @@ impl AsyncRuntime {
             comp,
             Box::new(behavior),
             Rc::clone(&entry),
+            self.remote.borrow().clone(),
         ));
         let fiber = ctx.use_component(registrar, config)?;
         // 条目登记由 apply 自登记完成（fiber id 已知时刻）；此处只返回。
@@ -594,7 +698,12 @@ impl AsyncRuntime {
     ) -> Rc<dyn Component> {
         let entry = AsyncFiberEntry::new(Rc::clone(&self.tails));
         entry.attach_registry(Rc::clone(&self.entries));
-        Rc::new(AsyncRegistrar::new(comp, Box::new(behavior), entry))
+        Rc::new(AsyncRegistrar::new(
+            comp,
+            Box::new(behavior),
+            entry,
+            self.remote.borrow().clone(),
+        ))
     }
 
     /// 条目查询（失败通道/复活路径状态检查用；已淘汰条目返回 `None`）。
