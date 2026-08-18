@@ -15,4 +15,5 @@ cordis-core = { path = "../cordis-core" }
 tokio = { version = "1", features = ["rt"] }
 
 [dev-dependencies]
+cordis-loader = { path = "../cordis-loader" }
 tokio = { version = "1", features = ["rt", "macros", "sync"] }

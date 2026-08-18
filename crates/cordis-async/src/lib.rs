@@ -4,7 +4,8 @@
 //! 协议（AsyncEffectIter）、取消/错误通道、可 await 卸载编排（两阶段
 //! 卸载 + settle + 代次）、Remote 桥。驱动引擎（`drive`/I-1/I-2）于
 //! M0.2 实现；生命周期核心（AsyncRegistrar/AsyncFiberEntry/TailQueue/
-//! settle，I-3 + drain 重入）于 M0.3 实现。
+//! settle，I-3 + drain 重入）于 M0.3 实现；失败通道（I-4 自退役 +
+//! disabled 写回 + 复活、C-7 shutdown 双真）于 M0.4 实现。
 //!
 //! 依据：`docs/cordis-async-protocol-draft.md` v1.4（冻结）；
 //! 执行计划 `docs/cordis-async-PHASE0-PLAN.md`（含里程碑间独立审查硬门禁）。
@@ -103,12 +104,13 @@ use cordis_core::context::Context;
 use cordis_core::effect::once;
 use cordis_core::key::Key;
 use cordis_core::{
-    Disposer, EffectIter, Fiber, FiberId, KeySet, RegistryError, Runtime, StoreError, View,
+    Disposer, EffectIter, Fiber, FiberId, FiberState, KeySet, RegistryError, Runtime, StoreError,
+    View,
 };
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use tokio::task::JoinHandle;
 
 /// 取消标志（草案 §2 取消通道的同步实现；单线程组合线程下 `Cell` 足够）：
@@ -246,6 +248,11 @@ impl TailQueue {
         });
     }
 
+    /// 无待收尾巴（async 视图静止判定 I-4 用）。
+    fn is_empty(&self) -> bool {
+        self.inner.borrow().is_empty()
+    }
+
     /// FIFO 排空（阶段 2）：逐个 await drive 任务收尾 → take 共享槽 →
     /// await 异步逆。逆可能注册**新的** async 效应（合法收尾逻辑）→ 入队
     /// → 下一轮排空；超过 `MAX_DRAIN_ROUNDS` 轮 = 尾巴自再生死循环，
@@ -280,13 +287,35 @@ impl TailQueue {
     }
 }
 
+/// 一次激活的记账会话（M0.4 起）：drive 任务、注册器逆与 shutdown 兜底
+/// 共享的三件套（取消标志/任务句柄/共享槽）。`handle` 不可克隆——单一
+/// 持有者 = 条目；逆与兜底经 [`AsyncFiberEntry::take_session`] 取走
+/// （O(1)、幂等、代次核对）。
+struct ActiveSession {
+    generation: u64,
+    cancel: CancelFlag,
+    handle: JoinHandle<()>,
+    slot: Rc<RefCell<Option<AsyncDisposer>>>,
+}
+
+/// 条目登记表（fiber id → 条目弱引用；AsyncRuntime 持有，条目 apply 时
+/// 自登记；Weak 值 = 惰性淘汰，无回边）。
+type EntryRegistry = RefCell<HashMap<FiberId, Weak<AsyncFiberEntry>>>;
+
 /// AsyncRuntime 注册表条目（评审点 B：**无回边到 AsyncRuntime**——否则
 /// 形成 `AsyncRuntime → core → fiber → 注册器逆闭包 → 条目 → AsyncRuntime`
-/// 引用环，关停泄漏。条目只持有尾部队列 Rc 与自身状态，环不存在）。
+/// 引用环，关停泄漏。条目只持有尾部队列 Rc、fiber 弱引用与自身状态，
+/// 环不存在）。
 pub struct AsyncFiberEntry {
     state: RefCell<AsyncFiberState>,
     generation: Cell<u64>,
     queue: Rc<TailQueue>,
+    /// 激活会话（当前代；卸载/兜底时取走）。
+    session: RefCell<Option<ActiveSession>>,
+    /// 所属 fiber（Weak 防环；apply 时经 runtime 反查 adopt）。
+    fiber: RefCell<Option<Weak<Fiber>>>,
+    /// AsyncRuntime 登记表句柄（apply 时自登记；值 Weak——无回边，惰性淘汰）。
+    registry: RefCell<Option<Rc<EntryRegistry>>>,
 }
 
 impl AsyncFiberEntry {
@@ -295,11 +324,27 @@ impl AsyncFiberEntry {
             state: RefCell::new(AsyncFiberState::Idle),
             generation: Cell::new(0),
             queue,
+            session: RefCell::new(None),
+            fiber: RefCell::new(None),
+            registry: RefCell::new(None),
         })
     }
 
+    /// 绑定 AsyncRuntime 登记表（构造时；值 Weak 无回边）。
+    fn attach_registry(&self, registry: Rc<EntryRegistry>) {
+        *self.registry.borrow_mut() = Some(registry);
+    }
+
+    /// apply 时自登记（fiber id 此刻已知；use_component 与 wrap_component
+    /// 统一走此路径）。
+    fn self_register(self: &Rc<Self>, id: FiberId) {
+        if let Some(registry) = self.registry.borrow().as_ref() {
+            registry.borrow_mut().insert(id, Rc::downgrade(self));
+        }
+    }
+
     /// 激活：分配新代次并复位状态（幂等；重复调用仅再换代——复活路径
-    /// 复用，M0.4）。
+    /// 复用）。
     fn begin_activation(&self) -> u64 {
         let g = self.generation.get() + 1;
         self.generation.set(g);
@@ -317,6 +362,32 @@ impl AsyncFiberEntry {
         self.queue.enqueue_tail(generation, handle, slot);
     }
 
+    /// 关联所属 fiber（apply 时经 runtime 反查 adopt；Weak 防环）。
+    fn adopt_fiber(&self, fiber: &Rc<Fiber>) {
+        *self.fiber.borrow_mut() = Some(Rc::downgrade(fiber));
+    }
+
+    /// 所属 fiber（upgrade；未 adopt / 已释放时 None）。
+    fn fiber_rc(&self) -> Option<Rc<Fiber>> {
+        self.fiber.borrow().as_ref().and_then(|w| w.upgrade())
+    }
+
+    /// 登记激活会话（apply 步执行时；覆盖旧代——旧代会话已被其逆取走）。
+    fn install_session(&self, session: ActiveSession) {
+        *self.session.borrow_mut() = Some(session);
+    }
+
+    /// 取走激活会话（注册器逆 / shutdown 兜底；代次核对防串代；幂等——
+    /// 先取者得，后取者得 None 即跳过）。
+    fn take_session(&self, generation: u64) -> Option<ActiveSession> {
+        let mut session = self.session.borrow_mut();
+        if session.as_ref().is_some_and(|s| s.generation == generation) {
+            session.take()
+        } else {
+            None
+        }
+    }
+
     /// 状态标记（评审点 H 决议：退化为纯状态标记；代次不匹配 = 旧代尾巴
     /// 迟到，跳过——不影响记账正确性，记账只有 settle 的 take 一条通道）。
     fn mark_running(&self, generation: u64) {
@@ -325,11 +396,25 @@ impl AsyncFiberEntry {
         }
     }
 
-    /// 失败静止（I-4 前件；M0.4 扩展：自退役 + disabled 写回）。
+    /// 失败静止 + 自退役（草案 §3.3；I-4）：代次匹配 → `Failed(ζ)` 静止
+    /// 终态；随后 `fiber.retire()`——loader retire hook 写回条目
+    /// `disabled = true`（G1 通道）、core 级联卸载依赖者（sync 部分），
+    /// 尾巴由 settle 收尾（失败路径 slot 留空——无 disposer，评审点 H）。
+    /// 复活 = 编排方重启用（loader 重载 / 重建）→ 新代 `begin_activation`
+    /// + 新 drive spawn。
     fn on_failed(&self, generation: u64, error: AsyncFiberError) {
-        if self.generation.get() == generation {
-            *self.state.borrow_mut() = AsyncFiberState::Failed(error);
+        if self.generation.get() != generation {
+            return;
         }
+        *self.state.borrow_mut() = AsyncFiberState::Failed(error);
+        if let Some(fiber) = self.fiber_rc() {
+            fiber.retire();
+        }
+    }
+
+    /// 当前状态（失败通道/复活路径测试与门面查询用）。
+    pub fn state(&self) -> AsyncFiberState {
+        self.state.borrow().clone()
     }
 }
 
@@ -371,6 +456,12 @@ impl Component for AsyncRegistrar {
         let fiber_id = ctx
             .fiber()
             .expect("AsyncRegistrar::apply 仅在 fiber 上下文执行");
+        // 关联 fiber（自退役/复活路径需要；Weak 防环）并自登记（fiber id
+        // 此刻已知——use_component / wrap_component 统一）。
+        if let Some(fiber) = ctx.runtime().fiber(fiber_id) {
+            self.entry.adopt_fiber(&fiber);
+        }
+        self.entry.self_register(fiber_id);
         let cancel = CancelFlag::default();
         let cx = AsyncCx {
             ctx: Rc::clone(&ctx),
@@ -418,31 +509,39 @@ impl Component for AsyncRegistrar {
                     }
                 }
             });
-            // 本步逆（契约 C-6）：只做两件快事——cancel + enqueue_tail，
-            // O(1)、不 await、不 panic、不再借其他 RefCell（core 卸载路径
-            // 要求逆绝对干净，panic = 宿主 bug）。
+            // 记账会话入条目（逆与 shutdown 兜底共享；`handle` 不可克隆，
+            // 单一持有者 = 条目——M0.4 起，替代逆直接捕获三件套）。
+            entry.install_session(ActiveSession {
+                generation,
+                cancel: cancel.clone(),
+                handle,
+                slot: Rc::clone(&slot),
+            });
+            // 本步逆（契约 C-6 精神）：O(1) 取会话 → cancel + enqueue_tail；
+            // 不 await、不 panic、不再借其他 RefCell。take 幂等——shutdown
+            // 兜底先取走时本逆跳过（收账仍由 settle 完成）。
             let entry = Rc::clone(&entry);
-            let slot = Rc::clone(&slot);
-            let cancel = cancel.clone();
             Box::new(move || {
-                cancel.cancel();
-                entry.enqueue_tail(generation, handle, slot);
+                if let Some(s) = entry.take_session(generation) {
+                    s.cancel.cancel();
+                    entry.enqueue_tail(generation, s.handle, s.slot);
+                }
             }) as Disposer
         })))
     }
 }
 
-/// async 视图的运行时门面（草案 §5 的 M0.3 部分：挂载 + settle）。
+/// async 视图的运行时门面（草案 §5 的 M0.3–M0.4 部分：挂载 + settle +
+/// 失败通道 + 关停）。
 ///
-/// 持有 core [`Runtime`]（生命周期对齐）、全局收尾队列与注册表条目。
-/// M0.4 失败通道（retire/disabled/复活）、M0.5 门面完备
-/// （update/shutdown/is_quiet/代次）在此之上扩展。
+/// 持有 core [`Runtime`]（生命周期对齐）、全局收尾队列与注册表条目
+/// （`Weak` 值：条目随 fiber/任务释放自然消亡，惰性淘汰——REVIEW-83c254a
+/// nit-3 落地；条目在 apply 时经 registry 句柄自登记，use_component 与
+/// wrap_component 统一）。M0.5 门面完备（update/代次）在此之上扩展。
 pub struct AsyncRuntime {
-    #[allow(dead_code)] // M0.5 shutdown 双真断言使用
     core: Rc<Runtime>,
     tails: Rc<TailQueue>,
-    #[allow(dead_code)] // M0.4 失败通道按 fiber 查条目使用
-    entries: RefCell<HashMap<FiberId, Rc<AsyncFiberEntry>>>,
+    entries: Rc<EntryRegistry>,
 }
 
 impl AsyncRuntime {
@@ -457,7 +556,7 @@ impl AsyncRuntime {
         Rc::new(Self {
             core: Rc::clone(ctx.runtime()),
             tails: Rc::new(TailQueue::default()),
-            entries: RefCell::new(HashMap::new()),
+            entries: Rc::new(RefCell::new(HashMap::new())),
         })
     }
 
@@ -472,19 +571,88 @@ impl AsyncRuntime {
         config: Rc<dyn Any>,
     ) -> Result<Rc<Fiber>, RegistryError> {
         let entry = AsyncFiberEntry::new(Rc::clone(&self.tails));
+        entry.attach_registry(Rc::clone(&self.entries));
         let registrar = Rc::new(AsyncRegistrar::new(
             comp,
             Box::new(behavior),
             Rc::clone(&entry),
         ));
         let fiber = ctx.use_component(registrar, config)?;
-        self.entries.borrow_mut().insert(fiber.id(), entry);
+        // 条目登记由 apply 自登记完成（fiber id 已知时刻）；此处只返回。
+        let _ = entry;
         Ok(fiber)
+    }
+
+    /// 构造「sync 组件 + async 行为」的注册器组件（loader 集成用：
+    /// `loader.register_component(name, rt.wrap_component(comp, behavior))`
+    /// 后经 `loader.apply` 挂载）。条目同样自登记（apply 时），参与
+    /// shutdown 兜底枚举与 [`Self::is_quiet`]。
+    pub fn wrap_component(
+        &self,
+        comp: Rc<dyn Component>,
+        behavior: impl AsyncBehavior,
+    ) -> Rc<dyn Component> {
+        let entry = AsyncFiberEntry::new(Rc::clone(&self.tails));
+        entry.attach_registry(Rc::clone(&self.entries));
+        Rc::new(AsyncRegistrar::new(comp, Box::new(behavior), entry))
+    }
+
+    /// 条目查询（失败通道/复活路径状态检查用；已淘汰条目返回 `None`）。
+    pub fn entry(&self, id: FiberId) -> Option<Rc<AsyncFiberEntry>> {
+        self.entries.borrow().get(&id).and_then(|w| w.upgrade())
     }
 
     /// 两阶段卸载阶段 2（草案 §3.2）：FIFO 排空收尾队列（I-3 序免费来自
     /// core sync 级联的入队序）。await 本方法直至全部尾巴 settle。
     pub async fn settle(&self) {
         self.tails.settle().await;
+    }
+
+    /// async 视图静止判定（I-4）：**无待收尾巴** 且 **无仍 Active 的
+    /// async 组件**——`Failed` 视为静止（自退役后 fiber 即 Inactive）。
+    ///
+    /// 与 core [`Runtime::is_quiet`] 的差异（C-7 双真断言的一致性基础）：
+    /// core 把 `Active` 视为静止（无在途转换）；async 视图要求关停后
+    /// 不再有任何运行的 async 组件——编排方未退役即关停时本方法为假，
+    /// 双真断言得以暴露违约。
+    pub fn is_quiet(&self) -> bool {
+        self.tails.is_empty()
+            && self.entries.borrow().values().all(|w| {
+                w.upgrade().is_none_or(|entry| {
+                    entry
+                        .fiber_rc()
+                        .is_none_or(|f| !matches!(*f.state(), FiberState::Active { .. }))
+                })
+            })
+    }
+
+    /// 关停（契约 C-7）：编排方**先行退役**（facade retire-all / loader
+    /// teardown，hooks 按既有过滤语义处理、退役零配置污染）；本方法兜底
+    /// ——对仍 `Active` 的 async fiber 执行注册器逆（cancel +
+    /// enqueue_tail 收账，经条目激活会话），但**不代做 core 退役**；随后
+    /// settle 到静止，并断言 `core.is_quiet() ∧ async.is_quiet()` **双真**
+    /// （正式 assert——开放项 §4 决议）。编排方未退役即关停 = 调用方
+    /// 违约，断言失败暴露。
+    pub async fn shutdown(&self) {
+        let actives: Vec<Rc<AsyncFiberEntry>> = self
+            .entries
+            .borrow()
+            .values()
+            .filter_map(|w| w.upgrade())
+            .collect();
+        for entry in actives {
+            let active = entry
+                .fiber_rc()
+                .is_some_and(|f| matches!(*f.state(), FiberState::Active { .. }));
+            if active && let Some(s) = entry.take_session(entry.generation.get()) {
+                s.cancel.cancel();
+                entry.enqueue_tail(entry.generation.get(), s.handle, s.slot);
+            }
+        }
+        self.settle().await;
+        assert!(
+            self.core.is_quiet() && self.is_quiet(),
+            "shutdown 双真断言（契约 C-7）：编排方应先退役再关停——core 或 async 视图仍有活动/在途尾巴"
+        );
     }
 }

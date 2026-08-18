@@ -223,7 +223,7 @@ mod m03 {
     }
 
     /// sync 壳组件：只贡献 d/p（AsyncRegistrar 不调用内层 apply）。
-    struct Shell {
+    pub(super) struct Shell {
         inject: Vec<&'static str>,
         provide: Vec<&'static str>,
     }
@@ -241,7 +241,7 @@ mod m03 {
                 provide: keys.to_vec(),
             }
         }
-        fn empty() -> Self {
+        pub(super) fn empty() -> Self {
             Self {
                 inject: Vec::new(),
                 provide: Vec::new(),
@@ -271,7 +271,7 @@ mod m03 {
     }
 
     /// 异步逆：yield 一拍后记录 `{label}:inverse`（settle 的 async 逆路径）。
-    fn async_inverse(log: &Log, label: &'static str) -> AsyncDisposer {
+    pub(super) fn async_inverse(log: &Log, label: &'static str) -> AsyncDisposer {
         let log = Rc::clone(log);
         Box::new(move || {
             let log = Rc::clone(&log);
@@ -283,11 +283,11 @@ mod m03 {
     }
 
     /// 单步行为：`run` 时记 `{label}:run`（可选：顺带绑定 KeyDep），
-    /// 逆记 `{label}:inverse`（真实 async 逆）。
-    struct OneShotBehavior {
-        label: &'static str,
-        log: Log,
-        provide_dep: bool,
+    /// 逆记 `{label}:inverse`（真实 async 逆）。m04 复用故 pub(super)。
+    pub(super) struct OneShotBehavior {
+        pub(super) label: &'static str,
+        pub(super) log: Log,
+        pub(super) provide_dep: bool,
     }
 
     impl AsyncBehavior for OneShotBehavior {
@@ -606,6 +606,219 @@ mod m03 {
                 }
                 first.retire();
                 rt.settle().await; // 每轮逆再挂一个 → 第 65 轮守卫 panic
+            })
+            .await;
+    }
+}
+
+// ── M0.4（草案 §3.3）：失败通道——I-4 + 关停（C-7 / 测试 11）───────────
+
+mod m04 {
+    use super::Log;
+    use super::m03::{OneShotBehavior, Shell, async_inverse};
+    use cordis_async::{
+        AsyncBehavior, AsyncCx, AsyncEffectIter, AsyncFiberError, AsyncFiberState, AsyncRuntime,
+        AsyncStep, LocalBoxFuture,
+    };
+    use cordis_core::Context;
+    use cordis_loader::{Entry, Loader};
+    use std::any::Any;
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    /// 首次激活失败、复活后成功的单步行为（attempts 跨激活共享）。
+    struct FailOnceBehavior {
+        log: Log,
+        attempts: Rc<Cell<u32>>,
+    }
+
+    impl AsyncBehavior for FailOnceBehavior {
+        fn apply_async(&self, _cx: AsyncCx, _config: &dyn Any) -> Box<dyn AsyncEffectIter> {
+            Box::new(FailOnceIter {
+                log: Rc::clone(&self.log),
+                attempts: Rc::clone(&self.attempts),
+                done: false,
+            })
+        }
+    }
+
+    struct FailOnceIter {
+        log: Log,
+        attempts: Rc<Cell<u32>>,
+        done: bool,
+    }
+
+    impl AsyncEffectIter for FailOnceIter {
+        fn next(&mut self) -> LocalBoxFuture<AsyncStep> {
+            assert!(!self.done, "单步迭代器至多一步");
+            self.done = true;
+            let n = self.attempts.get() + 1;
+            self.attempts.set(n);
+            let log = Rc::clone(&self.log);
+            Box::pin(async move {
+                if n == 1 {
+                    // 首次：组件运行时失败（值通道，非 panic）。
+                    log.borrow_mut().push("fail:run".into());
+                    AsyncStep::Failed(AsyncFiberError::new("boom"))
+                } else {
+                    log.borrow_mut().push("revive:run".into());
+                    AsyncStep::Finished(async_inverse(&log, "revive"))
+                }
+            })
+        }
+    }
+
+    /// I-4（草案 §3.3）：`Failed` → 静止终态 + 自退役（loader G1 通道
+    /// 写回 disabled）+ settle 恒可完成 + is_quiet 真 + 重启用复活（重建
+    /// → 新代 drive spawn）。
+    #[tokio::test]
+    async fn i4_failed_settles_quiet_writeback_and_revive() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let ctx = Context::new();
+                let rt = AsyncRuntime::new(&ctx);
+                let log: Log = Rc::new(RefCell::new(Vec::new()));
+
+                let loader = Rc::new(Loader::new(Rc::clone(ctx.runtime())));
+                loader.register_retire_hook();
+                let comp = rt.wrap_component(
+                    Rc::new(Shell::empty()),
+                    FailOnceBehavior {
+                        log: Rc::clone(&log),
+                        attempts: Rc::new(Cell::new(0)),
+                    },
+                );
+                loader.register_component("failing", comp);
+                loader.apply(&[Entry::new("failing", "failing", Rc::new(()), 0, false)]);
+                // 激活即 Active（无依赖）；drive 失败是异步的——先取 fiber id。
+                let fid = loader.fiber("failing").expect("已激活").id();
+
+                // 等失败落地：drive → Failed → on_failed 自退役 → loader 写回。
+                for _ in 0..64 {
+                    tokio::task::yield_now().await;
+                    if loader.entry_disabled("failing") == Some(true) {
+                        break;
+                    }
+                }
+                assert_eq!(
+                    loader.entry_disabled("failing"),
+                    Some(true),
+                    "G1 通道：自退役经 retire hook 写回条目 disabled"
+                );
+                assert!(
+                    matches!(
+                        rt.entry(fid).expect("条目存在").state(),
+                        AsyncFiberState::Failed(_)
+                    ),
+                    "I-4：失败 = 静止终态"
+                );
+
+                // settle 恒可完成（失败路径 slot 留空、tail 正常收账）。
+                rt.settle().await;
+                assert!(rt.is_quiet(), "I-4：settle 后静止（Failed 视为静止）");
+
+                // 复活：编排方重启用（disabled=false 重载）→ loader 重建 →
+                // 新代 begin_activation + 新 drive spawn → 成功。
+                loader.apply(&[Entry::new("failing", "failing", Rc::new(()), 0, false)]);
+                for _ in 0..64 {
+                    tokio::task::yield_now().await;
+                    if log.borrow().iter().any(|l| l == "revive:run") {
+                        break;
+                    }
+                }
+                assert!(
+                    log.borrow().iter().any(|l| l == "revive:run"),
+                    "复活：新代 drive 成功运行"
+                );
+                assert!(
+                    matches!(
+                        rt.entry(fid).expect("条目存在").state(),
+                        AsyncFiberState::Running { generation: 2 }
+                    ),
+                    "复活：同一注册器条目换代（gen=2）并运行"
+                );
+            })
+            .await;
+    }
+
+    /// 测试 11（契约 C-7）：编排方退役（loader teardown）→ shutdown 双真
+    /// 断言通过；退役零配置污染（loader 驱动退役不写回 disabled）。
+    #[tokio::test]
+    async fn shutdown_after_orchestrator_retire_is_double_quiet() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let ctx = Context::new();
+                let rt = AsyncRuntime::new(&ctx);
+                let log: Log = Rc::new(RefCell::new(Vec::new()));
+
+                let loader = Rc::new(Loader::new(Rc::clone(ctx.runtime())));
+                loader.register_retire_hook();
+                let comp = rt.wrap_component(
+                    Rc::new(Shell::empty()),
+                    OneShotBehavior {
+                        label: "svc",
+                        log: Rc::clone(&log),
+                        provide_dep: false,
+                    },
+                );
+                loader.register_component("svc", comp);
+                loader.apply(&[Entry::new("svc", "svc", Rc::new(()), 0, false)]);
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+                assert!(
+                    log.borrow().iter().any(|l| l == "svc:run"),
+                    "drive 完成（slot 填账）"
+                );
+
+                // 编排方退役：loader teardown（条目移除 → 退役 + 卸载）。
+                loader.apply(&[]);
+                assert_eq!(
+                    loader.entry_disabled("svc"),
+                    None,
+                    "退役零配置污染：loader 驱动退役不写回 disabled（条目已移除，hook 过滤）"
+                );
+
+                // shutdown：兜底无事可做 → settle → 双真断言通过。
+                rt.shutdown().await;
+                assert!(rt.is_quiet(), "shutdown 后 async 视图静止");
+            })
+            .await;
+    }
+
+    /// 测试 11（契约 C-7 违约捕获）：编排方**未退役**即 shutdown → async
+    /// 侧兜底收账（cancel + enqueue + settle 完成），core 侧仍有 Active
+    /// fiber → 双真断言失败 panic（正式 assert，开放项 §4 决议）。
+    #[tokio::test]
+    #[should_panic(expected = "shutdown 双真断言")]
+    async fn shutdown_without_orchestrator_retire_panics() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let ctx = Context::new();
+                let rt = AsyncRuntime::new(&ctx);
+                let log: Log = Rc::new(RefCell::new(Vec::new()));
+
+                let fiber = rt
+                    .use_component(
+                        &ctx,
+                        Rc::new(Shell::empty()),
+                        OneShotBehavior {
+                            label: "svc",
+                            log: Rc::clone(&log),
+                            provide_dep: false,
+                        },
+                        Rc::new(()) as Rc<dyn Any>,
+                    )
+                    .expect("挂载");
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+                assert!(log.borrow().iter().any(|l| l == "svc:run"));
+
+                // 未退役：shutdown 兜底 cancel+enqueue → settle 收账 → core
+                // 仍有 Active fiber → 双真断言失败（调用方违约）。
+                let _ = fiber;
+                rt.shutdown().await;
             })
             .await;
     }
