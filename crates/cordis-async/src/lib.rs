@@ -658,7 +658,11 @@ impl AsyncRuntime {
 
     /// 安装 Remote 桥（M0.6；v1：[`TokioRemote`]，WasmRemote 为 M1 接入
     /// 点）。须在 [`Self::use_component`] / [`Self::wrap_component`] 之前
-    /// 调用（注册器捕获桥句柄）；覆盖幂等。
+    /// 调用（注册器**快照**捕获桥句柄）；覆盖幂等。
+    ///
+    /// **快照语义（REVIEW-4f1e555 nit-2）**：覆盖只影响随后
+    /// `use_component`/`wrap_component` 快照的组合；**已挂载**注册器不
+    /// 回溯（保持首次捕获，多为 `None`）——更换桥后需重挂载生效。
     pub fn set_remote(&self, remote: Rc<dyn Remote>) {
         *self.remote.borrow_mut() = Some(remote);
     }

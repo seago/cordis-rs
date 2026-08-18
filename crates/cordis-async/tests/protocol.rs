@@ -1307,4 +1307,126 @@ mod m06 {
         });
         // worker 在此 drop——block_on 已返回（非 async 上下文）✓
     }
+
+    /// 慢计算行为：远端闭包 sleep 构造「join 挂起中组件被卸载」窗口；
+    /// 结果携带 worker 线程 id（O-6 线程隔离断言用）。
+    struct SlowRemoteBehavior {
+        log: Log,
+        combo_tid: std::thread::ThreadId,
+    }
+
+    impl AsyncBehavior for SlowRemoteBehavior {
+        fn apply_async(&self, cx: AsyncCx, _config: &dyn Any) -> Box<dyn AsyncEffectIter> {
+            Box::new(SlowRemoteIter {
+                cx,
+                log: Rc::clone(&self.log),
+                combo_tid: self.combo_tid,
+                done: false,
+            })
+        }
+    }
+
+    struct SlowRemoteIter {
+        cx: AsyncCx,
+        log: Log,
+        combo_tid: std::thread::ThreadId,
+        done: bool,
+    }
+
+    impl AsyncEffectIter for SlowRemoteIter {
+        fn next(&mut self) -> LocalBoxFuture<AsyncStep> {
+            assert!(!self.done, "单步迭代器至多一步");
+            self.done = true;
+            let cx = self.cx.clone();
+            let log = Rc::clone(&self.log);
+            let combo_tid = self.combo_tid;
+            Box::pin(async move {
+                log.borrow_mut().push("submit".into());
+                let join = cx.spawn_remote(|| -> RemoteValue {
+                    // 慢计算（blocking 池）：构造卸载时仍在途的窗口。
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    Box::new((7u32, std::thread::current().id()))
+                });
+                let value = join.await;
+                let (n, worker_tid) = *value
+                    .downcast::<(u32, std::thread::ThreadId)>()
+                    .expect("远端结果类型");
+                assert_eq!(n, 7, "远端计算回灌正确");
+                assert_ne!(
+                    worker_tid, combo_tid,
+                    "O-6 线程隔离：计算发生在 worker 线程（非组合线程）"
+                );
+                log.borrow_mut().push("joined".into());
+                AsyncStep::Finished(async_inverse_owned(&log, "remote".into()))
+            })
+        }
+    }
+
+    /// 卸载取消 × 跨线程 await 交互（REVIEW-4f1e555 minor-1）：join 挂起
+    /// 期间组件被退役 → settle 等待在途 join 完成（I-2 跨线程版：在途步
+    /// 不中断、逆照常入账）→ 逆恰一次收账；顺带直证 O-6 线程隔离（nit-1：
+    /// 闭包执行线程 ≠ 组合线程）。worker 线程调度依赖假设（nit-3）：远端
+    /// 50ms sleep 远小于 64 次 yield 轮询窗口，break-on-condition 即就绪
+    /// 即停；若调度极端慢导致断言失败，属调度依赖而非 flaky 主诉。
+    #[test]
+    fn unload_during_pending_remote_join_settles_and_isolates_threads() {
+        let worker = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .build()
+            .expect("worker runtime");
+        let combo = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("组合 runtime");
+        combo.block_on(async {
+            tokio::task::LocalSet::new()
+                .run_until(async {
+                    let combo_tid = std::thread::current().id();
+                    let ctx = Context::new();
+                    let rt = AsyncRuntime::new(&ctx);
+                    rt.set_remote(Rc::new(TokioRemote::new(worker.handle().clone())));
+                    let log: Log = Rc::new(RefCell::new(Vec::new()));
+
+                    let fiber = rt
+                        .use_component(
+                            &ctx,
+                            Rc::new(Shell::empty()),
+                            SlowRemoteBehavior {
+                                log: Rc::clone(&log),
+                                combo_tid,
+                            },
+                            Rc::new(()) as Rc<dyn Any>,
+                        )
+                        .expect("挂载");
+                    // 等 submit 落盘（join 在途——远端 sleep 中）。
+                    for _ in 0..64 {
+                        tokio::task::yield_now().await;
+                        if log.borrow().iter().any(|l| l == "submit") {
+                            break;
+                        }
+                    }
+                    assert!(
+                        log.borrow().iter().any(|l| l == "submit"),
+                        "join 已挂起（远端仍在算）"
+                    );
+
+                    // 卸载：逆 cancel + enqueue 在途 tail；settle 等待在途
+                    // join 完成（不中断）→ 步界退场 → 逆恰一次收账。
+                    rt.retire(&fiber);
+                    rt.settle().await;
+
+                    assert_eq!(
+                        *log.borrow(),
+                        vec![
+                            "submit".to_string(),
+                            "joined".to_string(),
+                            "rev:remote".to_string()
+                        ],
+                        "卸载不中止在途 join（I-2 跨线程版）；逆恰一次收账"
+                    );
+                    assert!(rt.is_quiet(), "收账后静止");
+                })
+                .await;
+        });
+        // worker 在此 drop——block_on 已返回（非 async 上下文）✓
+    }
 }
