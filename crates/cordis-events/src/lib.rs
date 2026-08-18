@@ -581,10 +581,7 @@ pub fn subscribe<P: Event>(
     // 订阅立即生效（once 回调同步执行）；逆 = 调 bus 退订的 disposer。
     let armed = ctx.effect(move || -> Box<dyn EffectIter> {
         let bus = Arc::clone(&bus);
-        Box::new(cordis_core::once(Box::new(move || {
-            let d = bus.on::<P>(listener);
-            d
-        })))
+        Box::new(cordis_core::once(Box::new(move || bus.on::<P>(listener))))
     });
     Ok(armed)
 }
@@ -598,8 +595,7 @@ pub fn subscribe_waterfall<P: Event>(
     Ok(ctx.effect(move || -> Box<dyn EffectIter> {
         let bus = Arc::clone(&bus);
         Box::new(cordis_core::once(Box::new(move || {
-            let d = bus.on_waterfall::<P>(listener);
-            d
+            bus.on_waterfall::<P>(listener)
         })))
     }))
 }
@@ -616,8 +612,7 @@ where
     Ok(ctx.effect(move || -> Box<dyn EffectIter> {
         let bus = Arc::clone(&bus);
         Box::new(cordis_core::once(Box::new(move || {
-            let d = bus.on_serial::<P, R>(listener);
-            d
+            bus.on_serial::<P, R>(listener)
         })))
     }))
 }
@@ -634,8 +629,7 @@ where
     Ok(ctx.effect(move || -> Box<dyn EffectIter> {
         let bus = Arc::clone(&bus);
         Box::new(cordis_core::once(Box::new(move || {
-            let d = bus.on_bail::<P, R>(listener);
-            d
+            bus.on_bail::<P, R>(listener)
         })))
     }))
 }
