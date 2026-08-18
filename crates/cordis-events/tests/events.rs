@@ -362,3 +362,78 @@ mod m13 {
         );
     }
 }
+
+// ── M1.4（草案 §2.2 E-1/E-2）：waterfall 短路 + 重入快照 ──────────────
+
+mod m14 {
+    use super::*;
+
+    /// #4 waterfall 短路：A 不调 next → 下游 B 与 terminal 均不执行。
+    #[test]
+    fn waterfall_short_circuit_skips_downstream_and_terminal() {
+        let bus = EventBus::new();
+        let log: Arc<RwLock<Vec<&'static str>>> = Arc::new(RwLock::new(Vec::new()));
+        // A：改造载荷后**不调 next**（短路）。
+        let _a = bus.on_waterfall::<Tick>({
+            let log = Arc::clone(&log);
+            move |p: &mut u32, _next: &dyn Fn(&mut u32)| {
+                log.write().unwrap().push("A");
+                *p = 5;
+            }
+        });
+        let _b = bus.on_waterfall::<Tick>({
+            let log = Arc::clone(&log);
+            move |p: &mut u32, next: &dyn Fn(&mut u32)| {
+                log.write().unwrap().push("B");
+                next(p);
+            }
+        });
+        let mut v = 0u32;
+        bus.waterfall::<Tick>(&mut v, |_p: &mut u32| {
+            log.write().unwrap().push("terminal");
+        });
+
+        assert_eq!(v, 5, "#4 短路：A 的载荷修改保留");
+        assert_eq!(
+            *log.read().unwrap(),
+            vec!["A"],
+            "#4 短路：B 与 terminal 均不执行"
+        );
+    }
+
+    /// #7 重入快照：派发中**注册**的新监听器本轮不触发、下一轮触发。
+    #[test]
+    fn dispatch_register_this_round_skipped_next_round_fires() {
+        let bus: Arc<EventBus> = Arc::new(EventBus::new());
+        let log: Arc<RwLock<Vec<String>>> = Arc::new(RwLock::new(Vec::new()));
+
+        // A1：执行时**注册** A2（捕获 bus：Send+Sync 允许）。
+        let _a1 = bus.on::<Tick>({
+            let bus = Arc::clone(&bus);
+            let log = Arc::clone(&log);
+            move |p: &u32| {
+                log.write().unwrap().push(format!("A1:{p}"));
+                let _d2 = bus.on::<Tick>({
+                    let log = Arc::clone(&log);
+                    move |p: &u32| log.write().unwrap().push(format!("A2:{p}"))
+                });
+            }
+        });
+
+        // 本轮：A1 触发、A2 不触发（快照已 collect，release-then-invoke）。
+        bus.emit::<Tick>(&1);
+        assert_eq!(
+            *log.read().unwrap(),
+            vec!["A1:1"],
+            "#7 派发中注册：本轮不触发（A2 缺席）"
+        );
+
+        // 下一轮：A2 触发（注册序：A1 先、A2 后）。
+        bus.emit::<Tick>(&2);
+        assert_eq!(
+            *log.read().unwrap(),
+            vec!["A1:1", "A1:2", "A2:2"],
+            "#7 下一轮：新注册 A2 触发（本轮 A1 亦触发，注册序）"
+        );
+    }
+}
