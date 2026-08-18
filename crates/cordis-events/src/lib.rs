@@ -232,6 +232,9 @@ impl EventBus {
 
     /// 订阅（serial 专用，草案 §2.1 方案 2）：listener 返回 `R`，serial
     /// 派发收集全部返回值（TS serial 的 sync 版）。
+    ///
+    /// 注（n-3''）：同一事件名的 `serial` R 与 `bail` R **相互独立**（Mode
+    /// 分键记各自的 R）——`on_serial<P, u32>` 与 `on_bail<P, String>` 可共存。
     pub fn on_serial<P: Event, R>(
         &self,
         listener: impl Fn(&P::Payload) -> R + Send + Sync + 'static,
@@ -552,4 +555,83 @@ impl Component for EventsProvider {
                 .expect("绑定 events")
         }))) as Box<dyn EffectIter>
     }
+}
+
+// ── 订阅即效应（草案 §3.1，M1.3）：订阅经 ctx.effect 落账 ────────────
+
+/// 便捷订阅（emit 专用，草案 §3.1 `subscribe`）：取总线（克隆 Arc、释放
+/// 借用）→ **`ctx.effect` 注册**（逆 = 退订，进 fiber ctx 累加器）→ 返回
+/// 幂等 disposer。结果 = **订阅随 fiber 卸载自动退订**（TS `ctx.on` 语义
+/// 等价物；spike S1 已固化）。
+///
+/// 返回的 disposer 与 ctx.effect 逆共享 armed——手动 dispose 与 fiber 卸载
+/// 双路径撤销至多生效一次（E-3 / 草案 §2.1 幂等语义的 Rust 双路径形态）。
+///
+/// **前置**：总线须经 [`EventsProvider`]（或等价）在可达 ctx 绑定
+/// `EventsKey`；未绑定返回 [`cordis_core::StoreError`]。
+pub fn subscribe<P: Event>(
+    ctx: &Rc<Context>,
+    listener: impl Fn(&P::Payload) + Send + Sync + 'static,
+) -> Result<Disposer, cordis_core::StoreError> {
+    let bus = Arc::clone(&*ctx.get::<EventsKey>()?);
+    // 订阅立即生效（once 回调同步执行）；逆 = 调 bus 退订的 disposer。
+    let armed = ctx.effect(move || -> Box<dyn EffectIter> {
+        let bus = Arc::clone(&bus);
+        Box::new(cordis_core::once(Box::new(move || {
+            let d = bus.on::<P>(listener);
+            d as Disposer
+        })))
+    });
+    Ok(armed)
+}
+
+/// 便捷订阅（waterfall 专用，草案 §3.1）：订阅随 fiber 卸载自动退订。
+pub fn subscribe_waterfall<P: Event>(
+    ctx: &Rc<Context>,
+    listener: impl Fn(&mut P::Payload, &dyn Fn(&mut P::Payload)) + Send + Sync + 'static,
+) -> Result<Disposer, cordis_core::StoreError> {
+    let bus = Arc::clone(&*ctx.get::<EventsKey>()?);
+    Ok(ctx.effect(move || -> Box<dyn EffectIter> {
+        let bus = Arc::clone(&bus);
+        Box::new(cordis_core::once(Box::new(move || {
+            let d = bus.on_waterfall::<P>(listener);
+            d as Disposer
+        })))
+    }))
+}
+
+/// 便捷订阅（serial 专用，草案 §3.1）：订阅随 fiber 卸载自动退订。
+pub fn subscribe_serial<P: Event, R>(
+    ctx: &Rc<Context>,
+    listener: impl Fn(&P::Payload) -> R + Send + Sync + 'static,
+) -> Result<Disposer, cordis_core::StoreError>
+where
+    R: Send + Sync + 'static,
+{
+    let bus = Arc::clone(&*ctx.get::<EventsKey>()?);
+    Ok(ctx.effect(move || -> Box<dyn EffectIter> {
+        let bus = Arc::clone(&bus);
+        Box::new(cordis_core::once(Box::new(move || {
+            let d = bus.on_serial::<P, R>(listener);
+            d as Disposer
+        })))
+    }))
+}
+
+/// 便捷订阅（bail 专用，草案 §3.1）：订阅随 fiber 卸载自动退订。
+pub fn subscribe_bail<P: Event, R>(
+    ctx: &Rc<Context>,
+    listener: impl Fn(&P::Payload) -> Option<R> + Send + Sync + 'static,
+) -> Result<Disposer, cordis_core::StoreError>
+where
+    R: Send + Sync + 'static,
+{
+    let bus = Arc::clone(&*ctx.get::<EventsKey>()?);
+    Ok(ctx.effect(move || -> Box<dyn EffectIter> {
+        let bus = Arc::clone(&bus);
+        Box::new(cordis_core::once(Box::new(move || {
+            let d = bus.on_bail::<P, R>(listener);
+            d as Disposer
+        })))
+    }))
 }

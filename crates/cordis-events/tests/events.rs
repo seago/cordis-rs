@@ -258,3 +258,107 @@ fn listener_captures_arc_not_rc() {
         "监听器可捕获 Arc（Send+Sync 上界）"
     );
 }
+
+// ── M1.3（草案 §3.1）：订阅即效应集成——验收 #3 + #2 双路径 armed ─────
+
+mod m13 {
+    use super::*;
+    use cordis_core::{Component, Context, Disposer, EffectIter, KeySet, once};
+    use cordis_events::{EventsKey, EventsProvider, subscribe};
+    use std::any::Any;
+    use std::rc::Rc;
+
+    /// done 事件（订阅自动退订用例）。
+    struct Done;
+    impl Event for Done {
+        type Payload = u32;
+        const SYMBOL: &'static str = "done";
+    }
+
+    /// 订阅组件：apply 内 `subscribe`（落 fiber ctx 累加器）+ 返回订阅
+    /// disposer 作步逆（双路径 armed）。
+    struct Subscriber {
+        log: Log,
+    }
+
+    impl Component for Subscriber {
+        fn inject(&self) -> KeySet {
+            KeySet::new()
+        }
+        fn provide(&self) -> KeySet {
+            KeySet::new()
+        }
+        fn apply(&self, ctx: Rc<Context>, _config: &dyn Any) -> Box<dyn EffectIter> {
+            let log = Arc::clone(&self.log);
+            let d = subscribe::<Done>(&ctx, move |p: &u32| {
+                log.write().unwrap().push(format!("done:{p}"));
+            })
+            .expect("总线已绑定（EventsProvider）");
+            Box::new(once(Box::new(move || d)))
+        }
+    }
+
+    /// #3 卸载自动退订（spike S1 形态固化为本 crate 单测）：fiber 退役 →
+    /// 订阅随 ctx.effect 撤消，事件不再到达。
+    #[test]
+    fn subscribe_auto_unsubscribes_on_fiber_retire() {
+        let ctx = Context::new();
+        let log: Log = Arc::new(RwLock::new(Vec::new()));
+        let _provider = ctx
+            .use_component(Rc::new(EventsProvider), Rc::new(()) as Rc<dyn Any>)
+            .expect("绑定总线");
+        let sub = ctx
+            .use_component(
+                Rc::new(Subscriber {
+                    log: Arc::clone(&log),
+                }),
+                Rc::new(()) as Rc<dyn Any>,
+            )
+            .expect("挂载订阅者");
+        let bus = Arc::clone(&*ctx.get::<EventsKey>().expect("总线可读"));
+
+        bus.emit::<Done>(&1);
+        assert!(
+            log.read().unwrap().iter().any(|l| l == "done:1"),
+            "#3：订阅生效（fiber ctx 落账）"
+        );
+
+        // 退役订阅者 fiber → 订阅自动撤销。
+        sub.retire();
+        bus.emit::<Done>(&2);
+        assert!(
+            !log.read().unwrap().iter().any(|l| l == "done:2"),
+            "#3：fiber 退役后自动退订（事件不再到达）"
+        );
+    }
+
+    /// #2 双路径 armed（REVIEW-a0963ab nit-2 的 Rust 落地）：手动 disposer
+    /// 与 ctx.effect 累加器逆共享 armed——双路径撤销至多一次、不 double、
+    /// 不 panic。
+    #[test]
+    fn manually_dispose_and_ctx_dispose_all_share_armed() {
+        let ctx = Context::new();
+        let _provider = ctx
+            .use_component(Rc::new(EventsProvider), Rc::new(()) as Rc<dyn Any>)
+            .expect("绑定总线");
+        let log: Log = Arc::new(RwLock::new(Vec::new()));
+        let bus = Arc::clone(&*ctx.get::<EventsKey>().expect("总线可读"));
+
+        // 手动订阅（落 ctx 累加器；返回 disposer）。
+        let d: Disposer = subscribe::<Done>(&ctx, {
+            let log = Arc::clone(&log);
+            move |p: &u32| log.write().unwrap().push(format!("done:{p}"))
+        })
+        .expect("订阅");
+        bus.emit::<Done>(&1);
+        assert!(log.read().unwrap().iter().any(|l| l == "done:1"));
+
+        d(); // 路径 1：手动退订。
+        ctx.dispose_all(); // 路径 2：ctx 累加器逆（armed 幂等，不 double、不 panic）。
+        bus.emit::<Done>(&2);
+        assert!(
+            !log.read().unwrap().iter().any(|l| l == "done:2"),
+            "#2 双路径：armed 至多一次撤销，事件不再到达"
+        );
+    }
+}
