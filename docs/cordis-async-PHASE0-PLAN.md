@@ -1,4 +1,4 @@
-# cordis-async Phase 0 开发计划
+# cordis-async 开发计划（Phase 0 + Phase 1 预备路线）
 
 **依据**：`docs/cordis-async-protocol-draft.md` v1.4（已冻结，2026-08-18 用户确认开工范围；评审闭环：`docs/ASYNC-PROTOCOL-REVIEW.md` v1.1–v1.3 全部采纳，无遗留阻塞）
 **状态**：**待开工指令**（按草案执行纪律：开工由用户另行下达；本计划为执行方案，不含实现代码，未下达前不写实现）
@@ -131,6 +131,25 @@
 - **O-4/O-5**：Failed 载荷富化、非 Arc 值——等真实场景，Spike S3 若暴露再定。
 - **C-4 门面纪律文档**：插件作者分界（绕过门面的直接 core 调用不记账）。
 - **执行纪律**：本计划不含实现；**开工指令由用户下达**；下达后按里程碑门禁推进（每里程碑提交 + 审查闭环 + 修复 split，沿用仓库纪律）。
+
+## 4.5 Phase 1 预备路线（草案信号 → 提议，出口时对齐固化）
+
+**现状澄清**：草案 v1.4 是 **Phase 0 交付物**——Phase 1 仅作**符号**引用（"三项 spike 全部通过 → Phase 1 开工"），**未展开定义其范围**。草案唯一明示的后续交付物是 **cordis-events**（§8 "下一位交付物"）。更大的愿景（dsh 方向）在配套 `cordis-rs-dsh-feasibility.md`（dsh 工作区，本仓库不含）——Phase 0 出口时须与之对齐。
+
+**提议的 Phase 1 范围**（基于草案信号推导，**待出口对齐后正式固化**）：
+
+| 提议项 | 草案依据 | 说明 |
+|---|---|---|
+| M1.1 **cordis-events** | §8（明示下一位交付物） | 独立 crate：类型化事件名（`Symbol`）+ 载荷 trait + 四派发（emit/waterfall/parallel/serial，sync 闭包）；订阅经 `ctx.effect` 注册 = 随 fiber 卸载自动退订；async 监听器经 `local.spawn_local` 投递；`async/fiber-failed` 等失败/状态通知 |
+| M1.2 **AsyncRuntime 完善** | O-2/O-3/O-4 | 自动 settle 模式（app 层封装）；lifecycle observer hook 启用（基于已有 `update_hook`/`retire_hook` 雏形，G1/G4）；Failed 载荷富化（按 S3 第一真实失败场景定错误码/可重试） |
+| M1.3 **Remote 扩展 + 双运行时收口** | §2/§4/§5（桥泛化目标） | worker 类型定案（多线程 pool / blocking 池形态）；WasmRemote 完整接入；sync-only 组件与 async 组件同 loader 树的共存收口（Phase 0 S2 验证二分后收口） |
+| M1.4 **DX 与文档** | C-1/C-1'/C-2/C-4 | 插件作者指南（Arc 值惯例、绑定 vs 资源、门面纪律）；错误/安静语义文档；示例插件模板 |
+
+**Phase 0 → Phase 1 决策门禁**：
+1. Phase 0 出口（11 单测 + 3 spike）全过，且召开 Phase 0 出口走查（无未解释偏差）；
+2. 与 `cordis-rs-dsh-feasibility.md`（dsh 工作区）对齐愿景与优先级；
+3. 固化 Phase 1 计划（含上表细化 + 里程碑间审查硬门禁同 §3）；用户确认后开工。
+任一 spike 失败 → 按草案回架构决策表重审 C（Phase 1 顺延）。
 
 ## 5. 依赖与纪律约束
 
