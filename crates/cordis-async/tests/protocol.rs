@@ -627,9 +627,10 @@ mod m04 {
     use std::rc::Rc;
 
     /// 首次激活失败、复活后成功的单步行为（attempts 跨激活共享）。
-    struct FailOnceBehavior {
-        log: Log,
-        attempts: Rc<Cell<u32>>,
+    /// m05 复用故 pub(super)。
+    pub(super) struct FailOnceBehavior {
+        pub(super) log: Log,
+        pub(super) attempts: Rc<Cell<u32>>,
     }
 
     impl AsyncBehavior for FailOnceBehavior {
@@ -829,6 +830,347 @@ mod m04 {
                 // 仍有 Active fiber → 双真断言失败（调用方违约）。
                 let _ = fiber;
                 rt.shutdown().await;
+            })
+            .await;
+    }
+}
+
+// ── M0.5（草案 §5）：门面完善——测试 8（代次更新）/ 9（无环关停）/ 10（H 竞态）──
+
+mod m05 {
+    use super::Log;
+    use super::m03::{OneShotBehavior, Shell};
+    use cordis_async::{
+        AsyncBehavior, AsyncCx, AsyncDisposer, AsyncEffectIter, AsyncFiberState, AsyncRuntime,
+        AsyncStep, LocalBoxFuture,
+    };
+    use cordis_core::Context;
+    use std::any::Any;
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    /// 带 String 标签的异步逆（yield 一拍后记录 `rev:{label}`）。
+    fn async_inverse_owned(log: &Log, label: String) -> AsyncDisposer {
+        let log = Rc::clone(log);
+        Box::new(move || {
+            let log = Rc::clone(&log);
+            let label = label.clone();
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                log.borrow_mut().push(format!("rev:{label}"));
+            }) as LocalBoxFuture<()>
+        }) as AsyncDisposer
+    }
+
+    /// 激活计数行为：每次激活记 `run:{n}`，逆记 `rev:{n}`（n = 激活序）。
+    struct UpdateBehavior {
+        log: Log,
+        activations: Rc<Cell<u32>>,
+    }
+
+    impl AsyncBehavior for UpdateBehavior {
+        fn apply_async(&self, _cx: AsyncCx, _config: &dyn Any) -> Box<dyn AsyncEffectIter> {
+            let n = self.activations.get() + 1;
+            self.activations.set(n);
+            Box::new(UpdateIter {
+                n,
+                log: Rc::clone(&self.log),
+                done: false,
+            })
+        }
+    }
+
+    struct UpdateIter {
+        n: u32,
+        log: Log,
+        done: bool,
+    }
+
+    impl AsyncEffectIter for UpdateIter {
+        fn next(&mut self) -> LocalBoxFuture<AsyncStep> {
+            assert!(!self.done, "单步迭代器至多一步");
+            self.done = true;
+            let n = self.n;
+            let log = Rc::clone(&self.log);
+            Box::pin(async move {
+                log.borrow_mut().push(format!("run:{n}"));
+                AsyncStep::Finished(async_inverse_owned(&log, format!("{n}")))
+            })
+        }
+    }
+
+    /// 挂起单步行为：`next()` 返回 await oneshot 的 future（drive 在途）；
+    /// 信号到达后记 `{label}:done` 并 Finished（逆记 `rev:{label}`）。
+    struct PendingOnceBehavior {
+        label: &'static str,
+        log: Log,
+        rx: Rc<RefCell<Option<tokio::sync::oneshot::Receiver<()>>>>,
+    }
+
+    impl AsyncBehavior for PendingOnceBehavior {
+        fn apply_async(&self, _cx: AsyncCx, _config: &dyn Any) -> Box<dyn AsyncEffectIter> {
+            Box::new(PendingOnceIter {
+                label: self.label,
+                log: Rc::clone(&self.log),
+                rx: self.rx.borrow_mut().take(),
+                done: false,
+            })
+        }
+    }
+
+    struct PendingOnceIter {
+        label: &'static str,
+        log: Log,
+        rx: Option<tokio::sync::oneshot::Receiver<()>>,
+        done: bool,
+    }
+
+    impl AsyncEffectIter for PendingOnceIter {
+        fn next(&mut self) -> LocalBoxFuture<AsyncStep> {
+            assert!(!self.done, "单步迭代器至多一步");
+            self.done = true;
+            let label = self.label;
+            let log = Rc::clone(&self.log);
+            let rx = self.rx.take().expect("一次挂起");
+            Box::pin(async move {
+                log.borrow_mut().push(format!("{label}:pending"));
+                rx.await.expect("信号到达");
+                log.borrow_mut().push(format!("{label}:done"));
+                AsyncStep::Finished(async_inverse_owned(&log, label.to_string()))
+            })
+        }
+    }
+
+    /// 测试 8（评审点 E / 草案 §5）：`update(config)` → 旧代 cancel + 新代
+    /// drive spawn（fiber 身份保留、代次递增）；旧尾巴由 settle 排空——
+    /// 日志序直证「旧代尾巴在新代激活后收尾，且新代未收账」。
+    #[tokio::test]
+    async fn update_bumps_generation_and_settles_old_tail() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let ctx = Context::new();
+                let rt = AsyncRuntime::new(&ctx);
+                let log: Log = Rc::new(RefCell::new(Vec::new()));
+
+                let fiber = rt
+                    .use_component(
+                        &ctx,
+                        Rc::new(Shell::empty()),
+                        UpdateBehavior {
+                            log: Rc::clone(&log),
+                            activations: Rc::new(Cell::new(0)),
+                        },
+                        Rc::new(1u8) as Rc<dyn Any>,
+                    )
+                    .expect("挂载");
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(*log.borrow(), vec!["run:1".to_string()], "首代 drive 完成");
+
+                // 更新：旧代 unload（逆 cancel + 旧尾巴入队）→ 链式 reload
+                // （新代 spawn）；fiber 身份保留。
+                rt.update(&fiber, Rc::new(2u8) as Rc<dyn Any>);
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(
+                    *log.borrow(),
+                    vec!["run:1".to_string(), "run:2".to_string()],
+                    "新代 drive 已 spawn 并完成（旧逆尚未执行）"
+                );
+                assert!(
+                    matches!(
+                        rt.entry(fiber.id()).expect("条目").state(),
+                        AsyncFiberState::Running { generation: 2 }
+                    ),
+                    "代次递增（gen=2），fiber 身份保留"
+                );
+
+                // settle：FIFO 排空旧代尾巴（rev:1）——新代未卸载、无新尾巴。
+                rt.settle().await;
+                assert_eq!(
+                    *log.borrow(),
+                    vec![
+                        "run:1".to_string(),
+                        "run:2".to_string(),
+                        "rev:1".to_string()
+                    ],
+                    "旧代尾巴先 settle（rev:1）；新代（gen=2）未收账"
+                );
+                assert!(
+                    matches!(
+                        rt.entry(fiber.id()).expect("条目").state(),
+                        AsyncFiberState::Running { generation: 2 }
+                    ),
+                    "settle 后新代仍运行"
+                );
+            })
+            .await;
+    }
+
+    /// 测试 9（草案 §5 无环关停）：shutdown 后 AsyncRuntime 可完整 drop
+    /// （Weak 计数归零——条目/fiber 无回边，评审点 B 成立）；core 侧安静。
+    #[tokio::test]
+    async fn shutdown_releases_runtime_no_cycle() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let ctx = Context::new();
+                let rt = AsyncRuntime::new(&ctx);
+                let log: Log = Rc::new(RefCell::new(Vec::new()));
+
+                let fiber = rt
+                    .use_component(
+                        &ctx,
+                        Rc::new(Shell::empty()),
+                        OneShotBehavior {
+                            label: "svc",
+                            log: Rc::clone(&log),
+                            provide_dep: false,
+                        },
+                        Rc::new(()) as Rc<dyn Any>,
+                    )
+                    .expect("挂载");
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+                rt.retire(&fiber);
+                rt.settle().await;
+
+                let weak = Rc::downgrade(&rt);
+                drop(rt);
+                assert!(
+                    weak.upgrade().is_none(),
+                    "无环关停：AsyncRuntime 无残留强引用（条目/逆/兜底均不持回边）"
+                );
+                assert!(ctx.runtime().is_quiet(), "core 侧安静（退役 + 收账完成）");
+            })
+            .await;
+    }
+
+    /// 测试 10（评审点 H）：drive 恰在 cancel 后、settle 排空前完成 Ok →
+    /// disposer 经共享槽被 settle **恰一次** await（A）；Failed 路径 slot
+    /// 留空、无 disposer 残留（B）。
+    #[tokio::test]
+    async fn h_race_slot_taken_exactly_once_and_failed_slot_empty() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let ctx = Context::new();
+                let rt = AsyncRuntime::new(&ctx);
+                let log: Log = Rc::new(RefCell::new(Vec::new()));
+
+                // A：挂起在途的 drive（oneshot 门）。
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let a = rt
+                    .use_component(
+                        &ctx,
+                        Rc::new(Shell::empty()),
+                        PendingOnceBehavior {
+                            label: "a",
+                            log: Rc::clone(&log),
+                            rx: Rc::new(RefCell::new(Some(rx))),
+                        },
+                        Rc::new(()) as Rc<dyn Any>,
+                    )
+                    .expect("挂载 A");
+                // B：首激活即失败（自退役；slot 恒空）。
+                let b = rt
+                    .use_component(
+                        &ctx,
+                        Rc::new(Shell::empty()),
+                        super::m04::FailOnceBehavior {
+                            log: Rc::clone(&log),
+                            attempts: Rc::new(Cell::new(0)),
+                        },
+                        Rc::new(()) as Rc<dyn Any>,
+                    )
+                    .expect("挂载 B");
+
+                // 等 A 挂起（a:pending 落盘）与 B 失败落地（自退役写回）。
+                for _ in 0..64 {
+                    tokio::task::yield_now().await;
+                    if log.borrow().iter().any(|l| l == "a:pending") {
+                        break;
+                    }
+                }
+                assert!(log.borrow().iter().any(|l| l == "a:pending"));
+                assert!(
+                    matches!(
+                        rt.entry(b.id()).expect("B 条目").state(),
+                        AsyncFiberState::Failed(_)
+                    ),
+                    "B：失败静止终态（Failed slot 留空前件）"
+                );
+
+                // 竞态窗口：A 在途（drive 未完成）→ 退役（逆 cancel + enqueue
+                // 在途 tail）→ 信号让在途步完成 → drive 步界退场（Ok，逆入账）
+                // → settle 恰一次 take。
+                rt.retire(&a);
+                tx.send(()).expect("放行在途步");
+                rt.settle().await;
+
+                let rev_a = log
+                    .borrow()
+                    .iter()
+                    .filter(|l| l.as_str() == "rev:a")
+                    .count();
+                assert_eq!(
+                    rev_a, 1,
+                    "H 竞态：共享槽被 settle 恰一次 take（rev:a 恰一次）"
+                );
+                assert!(
+                    !log.borrow().iter().any(|l| l == "rev:b"),
+                    "Failed 路径 slot 留空：无 B 的 disposer 被 await"
+                );
+                assert!(rt.is_quiet(), "A/B 均已退役且尾巴排空");
+            })
+            .await;
+    }
+
+    /// 测试 10 第三子句（草案 §9）：shutdown 对在途尾巴补收账——drive 在途
+    /// 时退役 → 逆 enqueue 在途 tail → shutdown 的 settle 排空 → 逆恰一次；
+    /// 双真断言通过（编排方已退役）。
+    #[tokio::test]
+    async fn shutdown_settles_inflight_tail() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let ctx = Context::new();
+                let rt = AsyncRuntime::new(&ctx);
+                let log: Log = Rc::new(RefCell::new(Vec::new()));
+
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let c = rt
+                    .use_component(
+                        &ctx,
+                        Rc::new(Shell::empty()),
+                        PendingOnceBehavior {
+                            label: "c",
+                            log: Rc::clone(&log),
+                            rx: Rc::new(RefCell::new(Some(rx))),
+                        },
+                        Rc::new(()) as Rc<dyn Any>,
+                    )
+                    .expect("挂载 C");
+                for _ in 0..64 {
+                    tokio::task::yield_now().await;
+                    if log.borrow().iter().any(|l| l == "c:pending") {
+                        break;
+                    }
+                }
+                assert!(log.borrow().iter().any(|l| l == "c:pending"));
+
+                // 在途退役 → shutdown：settle 排空在途尾巴（补收账）→ 双真。
+                rt.retire(&c);
+                tx.send(()).expect("放行在途步");
+                rt.shutdown().await;
+
+                let rev_c = log
+                    .borrow()
+                    .iter()
+                    .filter(|l| l.as_str() == "rev:c")
+                    .count();
+                assert_eq!(rev_c, 1, "shutdown 收账：在途尾巴的逆恰一次 await");
+                assert!(rt.is_quiet(), "shutdown 后静止");
             })
             .await;
     }

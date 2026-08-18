@@ -602,6 +602,21 @@ impl AsyncRuntime {
         self.entries.borrow().get(&id).and_then(|w| w.upgrade())
     }
 
+    /// 退役门面（契约 C-4：生命周期变更走门面）——转发 core
+    /// [`Fiber::retire`]；async 尾巴由注册器逆 cancel + 入队、
+    /// [`Self::settle`] 收账。
+    pub fn retire(&self, fiber: &Rc<Fiber>) {
+        fiber.retire();
+    }
+
+    /// 更新门面（契约 C-4；草案 §3.1 update 闭环）：换 config → core
+    /// `update_fiber` 强制重跑——旧代 unload（注册器逆 cancel + 旧尾巴
+    /// 入队）→ 链式 reload（新代 `begin_activation` + 新 drive spawn，
+    /// fiber 身份保留）；编排方随后 [`Self::settle`] 排空旧代尾巴。
+    pub fn update(&self, fiber: &Rc<Fiber>, config: Rc<dyn Any>) {
+        self.core.update_fiber(fiber, config);
+    }
+
     /// 两阶段卸载阶段 2（草案 §3.2）：FIFO 排空收尾队列（I-3 序免费来自
     /// core sync 级联的入队序）。await 本方法直至全部尾巴 settle。
     pub async fn settle(&self) {
