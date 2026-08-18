@@ -172,6 +172,9 @@ impl CancelFlag {
 pub type RemoteValue = Box<dyn Any + Send>;
 
 /// 远端 join（组合线程本地 future：await 即等待远端完成并回灌值）。
+///
+/// **API 冻结（P1.2 H3）**：`submit` 返回形态在 P1.3 不改变（REVIEW-aa346d2
+/// minor-1 对齐计划 H3 标注）。
 pub type RemoteJoin<T> = LocalBoxFuture<T>;
 
 /// 远端请求载荷：Send 闭包（在 worker 侧执行；v1 经
@@ -220,6 +223,9 @@ pub trait Remote: 'static {
 /// （worker runtime 关闭后 submit 会 panic = 宿主配置错误 = bug）。
 /// **O-6 纪律**：worker 侧不得触碰组合线程资源（core/LocalSet）——仅限
 /// 纯外部 IO / CPU 密集计算，否则死锁。
+///
+/// **冻结声明（REVIEW-aa346d2 nit-1）**：本实现（M0.6）经复核，生命周期 /
+/// O-6 语义完整；P1.3 扩展以新增形态进行，本类型不破坏性变更。
 pub struct TokioRemote {
     worker: tokio::runtime::Handle,
 }
