@@ -13,3 +13,8 @@ workspace = true
 [dependencies]
 # 零第三方：仅依赖 cordis-core（计划 §5 纪律）。
 cordis-core = { path = "../cordis-core" }
+
+[dev-dependencies]
+# 仅测试用（async 监听器投递 + loader 集成）；run-deps 保持零第三方。
+cordis-loader = { path = "../cordis-loader" }
+tokio = { version = "1", features = ["rt", "macros"] }

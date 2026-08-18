@@ -221,6 +221,8 @@ name = "cordis-events"
 version = "0.1.0"
 dependencies = [
  "cordis-core",
+ "cordis-loader",
+ "tokio",
 ]
 
 [[package]]
