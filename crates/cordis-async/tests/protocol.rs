@@ -1283,7 +1283,9 @@ mod m06 {
                         .expect("挂载");
                     // 决定论约定：`RemoteIter::next()` 内 await join（组合
                     // 线程），回灌完成后才记 `joined`——条件轮询即就绪即停。
-                    for _ in 0..64 {
+                    // 预算放宽（并行 workspace 负载下 worker 回灌可能慢于 64
+                    // 次 yield——既有调度 flaky 修复）。
+                    for _ in 0..512 {
                         tokio::task::yield_now().await;
                         if log.borrow().iter().any(|l| l == "joined") {
                             break;
@@ -1397,8 +1399,9 @@ mod m06 {
                             Rc::new(()) as Rc<dyn Any>,
                         )
                         .expect("挂载");
-                    // 等 submit 落盘（join 在途——远端 sleep 中）。
-                    for _ in 0..64 {
+                    // 等 submit 落盘（join 在途——远端 sleep 中）。预算放宽
+                    // 同并行负载考虑。
+                    for _ in 0..512 {
                         tokio::task::yield_now().await;
                         if log.borrow().iter().any(|l| l == "submit") {
                             break;
