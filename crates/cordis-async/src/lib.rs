@@ -243,6 +243,17 @@ impl AsyncCx {
         self.ctx.set::<K>(value)
     }
 
+    /// 在 fiber 上下文注册 sync 效应（core [`Context::effect`] 透传）：
+    /// 其逆进入 **fiber ctx 累加器**——fiber 卸载时自动执行。
+    ///
+    /// **S1 订阅模式（事件总线 spike）**：订阅经本方法注册 =
+    /// `ctx.effect(once(订阅 + 逆=退订))`——随 fiber 卸载**自动退订**，
+    /// 无需手工清理（草案 §8：订阅经 `ctx.effect` 注册 = 随 fiber 卸载
+    /// 自动退订，TS `ctx.on` 语义）。
+    pub fn effect(&self, callback: impl FnOnce() -> Box<dyn EffectIter> + 'static) -> Disposer {
+        self.ctx.effect(callback)
+    }
+
     /// 取消通道（卸载/目标变更时触发——注册器逆 cancel）。
     pub fn cancellation(&self) -> &CancelFlag {
         &self.cancel
