@@ -28,7 +28,7 @@
 
 | spike | 假设 | 测试（tests/spikes.rs） | 通过标准 | 状态 |
 |---|---|---|---|---|
-| S1 | 事件总线 DX 税可承受（订阅随 fiber 卸载自动退订） | `spike_s1_event_bus_subscription_auto_unsubscribes_on_unload` | 订阅/退订/级联退订原型跑通；DX 形态 = 一行 `cx.effect` | ✅ |
+| S1 | 事件总线 DX 税可承受（订阅随 fiber 卸载自动退订） | `spike_s1_event_bus_subscription_auto_unsubscribes_on_unload` | 订阅/退订原型跑通；DX 形态 = 一行 `cx.effect`（注：spike 直证单 fiber 订阅/退订；级联退订共享同一 `dispose_all` teardown 路径，其级联序已由测试 3/I-3 覆盖——REVIEW-68f0c80 nit-1） | ✅ |
 | S2 | 组合线程二分不别扭（tokio 服务 sync 壳） | `spike_s2_tokio_service_sync_shell_via_spawn_remote` | 同步壳 + 远端调用回路跑通（mock LLM 往返 + 卸载收账） | ✅ |
 | S3 | agent loop 注册器模式三端协作完整 | `spike_s3_agent_loop_flushes_session_on_unload` | mock SSE 流 + 工具调用 + 卸载 cancel → 检查点退出 → flush session（await 收尾）、无泄漏 | ✅ |
 
