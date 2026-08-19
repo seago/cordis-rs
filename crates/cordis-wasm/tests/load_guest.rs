@@ -37,7 +37,18 @@ fn guest_activates_and_binds_via_host_context() -> anyhow::Result<()> {
     let inject = comp.call_inject(&mut store, component_any)?;
     let provide = comp.call_provide(&mut store, component_any)?;
     assert!(inject.is_empty(), "db 提供者无依赖：{inject:?}");
-    assert_eq!(provide, vec!["db".to_string()], "供给声明");
+    // C2：提供键含远端探针写端（排序后断言）。
+    let mut p: Vec<String> = provide;
+    p.sort();
+    assert_eq!(
+        p,
+        vec![
+            "db".to_string(),
+            "probe_err".to_string(),
+            "probe_out".to_string()
+        ],
+        "供给声明"
+    );
 
     // Algorithm 5 的 reload：start → task，宿主驱动 step。
     let task_any = comp.call_start(&mut store, component_any)?;

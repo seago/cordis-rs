@@ -330,6 +330,20 @@ impl WasmComponent {
         }))
     }
 
+    /// 宿主预注镜像（C 探针辅助，REVIEW-C1 minor-1）：向 guest 镜像写入
+    /// 输入键——阶段 2 的 guest 经 `get` 读到回注值（无需注入依赖声明，
+    /// 也不触碰核心依赖解析）。探针形态（评估后由正式通道替代，如 B 的
+    /// Await 或 sync_injected 化）。
+    pub fn preseed_mirror(&self, key: impl Into<String>, value: Value) {
+        self.state
+            .borrow()
+            .store
+            .borrow_mut()
+            .data_mut()
+            .bindings
+            .insert(key.into(), value);
+    }
+
     /// 绑定镜像（调试/断言用）。
     pub fn bindings(&self) -> HashMap<String, Value> {
         self.state.borrow().store.borrow().data().bindings().clone()

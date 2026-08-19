@@ -40,7 +40,7 @@ impl GuestComponent for DbProvider {
         Vec::new()
     }
     fn provide(&self) -> Vec<String> {
-        vec!["db".into()]
+        vec!["db".into(), "probe_out".into(), "probe_err".into()]
     }
     fn start(&self) -> Task {
         Task::new(DbTask { step: Cell::new(0) })
@@ -56,16 +56,33 @@ impl GuestTask for DbTask {
     fn step(&self) -> Option<EffectStep> {
         if self.step.get() == 0 {
             self.step.set(1);
-            // 激活效应：绑定 db = "wasm-pg"（逆由宿主提供）。
-            let db_inverse = context::set("db", &Value::Text("wasm-pg".into())).ok()?;
-            // W2 探针：提交宿主注册操作 echo（参数 7）。宿主经
-            // `remote_result` 轮询断言回填（execute 同步一口气，take 时序
-            // 边界见协议稿）。
-            let _h = cordis::core::remote::submit("echo", &vec![Value::Count(7)]);
-            Some(EffectStep {
-                inverse: db_inverse,
-                done: true,
-            })
+            // 阶段判定：镜像已有回注输入（`probe_in`，宿主 C 探针预注）→
+            // **阶段 2**：消费远端结果继续；否则 → **阶段 1**：提交。
+            if let Some(input) = context::get("probe_in") {
+                // 阶段 2：消费远端结果（两阶段拆分 = C 探针的 "await" 模拟）。
+                let db_inverse = context::set("db", &Value::Text("wasm-pg".into())).ok()?;
+                match input {
+                    Value::Count(n) => {
+                        let out = Value::Count(n.wrapping_add(1));
+                        let _ = context::set("probe_out", &out);
+                    }
+                    v => {
+                        let _ = context::set("probe_err", &v);
+                    }
+                }
+                Some(EffectStep {
+                    inverse: db_inverse,
+                    done: true,
+                })
+            } else {
+                // 阶段 1：绑定 db + 提交宿主操作 echo（参数 7），完成。
+                let db_inverse = context::set("db", &Value::Text("wasm-pg".into())).ok()?;
+                let _h = cordis::core::remote::submit("echo", &vec![Value::Count(7)]);
+                Some(EffectStep {
+                    inverse: db_inverse,
+                    done: true,
+                })
+            }
         } else {
             None
         }

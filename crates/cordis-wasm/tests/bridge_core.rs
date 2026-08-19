@@ -77,9 +77,12 @@ fn wasm_component_inject_provide_declared() {
     let inject = comp.inject();
     let provide = comp.provide();
     assert!(inject.is_empty(), "db 提供者无依赖");
+    // C2（两阶段探针）扩展提供键：db + 远端探针写端（probe_out/probe_err）。
+    let mut names: Vec<_> = provide.iter().map(|s| s.as_str()).collect();
+    names.sort();
     assert_eq!(
-        provide.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-        vec!["db"],
+        names,
+        vec!["db", "probe_err", "probe_out"],
         "供给声明跨边界"
     );
     let _ = root;
