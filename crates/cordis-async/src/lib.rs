@@ -935,3 +935,20 @@ impl AsyncRuntime {
         );
     }
 }
+
+/// WasmRemote（草案 §2/§4；P1.3 R2 接入点，实际宿主桥留 M1 wasm 专项）。
+///
+/// M1 host 驱动协议的接入点——**Wasm guest 无自发线程**：`submit` =
+/// 请求**入队**，宿主在 **step 边界**驱动并 **回填**（join 语义与
+/// [`TokioRemote`] 一致，但执行方为宿主驱动协议 PR #11–13 而非本地
+/// worker 池）。
+///
+/// **范围（P1.3 决策 D-2）**：本类型为**接入点 + 协议接线说明**——
+/// 实际宿主驱动桥（host 逐 step 边界驱动、跨 wasm 值传递/回填）在 M1
+/// wasm 专项实现（`crates/cordis-wasm` 宿主驱动协议对接）。P1.3 不
+/// 提供 [`Remote`] 实现（接入 host 协议前实现无意义）——M1 专项在
+/// 接入后 `impl Remote for WasmRemote`（`submit` = 入队 + 宿主驱动）。
+pub struct WasmRemote {
+    // M1 专项：host 驱动协议句柄（guest 侧仅引用，无自发线程）。
+    _private: (),
+}
