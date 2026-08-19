@@ -1253,8 +1253,8 @@ mod m06 {
     use super::m03::Shell;
     use super::m05::async_inverse_owned;
     use cordis_async::{
-        AsyncBehavior, AsyncCx, AsyncEffectIter, AsyncRuntime, AsyncStep, LocalBoxFuture,
-        RemoteValue, TokioRemote,
+        AsyncBehavior, AsyncCx, AsyncEffectIter, AsyncRuntime, AsyncStep, LocalBoxFuture, Remote,
+        RemoteRequest, RemoteValue, TokioRemote,
     };
     use cordis_core::Context;
     use std::any::Any;
@@ -1486,6 +1486,68 @@ mod m06 {
                 .await;
         });
         // worker 在此 drop——block_on 已返回（非 async 上下文）✓
+    }
+
+    /// R1（P1.3）：Send-future 分池形态——`RemoteRequest::from_future` 提交
+    /// 到 worker multi_thread 池，join 回灌值。
+    #[test]
+    fn send_future_submits_to_worker_pool_and_joins_back() {
+        let worker = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .build()
+            .expect("worker runtime");
+        let combo = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("组合 runtime");
+        combo.block_on(async {
+            tokio::task::LocalSet::new()
+                .run_until(async {
+                    let tv = TokioRemote::new(worker.handle().clone());
+                    let join = tv.submit(RemoteRequest::from_future(async {
+                        Box::new(6u32 * 7) as RemoteValue
+                    }));
+                    let value = join.await;
+                    assert_eq!(
+                        *value.downcast::<u32>().expect("远端结果类型"),
+                        42,
+                        "R1：Send-future 提交 worker 池 + join 回灌"
+                    );
+                })
+                .await;
+        });
+        // worker 在此 drop（非 async 上下文）✓
+    }
+
+    /// R1（P1.3）O-6 隔离：Send-future 在 worker 池线程执行（≠ 组合线程）。
+    #[test]
+    fn send_future_executes_on_worker_pool_not_combo_thread() {
+        let worker = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .build()
+            .expect("worker runtime");
+        let combo = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("组合 runtime");
+        combo.block_on(async {
+            tokio::task::LocalSet::new()
+                .run_until(async {
+                    let combo_tid = std::thread::current().id();
+                    let tv = TokioRemote::new(worker.handle().clone());
+                    let join = tv.submit(RemoteRequest::from_future(async move {
+                        Box::new(std::thread::current().id()) as RemoteValue
+                    }));
+                    let worker_tid = *join
+                        .await
+                        .downcast::<std::thread::ThreadId>()
+                        .expect("远端结果类型");
+                    assert_ne!(
+                        worker_tid, combo_tid,
+                        "R1 O-6：Send-future 在 worker 池线程执行（非组合线程）"
+                    );
+                })
+                .await;
+        });
+        // worker 在此 drop（非 async 上下文）✓
     }
 }
 

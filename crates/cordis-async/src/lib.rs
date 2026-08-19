@@ -177,18 +177,32 @@ pub type RemoteValue = Box<dyn Any + Send>;
 /// minor-1 对齐计划 H3 标注）。
 pub type RemoteJoin<T> = LocalBoxFuture<T>;
 
-/// 远端请求载荷：Send 闭包（在 worker 侧执行；v1 经
-/// [`TokioRemote`] `spawn_blocking` 运行）。
+/// 远端请求载荷（P1.3 双形态）：Send 闭包（v1，`spawn_blocking` 运行）
+/// 或 Send async future（P1.3 分池形态，multi_thread 池 `spawn` 运行）。
 ///
-/// **P1.3 扩展点**：扩展为「Send-future 分池」形态（`submit` 接受 Send
-/// async future，草案 §4）时，本类型将增设 future 表述变体——v1 闭包
-/// 形态语义不变（API 冻结见 [`Remote`] 注）。
-pub struct RemoteRequest(Box<dyn FnOnce() -> RemoteValue + Send>);
+/// **P1.3 扩展点落地（REVIEW-aa346d2 / P1.2 H3 冻结保持）**：`submit` 签名
+/// 不变；扩展在内部变体进行。
+pub struct RemoteRequest(RemoteRequestInner);
+
+/// RemoteRequest 内部双变体。
+enum RemoteRequestInner {
+    /// 同步闭包（worker `spawn_blocking` 池执行）。
+    Closure(Box<dyn FnOnce() -> RemoteValue + Send>),
+    /// Send async future（worker multi_thread 池 `spawn` 执行）。
+    Future(Pin<Box<dyn Future<Output = RemoteValue> + Send>>),
+}
 
 impl RemoteRequest {
-    /// 构造请求（结果自动装箱为 [`RemoteValue`]）。
+    /// 构造闭包形态请求（结果自动装箱为 [`RemoteValue`]）。
     pub fn boxed<T: Any + Send>(f: impl FnOnce() -> T + Send + 'static) -> Self {
-        Self(Box::new(move || Box::new(f()) as RemoteValue))
+        Self(RemoteRequestInner::Closure(Box::new(move || {
+            Box::new(f()) as RemoteValue
+        })))
+    }
+
+    /// 构造 Send-future 形态请求（P1.3：异步计算提交 worker 池）。
+    pub fn from_future(fut: impl Future<Output = RemoteValue> + Send + 'static) -> Self {
+        Self(RemoteRequestInner::Future(Box::pin(fut)))
     }
 }
 
@@ -197,7 +211,7 @@ where
     F: FnOnce() -> RemoteValue + Send + 'static,
 {
     fn from(f: F) -> Self {
-        Self(Box::new(f))
+        Self(RemoteRequestInner::Closure(Box::new(f)))
     }
 }
 
@@ -239,13 +253,27 @@ impl TokioRemote {
 
 impl Remote for TokioRemote {
     fn submit(&self, req: RemoteRequest) -> RemoteJoin<RemoteValue> {
-        let handle = self.worker.spawn_blocking(move || req.0());
-        Box::pin(async move {
-            handle
-                .await
-                .expect("远端任务 panic = 宿主 bug（O-6：远端不得触碰组合线程资源）")
-        }) as LocalBoxFuture<RemoteValue>
+        use RemoteRequestInner as I;
+        // 双形态调度（P1.3 R1）：闭包 → blocking 池；Send-future → multi_thread
+        // 池。submit 签名不变（冻结保持），两路 join 回灌组合线程。
+        match req.0 {
+            I::Closure(f) => {
+                let handle = self.worker.spawn_blocking(f);
+                Box::pin(await_remote_join(handle)) as LocalBoxFuture<RemoteValue>
+            }
+            I::Future(fut) => {
+                let handle = self.worker.spawn(fut);
+                Box::pin(await_remote_join(handle)) as LocalBoxFuture<RemoteValue>
+            }
+        }
     }
+}
+
+/// await 远端 JoinHandle 并解包（O-6：远端 panic = 宿主 bug）。
+async fn await_remote_join(handle: tokio::task::JoinHandle<RemoteValue>) -> RemoteValue {
+    handle
+        .await
+        .expect("远端任务 panic = 宿主 bug（O-6：远端不得触碰组合线程资源）")
 }
 
 /// async 段可用的上下文（草案 §2）。
