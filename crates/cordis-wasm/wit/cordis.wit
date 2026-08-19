@@ -36,7 +36,9 @@ interface plugin {
         step: func() -> option<effect-step>;
     }
     record effect-step {
-        inverse: inverse,
+        /// 本步逆（B 计划 A2）：可选——`none` 代表等待/无副作用步
+        /// （await 远端回填时使用；宿主以 `Step::Await` 暂停）。
+        inverse: option<inverse>,
         done: bool,
     }
     resource component {

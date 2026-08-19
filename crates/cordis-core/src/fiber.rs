@@ -153,6 +153,12 @@ impl Fiber {
         self.parent
     }
 
+    /// 是否挂起于 `Step::Await`（B 计划 A1）：`true` = 有可恢复上下文，
+    /// 待外部就绪后 `Runtime::advance` 恢复。
+    pub fn is_suspended(&self) -> bool {
+        self.resumable.borrow().is_some()
+    }
+
     /// 共效应规格 `d`。
     pub fn inject(&self) -> &KeySet {
         &self.inject

@@ -694,7 +694,16 @@ impl EffectIter for WasmTaskIter {
                 state.run_inverse(rep);
             }
         }) as Box<dyn FnOnce()>;
+        // B 计划 A2：guest 未完成且存在在途远端 join → `Step::Await`
+        //（core 挂起，等 worker 回填后经 Runtime::advance 恢复——组合线程
+        // poll_remotes 后 advance；本步为 none 逆的等待步，逆不累计）。
+        let done = matches!(&step, Some(es) if es.done);
+        let awaiting = {
+            let state = self.state.borrow();
+            !done && !state.remote_joins.borrow().is_empty()
+        };
         match step {
+            _ if awaiting => Step::Await,
             Some(effect_step) if !effect_step.done => Step::Yielded(step_inverse),
             Some(_) => Step::Finished(step_inverse),
             None => Step::Finished(Box::new(|| {}) as Box<dyn FnOnce()>),

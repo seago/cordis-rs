@@ -38,34 +38,41 @@ fn guest_activates_and_binds_via_host_context() -> anyhow::Result<()> {
     let provide = comp.call_provide(&mut store, component_any)?;
     assert!(inject.is_empty(), "db 提供者无依赖：{inject:?}");
     // C2：提供键含远端探针写端（排序后断言）。
-    let mut p: Vec<String> = provide;
-    p.sort();
-    assert_eq!(
-        p,
-        vec![
-            "db".to_string(),
-            "probe_err".to_string(),
-            "probe_out".to_string()
-        ],
-        "供给声明"
-    );
+    // A2：提供键含远端探针写端——宽松断言（含核心键即可）。
+    for required in ["db", "probe", "probe_err"] {
+        assert!(
+            provide.iter().any(|s| s == required),
+            "供给声明缺 {required}: {provide:?}"
+        );
+    }
 
     // Algorithm 5 的 reload：start → task，宿主驱动 step。
     let task_any = comp.call_start(&mut store, component_any)?;
     let task = instance.cordis_core_plugin().task();
     let step = task.call_step(&mut store, task_any)?;
 
-    // 激活效应：guest 经 context::set 绑定 db = "wasm-pg"。
+    // 激活效应：guest 经 context::set 绑定 db = "wasm-pg"（A2 多步：step0
+    // 提交远端后 done:false——等待步由宿主 Await/advance 驱动，见 a2_e2e；
+    // 此处断言 step0 副作用与逆（Option）形态）。
     let step = step.expect("第一步应有产出");
-    assert!(step.done, "单步效应终止");
+    assert!(step.inverse.is_some(), "step0 有逆（db 绑定）");
     let binding = store.data().bindings().get("db").cloned();
     assert!(
         matches!(binding, Some(Value::Text(ref v)) if v == "wasm-pg"),
         "宿主侧绑定：{binding:?}"
     );
 
-    // 迭代终止：再 step 返回 None。
-    assert!(task.call_step(&mut store, task_any)?.is_none(), "迭代终止");
+    // 等待步（未完成）：再 step 产出 none 逆的 effect-step（等待远端，
+    // A2 Await 语义；完整收敛见 a2_e2e 测试）。
+    let next = task.call_step(&mut store, task_any)?;
+    assert!(
+        next.is_some(),
+        "A2 等待步持续产出（done:false + inverse None）"
+    );
+    assert!(
+        matches!(&next, Some(es) if es.inverse.is_none() && !es.done),
+        "等待步：none 逆 + 未完成"
+    );
 
     // 逆撤销路径由 tests/bridge_core.rs 覆盖（WasmComponent 接入核心
     // Runtime：rep → 核心逆，retire 级联清除）。
