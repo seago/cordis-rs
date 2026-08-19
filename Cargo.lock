@@ -263,8 +263,10 @@ name = "cordis-wasm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cordis-async",
  "cordis-core",
  "cordis-loader",
+ "tokio",
  "wasmtime",
  "wasmtime-wasi",
  "wit-bindgen 0.60.0",
