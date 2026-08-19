@@ -31,7 +31,7 @@
 
 ## 4. 遗留（诚实记录）：A2b go ABI 收尾
 
-- **root cause**：host 解码 go 的 effect-step 报 `invalid option discriminant`——wit `inverse→option` 后，go 侧（wit-bindgen go 0.60 对 `option<resource>` 的编码）与 wasmtime 组件模型期望的判别布局未对齐（go 绑定层问题，非 rust/core）。
+- **root cause（实测诊断）**：go_guest 临时诊断打印显示 fiber 失败消息 `wasm 组件 step 失败（trap）：invalid option discriminant`——host 解码 go 的 effect-step 时 option（inverse）判别非法。疑似 wit 绑 go 侧（wit-bindgen go 0.60 对 `option<resource>`）编码与 wasmtime 组件模型判别布局未对齐（go 绑定层问题，非 rust/core；A2b 实证确认）。
 - **现状**：rust 系 4 guest 全对齐；`go_guest` 2 测试暂 `#[ignore="A2b"]`（M1 双语言门禁恢复项）。
 - **处置建议**：A2b 独立排期——对齐 go 绑定对 `option<inverse>` 的编码（可选：wit 结构改显式 `variant effect-step { step(inverse), wait }` 绕开 option<resource> 边界），或 go 端手工 encode 修正 + 测试恢复。
 
@@ -39,4 +39,3 @@
 
 **B 计划主体完成**（core Await 机制 + wasm guest 完整 take-await 端到端 + 错误通道 + 文档归位 + 门禁全绿 + 审查闭环，0 Major 未决）。**A2b（go ABI 收尾）为既定遗留**（wit 波及，具因/处置已记录，独立跟踪，不在本出口阻塞判定内——rust 侧 B 目标达成，go 为 M1 历史双语言门禁恢复项）。
 </RSEOF>
-echo EXIT-wrote && git add crates/cordis-wasm/tests/go_guest.rs docs/cordis-core-AWAIT-EXIT.md && git commit -q -m "docs: B 计划 A4 出口判定——主体完成（core Await + guest take-await + err 通道 + 文档归位 + 门禁绿）；A2b（go ABI，invalid option discriminant 根因）列为既定遗留独立跟踪（B 计划）" && git log --oneline -1
