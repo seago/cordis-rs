@@ -381,6 +381,12 @@ impl Loader {
     }
 
     /// 条目状态查询（错误策略 v0.2 报告面；未加载条目 = `None`）。
+    ///
+    /// 优先级（REVIEW-9b61d82 M-3）：`Disabled`（协调字段）优先于
+    /// `FailedFiber`——writeback（`register_retire_hook`）开启时组件运行时
+    /// 失败被写回 `disabled=true`，主态呈现为 `Disabled`；`FailedFiber`
+    /// 仅在未写回（未注册 hook）时可达。失败详情经 [`Self::report`] 的
+    /// `FailedFiber` outcome 呈现。
     pub fn entry_state(&self, id: &str) -> Option<EntryState> {
         let map = self.entries.borrow();
         let loaded = find_loaded(&map, id)?;
@@ -804,7 +810,13 @@ impl Loader {
                 EntryErrorKind::ProvisionClash { keys, owner }
             }
             _ => EntryErrorKind::UnknownParent {
-                parent: String::new(),
+                // core Err 无父载荷——携带 ctx 上下文（父 fiber id；无父 =
+                // root）。loader 协调下子条目总挂 holder ctx，本分支约定
+                // 不可达（防御，REVIEW-9b61d82 M-2）。
+                parent: ctx
+                    .fiber()
+                    .map(|f| format!("{f:?}"))
+                    .unwrap_or_else(|| "<root>".to_string()),
             },
         };
         EntryError { entry_id, kind }
