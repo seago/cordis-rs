@@ -352,9 +352,11 @@ impl WasmComponent {
             .insert(name.into(), op);
     }
 
-    /// 宿主侧轮询在途远端（W2：execute 之外也可驱动回填——组合线程在
-    /// 空闲/检查点调用，不阻塞；与迭代器 step 边界驱动互补）。O-6：轮询
-    /// 非阻塞（noop-waker 单次探测）。
+    /// 宿主侧轮询在途远端（W2）。**必要性（REVIEW-704a46c Minor-1）**：
+    /// core `execute` 为同步一口气循环且单步组件一步 `done`，`apply` 后
+    /// `WasmTaskIter::next` 不再运行——poll_remotes 是**单步激活场景回填的
+    /// 唯一驱动面**；多步/长驻场景仍由迭代器 step 边界内部轮询。组合线程
+    /// 在空闲/检查点调用，不阻塞（noop-waker 单次探测；O-6）。
     pub fn poll_remotes(&self) {
         let state = self.state.borrow();
         drive_poll_remote(
@@ -855,6 +857,21 @@ mod remote_tests {
             matches!(results.get(&0), Some(Some(Err(e))) if e.contains("boom")),
             "op panic → 句柄 err 回填（组合线程不 panic）：{:?}",
             results
+        );
+    }
+
+    /// W3 清理：drop 句柄 → 结果槽清除（guest 弃句柄/实例卸载不残留）。
+    #[test]
+    fn host_handle_drop_clears_result_slot() {
+        let mut host = Host::new();
+        let handle = wit::cordis::core::remote::Host::submit(&mut host, "echo".to_string(), vec![]);
+        // 直接登记一个就绪结果，再 drop 句柄 → 槽清除。
+        host.remote_results
+            .insert(handle.rep(), Some(Ok(Value::Text("x".into()))));
+        wit::cordis::core::remote::HostHandle::drop(&mut host, handle).expect("drop");
+        assert!(
+            !host.remote_results.contains_key(&0),
+            "drop 句柄 → 结果槽清除"
         );
     }
 
