@@ -2,8 +2,8 @@
 //!（integration 点——loader 零依赖 events，事件发射由注入 hook 完成）。
 
 use cordis_core::{Component, Context, KeySet, Runtime};
-use cordis_events::{Event, EventBus, EventsKey, EventsProvider, subscribe};
-use cordis_loader::{Entry, EntryError, EntryErrorKind, Loader};
+use cordis_events::{Event, EventsKey, EventsProvider, subscribe};
+use cordis_loader::{Entry, EntryError, Loader};
 use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 

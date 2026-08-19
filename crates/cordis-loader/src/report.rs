@@ -131,6 +131,9 @@ impl fmt::Display for ApplyReport {
 /// 回调。loader 本身零依赖（不经 events）——由 app/测试把本 hook 接到
 /// cordis-events（发射 `loader/entry-failed`），保持 loader run 依赖只
 /// `cordis-core`（错误策略草案 §7 integration 点）。
+///
+/// **回调纪律（REVIEW-c0fb7c1 nit-2）**：回调内不得重入 `Loader::apply`
+///（协调器锁已释放但应避免递归协调）；如需重 apply，延迟到回调外。
 pub type EntryFailedHook = dyn Fn(&EntryError) + 'static;
 
 /// loader 条目状态查询（报告面）。
