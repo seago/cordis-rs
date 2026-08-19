@@ -1724,6 +1724,32 @@ mod tests {
         assert!(s.contains("已激活"));
     }
 
+    /// 错误策略 v0.2（验收 #8）：核心供给纪律越界写**仍 panic**——错误
+    /// 分类未误转（作者义务/程序错误保持 panic=bug）。组件声明提供 a 却
+    /// write 未声明键（ValKey）→ 越界 panic。
+    #[test]
+    #[should_panic(expected = "越界")]
+    fn supply_discipline_panic_kept() {
+        struct Bad;
+        impl Component for Bad {
+            fn inject(&self) -> KeySet {
+                KeySet::new()
+            }
+            fn provide(&self) -> KeySet {
+                spec(&["a"])
+            }
+            fn apply(&self, ctx: Rc<Context>, _config: &dyn std::any::Any) -> Box<dyn EffectIter> {
+                Box::new(once(Box::new(move || {
+                    let _ = ctx.set::<ValKey>("vg".to_string()).expect("绑定 val");
+                    Box::new(|| {}) as Disposer
+                })))
+            }
+        }
+        let (loader, _runtime) = loader();
+        loader.register_component("bad", Rc::new(Bad));
+        loader.apply(&[entry("bad", "bad", "cfg", 1, false)]);
+    }
+
     // ── M2-PR3：intercept / isolate / group / include ─────────────────
 
     /// 拦截测试元数据（⊕：paths 取并、read_only 右偏）。
