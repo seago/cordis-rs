@@ -352,6 +352,30 @@ impl WasmComponent {
             .insert(name.into(), op);
     }
 
+    /// 宿主侧轮询在途远端（W2：execute 之外也可驱动回填——组合线程在
+    /// 空闲/检查点调用，不阻塞；与迭代器 step 边界驱动互补）。O-6：轮询
+    /// 非阻塞（noop-waker 单次探测）。
+    pub fn poll_remotes(&self) {
+        let state = self.state.borrow();
+        drive_poll_remote(
+            &mut state.remote_joins.borrow_mut(),
+            &mut state.store.borrow_mut().data_mut().remote_results,
+        );
+    }
+
+    /// 远端句柄结果复制（调试/断言用）。
+    pub fn remote_results_debug(
+        &self,
+    ) -> std::collections::HashMap<u32, Option<Result<Value, String>>> {
+        self.state
+            .borrow()
+            .store
+            .borrow()
+            .data()
+            .remote_results
+            .clone()
+    }
+
     /// 远端句柄结果复制（调试/断言用）。
     pub fn remote_result(&self, rep: u32) -> Option<Option<Result<Value, String>>> {
         self.state
