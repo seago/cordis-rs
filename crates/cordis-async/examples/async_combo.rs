@@ -114,7 +114,8 @@ fn main() {
                         )
                         .expect("挂载 async 组件");
 
-                    // 等 Send-future 回灌落地（轮询预算放宽同并行负载）。
+                    // 等 Send-future 回灌落地（轮询预算放宽同并行负载；
+                    // 单步 iter 恒返回 7，故 `>=7` 即就绪、`==7` 断言值——REVIEW-9af13e6 nit-2）。
                     for _ in 0..512 {
                         tokio::task::yield_now().await;
                         if *hits.read().unwrap() >= 7 {
