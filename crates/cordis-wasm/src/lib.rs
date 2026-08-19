@@ -61,7 +61,9 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
+use cordis_async::{Remote, RemoteJoin, RemoteRequest, RemoteValue};
 use cordis_core::component::Component;
 use cordis_core::context::Context;
 use cordis_core::effect::{EffectIter, Step};
@@ -100,6 +102,19 @@ struct PendingSet {
     value: Value,
 }
 
+/// guest 提交的远端请求（submit 入队；step 后由迭代器 pump 到注入
+/// Remote，W1b）。
+struct RemotePending {
+    rep: u32,
+    name: String,
+    params: Vec<Value>,
+}
+
+/// 宿主注册的远端操作（W-D2）：guest 提交名 + 参数 → wit `Value` 结果。
+/// 以 `Arc` 传递（`RemoteOp: Send + Sync`——跨线程经 `RemoteRequest::boxed`
+/// 交给 worker 执行；trait 对象自身 `Send+Sync`）。
+pub type RemoteOp = dyn Fn(Vec<Value>) -> Value + Send + Sync;
+
 /// 组件宿主状态：pending 队列 + 绑定镜像 + WASI 上下文。
 ///
 /// `Store<T>` 的 `T`（`Send`：`WasiView` 约束）。实现 `context`
@@ -111,6 +126,12 @@ struct PendingSet {
 pub struct Host {
     /// guest 在 step 期间累积的绑定请求（迭代器 step 后转发并清空）。
     pending: Vec<PendingSet>,
+    /// guest 提交的远端请求（submit 入队；step 后 pump，W1b）。
+    remote_pending: Vec<RemotePending>,
+    /// 远端句柄 → 结果（None = 未就绪；Some(Ok/Err) = 就绪，take 取）。
+    remote_results: std::collections::HashMap<u32, Option<Result<Value, String>>>,
+    /// remote 句柄 rep 分配。
+    next_remote_rep: u32,
     /// 绑定镜像（`get` 读取；由迭代器在转发后同步）。
     bindings: HashMap<String, Value>,
     /// 逆句柄计数器（跨步骤单调，保证 rep 唯一）。
@@ -126,6 +147,9 @@ impl Host {
     pub fn new() -> Self {
         Self {
             pending: Vec::new(),
+            remote_pending: Vec::new(),
+            remote_results: std::collections::HashMap::new(),
+            next_remote_rep: 0,
             bindings: HashMap::new(),
             next_rep: 0,
             wasi: WasiCtxBuilder::new().build(),
@@ -179,28 +203,35 @@ impl HostInverse for Host {
 /// 注入 `Remote` 提交 + 句柄结果登记）。`todo!` 仅占位（W1a 不调用，
 /// 编译通过即可）。
 impl wit::cordis::core::remote::Host for Host {
-    // bindgen 生成签名（无 wasmtime::Result 包裹；错误经 take 的 err 通道）。
+    // bindgen 签名（无 Err 通道——错误恒延迟到 take 的 err，W-D3 异步契约）。
     fn submit(
         &mut self,
-        _name: String,
-        _params: Vec<wit::cordis::core::remote::Value>,
+        name: String,
+        params: Vec<wit::cordis::core::remote::Value>,
     ) -> Resource<wit::cordis::core::remote::Handle> {
-        todo!("W1b：注册表 + 注入 Remote 提交 + 句柄登记")
+        let rep = self.next_remote_rep;
+        self.next_remote_rep += 1;
+        self.remote_pending
+            .push(RemotePending { rep, name, params });
+        Resource::new_own(rep)
     }
 }
 
 impl wit::cordis::core::remote::HostHandle for Host {
     fn take(
         &mut self,
-        _handle: Resource<wit::cordis::core::remote::Handle>,
+        handle: Resource<wit::cordis::core::remote::Handle>,
     ) -> Option<Result<wit::cordis::core::remote::Value, String>> {
-        None // W1b：按句柄查结果
+        self.remote_results
+            .get(&handle.rep())
+            .and_then(|o| o.clone())
     }
     fn drop(
         &mut self,
-        _handle: Resource<wit::cordis::core::remote::Handle>,
+        handle: Resource<wit::cordis::core::remote::Handle>,
     ) -> wasmtime::Result<()> {
-        // W1b：清理句柄表条目（guest 弃句柄 / 实例卸载）。
+        // guest 弃句柄 / 实例卸载：清理结果槽（worker 完成即弃则不残留）。
+        self.remote_results.remove(&handle.rep());
         Ok(())
     }
 }
@@ -236,6 +267,12 @@ struct InstanceState {
     /// 核心逆表：`rep → (键, 核心 Disposer)`（非 Send，仅此处可执行；
     /// 键用于逆执行后清理绑定镜像）。
     core_inverses: RefCell<Vec<Option<CoreInverse>>>,
+    /// 注入的远端桥（W1b；复用 `cordis_async::Remote`，v1 = TokioRemote）。
+    remote: RefCell<Option<Rc<dyn Remote>>>,
+    /// 远端操作注册表（W-D2：名 → 可执行操作；非 Send 状态可捕获）。
+    remote_ops: RefCell<HashMap<String, Arc<RemoteOp>>>,
+    /// 在途远端 join（rep → LocalBoxFuture；step 边界 poll 回填，W1b）。
+    remote_joins: RefCell<HashMap<u32, RemoteJoin<RemoteValue>>>,
 }
 
 impl InstanceState {
@@ -286,6 +323,9 @@ impl WasmComponent {
                 instance,
                 component_any,
                 core_inverses: RefCell::new(Vec::new()),
+                remote: RefCell::new(None),
+                remote_ops: RefCell::new(HashMap::new()),
+                remote_joins: RefCell::new(HashMap::new()),
             })),
         }))
     }
@@ -293,6 +333,35 @@ impl WasmComponent {
     /// 绑定镜像（调试/断言用）。
     pub fn bindings(&self) -> HashMap<String, Value> {
         self.state.borrow().store.borrow().data().bindings().clone()
+    }
+}
+
+impl WasmComponent {
+    /// 配置远端桥（W1b；v1 注入 TokioRemote 供 guest 的 remote submit 执行；
+    /// O-6：执行在 worker，不触碰组合线程资源）。
+    pub fn configure_remote(&self, remote: Option<Rc<dyn Remote>>) {
+        *self.state.borrow().remote.borrow_mut() = remote;
+    }
+
+    /// 注册远端操作（W-D2：guest 提交名 + 参数 → wit Value）。
+    pub fn register_remote(&self, name: impl Into<String>, op: Arc<RemoteOp>) {
+        self.state
+            .borrow()
+            .remote_ops
+            .borrow_mut()
+            .insert(name.into(), op);
+    }
+
+    /// 远端句柄结果复制（调试/断言用）。
+    pub fn remote_result(&self, rep: u32) -> Option<Option<Result<Value, String>>> {
+        self.state
+            .borrow()
+            .store
+            .borrow()
+            .data()
+            .remote_results
+            .get(&rep)
+            .cloned()
     }
 }
 
@@ -448,8 +517,91 @@ impl WasmTaskIter {
     }
 }
 
+impl WasmTaskIter {
+    /// 本步提交的远端请求 → 注入 Remote（委托 [`drive_pump_remote`]）。
+    fn pump_remotes(&self) {
+        let state = self.state.borrow();
+        let pending: Vec<RemotePending> =
+            std::mem::take(&mut state.store.borrow_mut().data_mut().remote_pending);
+        let remote = state.remote.borrow().clone();
+        let ops = &*state.remote_ops.borrow();
+        drive_pump_remote(
+            pending,
+            remote,
+            ops,
+            &mut state.remote_joins.borrow_mut(),
+            &mut state.store.borrow_mut().data_mut().remote_results,
+        );
+    }
+
+    /// step 边界 poll 在途远端 join（委托 [`drive_poll_remote`]）。
+    fn poll_remotes(&self) {
+        let state = self.state.borrow();
+        drive_poll_remote(
+            &mut state.remote_joins.borrow_mut(),
+            &mut state.store.borrow_mut().data_mut().remote_results,
+        );
+    }
+}
+
+/// 提交驱动（纯函数，W1b 单测点）：pending 请求 → 注入 Remote（op 映射）。
+fn drive_pump_remote(
+    pending: Vec<RemotePending>,
+    remote: Option<Rc<dyn Remote>>,
+    ops: &std::collections::HashMap<String, Arc<RemoteOp>>,
+    joins: &mut HashMap<u32, RemoteJoin<RemoteValue>>,
+    results: &mut HashMap<u32, Option<Result<Value, String>>>,
+) {
+    for p in pending {
+        let key = p.rep;
+        match (ops.get(&p.name).cloned(), &remote) {
+            (Some(op), Some(remote)) => {
+                let params = p.params;
+                let req = RemoteRequest::boxed(move || op(params));
+                joins.insert(key, remote.submit(req));
+            }
+            (None, _) => {
+                results.insert(
+                    key,
+                    Some(Err(format!(
+                        "未知远端操作 \"{}\"（先 register_remote）",
+                        p.name
+                    ))),
+                );
+            }
+            (_, None) => {
+                results.insert(
+                    key,
+                    Some(Err("远端桥未配置（configure_remote 注入 Remote）".into())),
+                );
+            }
+        }
+    }
+}
+
+/// 回填驱动（纯函数，W1b 单测点）：noop-waker poll 在途 join，Ready 回填结果。
+fn drive_poll_remote(
+    joins: &mut HashMap<u32, RemoteJoin<RemoteValue>>,
+    results: &mut HashMap<u32, Option<Result<Value, String>>>,
+) {
+    let waker = std::task::Waker::noop();
+    let mut cx = std::task::Context::from_waker(&waker);
+    let mut done = Vec::new();
+    for (rep, join) in joins.iter_mut() {
+        if let std::task::Poll::Ready(v) = join.as_mut().poll(&mut cx) {
+            results.insert(*rep, Some(value_from_remote(v).map_err(|e| e)));
+            done.push(*rep);
+        }
+    }
+    for rep in done {
+        joins.remove(&rep);
+    }
+}
+
 impl EffectIter for WasmTaskIter {
     fn next(&mut self) -> Step {
+        // W1b：先 poll 在途远端（guest 本次 step 的 take 可读到回填）。
+        self.poll_remotes();
         // 注入依赖同步（guest 的 get 读核心 store 的当前值）。
         self.sync_injected();
         // 驱动 guest 一步（同步；guard 在核心 execute 的步界检查）。
@@ -472,6 +624,8 @@ impl EffectIter for WasmTaskIter {
         };
         // 转发本步 pending 的 set 到核心 store。
         let forwarded = self.forward_pending();
+        // W1b：本步提交的远端请求 pump 到注入 Remote。
+        self.pump_remotes();
         // 收集本步 rep（逆闭包按应用序执行）。
         let reps: Vec<u32> = forwarded.iter().map(|(rep, _)| *rep).collect();
         // 把核心逆挂到 rep 表（run_inverse 经 rep 查找、幂等 take）。
@@ -499,5 +653,136 @@ impl EffectIter for WasmTaskIter {
             Some(_) => Step::Finished(step_inverse),
             None => Step::Finished(Box::new(|| {}) as Box<dyn FnOnce()>),
         }
+    }
+}
+
+/// `RemoteValue` → wit `Value`（downcast；非 Value 类型 → Err）。
+/// （发送方向不需要显式适配：`boxed(move || op(params))` 直接装箱为
+/// `RemoteValue` 传输容器——W1b。）
+fn value_from_remote(v: RemoteValue) -> Result<Value, String> {
+    v.downcast::<Value>()
+        .map(|b| *b)
+        .map_err(|_| "远端结果不是 wit value".to_string())
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+    use cordis_async::{Remote, TokioRemote};
+
+    fn op_text(s: &'static str) -> Arc<RemoteOp> {
+        Arc::new(move |_params: Vec<Value>| Value::Text(s.to_string()))
+    }
+
+    /// 泵送 → 提交到注入 Remote（TokioRemote/worker）→ 轮询回填。
+    #[test]
+    fn pump_submits_and_poll_backfills() {
+        let worker = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .build()
+            .expect("worker runtime");
+        let remote: Rc<dyn Remote> = Rc::new(TokioRemote::new(worker.handle().clone()));
+
+        let mut ops = std::collections::HashMap::new();
+        ops.insert("greet".to_string(), op_text("hi"));
+        let mut joins = HashMap::new();
+        let mut results = HashMap::new();
+        drive_pump_remote(
+            vec![RemotePending {
+                rep: 0,
+                name: "greet".into(),
+                params: vec![],
+            }],
+            Some(remote),
+            &ops,
+            &mut joins,
+            &mut results,
+        );
+        assert!(joins.contains_key(&0), "请求已提交（join 在途）");
+
+        // 轮询直到 worker 完成回填（noop-waker poll；worker 完成即 ready）。
+        for _ in 0..2000 {
+            drive_poll_remote(&mut joins, &mut results);
+            if results.contains_key(&0) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        match results.get(&0) {
+            Some(Some(Ok(Value::Text(s)))) => assert_eq!(s, "hi", "回填值"),
+            other => panic!("期望回填 Ok(Text(hi))，实际 {other:?}"),
+        }
+        assert!(!joins.contains_key(&0), "完成的 join 已移除");
+    }
+
+    /// 未注册操作 → 立即 err（句柄 take 通道）。
+    #[test]
+    fn unknown_op_immediate_err() {
+        let ops = std::collections::HashMap::new();
+        let mut joins = HashMap::new();
+        let mut results = HashMap::new();
+        drive_pump_remote(
+            vec![RemotePending {
+                rep: 5,
+                name: "nope".into(),
+                params: vec![],
+            }],
+            None,
+            &ops,
+            &mut joins,
+            &mut results,
+        );
+        assert!(joins.is_empty(), "未知名不提交");
+        assert!(
+            matches!(results.get(&5), Some(Some(Err(e))) if e.contains("未知远端操作")),
+            "未知操作 → 句柄 err"
+        );
+    }
+
+    /// 未配置桥 → err。
+    #[test]
+    fn unconfigured_remote_err() {
+        let mut ops = std::collections::HashMap::new();
+        ops.insert("x".to_string(), op_text("x"));
+        let mut joins = HashMap::new();
+        let mut results = HashMap::new();
+        drive_pump_remote(
+            vec![RemotePending {
+                rep: 1,
+                name: "x".into(),
+                params: vec![],
+            }],
+            None,
+            &ops,
+            &mut joins,
+            &mut results,
+        );
+        assert!(joins.is_empty());
+        assert!(
+            matches!(results.get(&1), Some(Some(Err(e))) if e.contains("未配置")),
+            "未配置桥 → err"
+        );
+    }
+
+    /// 适配器：非 Value 的 RemoteValue → err。
+    #[test]
+    fn adapter_rejects_non_value() {
+        let err = value_from_remote(Box::new(42u32)).unwrap_err();
+        assert!(err.contains("wit value"));
+    }
+
+    /// Host submit 入队 + rep 分配 + take 未就绪。
+    #[test]
+    fn host_submit_enqueues_and_take_pending() {
+        let mut host = Host::new();
+        let handle =
+            wit::cordis::core::remote::Host::submit(&mut host, "greet".to_string(), vec![]);
+        assert_eq!(handle.rep(), 0, "首个句柄 rep 0");
+        assert_eq!(host.remote_pending.len(), 1, "已入队");
+        let taken = wit::cordis::core::remote::HostHandle::take(&mut host, handle);
+        assert!(
+            taken.is_none(),
+            "未就绪 → take 返回 None（整个 Option，非 Some(None)）"
+        );
     }
 }
