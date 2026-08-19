@@ -110,18 +110,18 @@ impl EntryOutcome {
 }
 
 impl fmt::Display for ApplyReport {
-    // 每行一条：`条目 "x"：<状态>`。
+    // 每行一条状态；`Failed` 行直接输出 e（已含条目 id + 三要素，避免
+    // 三重嵌套——REVIEW-1f9d5e8 nit-1）。注：`Unchanged/Activated/FailedFiber`
+    // 未携带条目 id（§3 `EntryOutcome` 无 id 字段；§6.2 逐条目显示的精化需
+    // E1 装配或 outcome 扩展——观察项 nit-2）。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for o in &self.outcomes {
-            let line = match o {
-                EntryOutcome::Unchanged => "未变更".to_string(),
-                EntryOutcome::Activated => "已激活".to_string(),
-                EntryOutcome::Failed(e) => format!("失败：{e}"),
-                EntryOutcome::FailedFiber { error } => {
-                    format!("组件失败：{error}")
-                }
-            };
-            writeln!(f, "条目：{line}")?;
+            match o {
+                EntryOutcome::Failed(e) => writeln!(f, "{e}")?,
+                EntryOutcome::FailedFiber { error } => writeln!(f, "组件失败：{error}")?,
+                EntryOutcome::Activated => writeln!(f, "已激活")?,
+                EntryOutcome::Unchanged => writeln!(f, "未变更")?,
+            }
         }
         Ok(())
     }
