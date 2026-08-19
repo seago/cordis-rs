@@ -317,6 +317,9 @@ impl Runtime {
         let Some((iter, acc)) = fiber.resumable.borrow_mut().take() else {
             panic!("advance：fiber {fid:?} 未挂起于 Await（调用方违约；需先产生 Step::Await）");
         };
+        // m-2（REVIEW-8589ca2）：guard = `target.is_some()` 弱于激活期
+        // `== guard_target`——当前安全（更新路径经 unload 先收账 resumable），
+        // 与未来更新路径交互留 A3 复核。
         let guard = {
             let f = Rc::clone(&fiber);
             move || f.target.borrow().is_some()
@@ -325,6 +328,10 @@ impl Runtime {
             Ok(disposer) => {
                 // 恢复完成：折叠逆入 dispose（LIFO 跨激活保持）。
                 fiber.dispose.borrow_mut().push(disposer);
+                // 恢复段可能新增绑定（如 wasm 恢复步的 take 产物）——广播
+                // （幂等；依赖者已满足则 no-op）。REVIEW-8589ca2 m-1。
+                let provided = self.provided_of(&fiber);
+                fiber.ctx.notify(&provided);
             }
             Err((iter, acc)) => {
                 // 再次挂起（后续 advance 继续）。
