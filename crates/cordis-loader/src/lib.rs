@@ -70,7 +70,9 @@ use cordis_core::context::InterceptMeta;
 use cordis_core::effect::{EffectIter, once};
 use cordis_core::keyset::KeySet;
 use cordis_core::symbol::Symbol;
-use cordis_core::{Component, Context, Disposer, Fiber, FiberId, FiberState, Runtime};
+use cordis_core::{
+    Component, Context, Disposer, Fiber, FiberId, FiberState, RegistryError, Runtime,
+};
 
 /// 隔离注解（Def 74 的 `isolate`；§5.2.1 托管 realm 的两种作用域）。
 ///
@@ -300,6 +302,8 @@ pub struct Loader {
     retire_pending: RefCell<Vec<FiberId>>,
     /// 是否正处于 apply 协调中（hook 据此选择 pending 或直写）。
     in_apply: Cell<bool>,
+    /// 最近一次 apply 的逐条目报告（错误策略 v0.2；报告面）。
+    report: RefCell<Option<ApplyReport>>,
 }
 
 impl Loader {
@@ -314,6 +318,7 @@ impl Loader {
             config_casts: RefCell::new(HashMap::new()),
             retire_pending: RefCell::new(Vec::new()),
             in_apply: Cell::new(false),
+            report: RefCell::new(None),
         }
     }
 
@@ -345,12 +350,14 @@ impl Loader {
     ///
     /// `desired` 内重复 `id` 未定义（按 last-wins 处理，可能浪费一次
     /// 实例化）；调用方应保证 `id` 在整棵树内唯一。
-    pub fn apply(&self, desired: &[Entry]) {
+    pub fn apply(&self, desired: &[Entry]) -> ApplyReport {
         self.in_apply.set(true);
+        let mut outcomes = Vec::new();
         self.apply_into(
             desired,
             Rc::clone(&self.root),
             &mut self.entries.borrow_mut(),
+            &mut outcomes,
         );
         self.in_apply.set(false);
         // 注（REVIEW-460d8d0 nit）：apply_into 内 panic（配置错误）时不复位
@@ -362,6 +369,32 @@ impl Loader {
         for fid in pending {
             self.writeback_retire(fid);
         }
+        // 逐条目报告（错误策略 v0.2）：存最近一次快照并返回当前次。
+        let report = ApplyReport { outcomes };
+        *self.report.borrow_mut() = Some(report.clone());
+        report
+    }
+
+    /// 最近一次 apply 的逐条目报告（错误策略 v0.2 报告面）。
+    pub fn report(&self) -> Option<ApplyReport> {
+        self.report.borrow().clone()
+    }
+
+    /// 条目状态查询（错误策略 v0.2 报告面；未加载条目 = `None`）。
+    pub fn entry_state(&self, id: &str) -> Option<EntryState> {
+        let map = self.entries.borrow();
+        let loaded = find_loaded(&map, id)?;
+        Some(if loaded.disabled {
+            EntryState::Disabled
+        } else if let Some(f) = &loaded.fiber {
+            let st = f.state();
+            match &*st {
+                FiberState::Inactive(Some(e)) => EntryState::FailedFiber(format!("{e:?}")),
+                _ => EntryState::Loaded,
+            }
+        } else {
+            EntryState::Disabled
+        })
     }
 
     /// 注册名对应的组件实例（HMR 备份/恢复用，M2-PR5）。
@@ -538,6 +571,7 @@ impl Loader {
         desired: &[Entry],
         parent_ctx: Rc<Context>,
         loaded: &mut HashMap<String, LoadedEntry>,
+        outcomes: &mut Vec<EntryOutcome>,
     ) {
         // 阶段 1（卸载侧）：先释放供给名，为阶段 2 的同供给替换腾位。
         let current: Vec<String> = loaded.keys().cloned().collect();
@@ -570,11 +604,16 @@ impl Loader {
         // 阶段 2（实例化侧）：新增 / disabled 清除 / 重建；未变条目零操作。
         for entry in desired {
             match loaded.get(&entry.id).cloned() {
-                None => {
-                    let fresh = self.make_loaded(entry, &parent_ctx);
-                    loaded.insert(entry.id.clone(), fresh);
-                }
-                Some(l) => self.reconcile_into(entry, &l, &parent_ctx, loaded),
+                None => match self.make_loaded(entry, &parent_ctx, outcomes, loaded) {
+                    Ok(Some(fresh)) => {
+                        loaded.insert(entry.id.clone(), fresh);
+                        outcomes.push(EntryOutcome::Activated);
+                    }
+                    // disabled：协调字段，不实例化、不推 outcome。
+                    Ok(None) => {}
+                    Err(e) => outcomes.push(EntryOutcome::Failed(e)),
+                },
+                Some(l) => self.reconcile_into(entry, &l, &parent_ctx, loaded, outcomes),
             }
         }
     }
@@ -586,6 +625,7 @@ impl Loader {
         loaded: &LoadedEntry,
         parent_ctx: &Rc<Context>,
         map: &mut HashMap<String, LoadedEntry>,
+        outcomes: &mut Vec<EntryOutcome>,
     ) {
         if loaded.disabled != entry.disabled {
             if entry.disabled {
@@ -604,8 +644,14 @@ impl Loader {
                 {
                     self.unload_from(&entry.id, map);
                 }
-                let fresh = self.make_loaded(entry, parent_ctx);
-                map.insert(entry.id.clone(), fresh);
+                match self.make_loaded(entry, parent_ctx, outcomes, map) {
+                    Ok(Some(fresh)) => {
+                        map.insert(entry.id.clone(), fresh);
+                        outcomes.push(EntryOutcome::Activated);
+                    }
+                    Ok(None) => {}
+                    Err(e) => outcomes.push(EntryOutcome::Failed(e)),
+                }
             }
             return;
         }
@@ -619,8 +665,14 @@ impl Loader {
             // isolate 变更走 Algorithm 7 重指派）。
             if loaded.isolate != entry.isolate {
                 self.unload_from(&entry.id, map);
-                let fresh = self.make_loaded(entry, parent_ctx);
-                map.insert(entry.id.clone(), fresh);
+                match self.make_loaded(entry, parent_ctx, outcomes, map) {
+                    Ok(Some(fresh)) => {
+                        map.insert(entry.id.clone(), fresh);
+                        outcomes.push(EntryOutcome::Activated);
+                    }
+                    Ok(None) => {}
+                    Err(e) => outcomes.push(EntryOutcome::Failed(e)),
+                }
                 return;
             }
             let holder = map
@@ -640,7 +692,7 @@ impl Loader {
             // 子列表 keyed diff（两阶段递归；幸存子条目不重建）。
             let holder_ctx = holder.ctx().clone();
             let children = &mut map.get_mut(&entry.id).expect("组条目存在").children;
-            self.apply_into(&entry.children, holder_ctx, children);
+            self.apply_into(&entry.children, holder_ctx, children, outcomes);
             return;
         }
 
@@ -657,8 +709,14 @@ impl Loader {
                 ))
         {
             self.unload_from(&entry.id, map);
-            let fresh = self.make_loaded(entry, parent_ctx);
-            map.insert(entry.id.clone(), fresh);
+            match self.make_loaded(entry, parent_ctx, outcomes, map) {
+                Ok(Some(fresh)) => {
+                    map.insert(entry.id.clone(), fresh);
+                    outcomes.push(EntryOutcome::Activated);
+                }
+                Ok(None) => {}
+                Err(e) => outcomes.push(EntryOutcome::Failed(e)),
+            }
             return;
         }
         if loaded.isolate != entry.isolate {
@@ -673,21 +731,34 @@ impl Loader {
             l.intercept = entry.intercept.clone();
             l.config = Rc::clone(&entry.config);
         }
+        // 未变路径（前面所有 action 均未触发）→ Unchanged。
+        outcomes.push(EntryOutcome::Unchanged);
     }
 
     /// 构造（并加载）条目：叶子实例化组件；分支实例化持有者 + 递归子条目。
-    fn make_loaded(&self, entry: &Entry, parent_ctx: &Rc<Context>) -> LoadedEntry {
+    fn make_loaded(
+        &self,
+        entry: &Entry,
+        parent_ctx: &Rc<Context>,
+        outcomes: &mut Vec<EntryOutcome>,
+        map: &HashMap<String, LoadedEntry>,
+    ) -> Result<Option<LoadedEntry>, EntryError> {
         let ctx = self.entry_ctx(entry, parent_ctx);
         if entry.is_group() {
             let mut children = HashMap::new();
             let fiber = if entry.disabled {
                 None
             } else {
-                let holder = self.instantiate_group(entry, &ctx);
-                self.apply_into(&entry.children, holder.ctx().clone(), &mut children);
+                let holder = self.instantiate_group(entry, &ctx, map)?;
+                self.apply_into(
+                    &entry.children,
+                    holder.ctx().clone(),
+                    &mut children,
+                    outcomes,
+                );
                 Some(holder)
             };
-            LoadedEntry {
+            Ok(Some(LoadedEntry {
                 component: entry.component.clone(),
                 config: Rc::clone(&entry.config),
                 revision: entry.revision,
@@ -697,14 +768,14 @@ impl Loader {
                 ctx,
                 fiber,
                 children,
-            }
+            }))
         } else {
             let fiber = if entry.disabled {
                 None
             } else {
-                Some(self.instantiate_leaf(entry, &ctx))
+                Some(self.instantiate_leaf(entry, &ctx, map)?)
             };
-            LoadedEntry {
+            Ok(Some(LoadedEntry {
                 component: entry.component.clone(),
                 config: Rc::clone(&entry.config),
                 revision: entry.revision,
@@ -714,8 +785,64 @@ impl Loader {
                 ctx,
                 fiber,
                 children: HashMap::new(),
+            }))
+        }
+    }
+
+    /// use_component 失败 → OrchestrationError（ProvisionClash / UnknownParent）。
+    fn registration_error(
+        &self,
+        entry: &Entry,
+        ctx: &Rc<Context>,
+        err: RegistryError,
+        map: &HashMap<String, LoadedEntry>,
+    ) -> EntryError {
+        let entry_id = entry.id.clone();
+        let kind = match err {
+            RegistryError::ProvisionClash => {
+                let (keys, owner) = self.clash_info(entry, ctx, map);
+                EntryErrorKind::ProvisionClash { keys, owner }
+            }
+            _ => EntryErrorKind::UnknownParent {
+                parent: String::new(),
+            },
+        };
+        EntryError { entry_id, kind }
+    }
+
+    /// ProvisionClash 的冲突键（组件 provide ∩ 已有注册提供键，全列）与
+    /// owner 条目 id（按首个冲突键反查提供者 fiber 所属条目）。
+    fn clash_info(
+        &self,
+        entry: &Entry,
+        ctx: &Rc<Context>,
+        map: &HashMap<String, LoadedEntry>,
+    ) -> (Vec<Symbol>, String) {
+        let prov = self
+            .components
+            .borrow()
+            .get(&entry.component)
+            .map(|c| c.provide())
+            .unwrap_or_default();
+        let mut keys = Vec::new();
+        let mut owner = String::new();
+        for k in prov.iter() {
+            let realm = ctx.realm_of(k);
+            if let Some(owner_fid) = self.runtime.provider_of_realm(realm) {
+                keys.push(k);
+                if owner.is_empty() {
+                    // owner 优先查当前层 map（协调器正持有 entries 可变借用——
+                    // entry_of 会 RefCell 冲突，REVIEW/E1 简化：同层条目为主、
+                    // 跨层兜底 fiber id）。
+                    owner = map
+                        .iter()
+                        .find(|(_, l)| l.fiber.as_ref().is_some_and(|f| f.id() == owner_fid))
+                        .map(|(id, _)| id.clone())
+                        .unwrap_or_else(|| format!("fiber:{owner_fid:?}"));
+                }
             }
         }
+        (keys, owner)
     }
 
     /// 条目上下文：叶子 = 注解 ctx（isolate 派生 + intercept 派生）；
@@ -745,45 +872,44 @@ impl Loader {
             }
             ctx
         } else {
-            // 查表副作用 = 未注册 panic；绑定不再用于注解（G3 per-key 后
-            // isolate 不再需要 keys）。
-            let _component = self
-                .components
-                .borrow()
-                .get(&entry.component)
-                .cloned()
-                .unwrap_or_else(|| {
-                    panic!(
-                        "未注册的组件 `{}`（先 register_component）",
-                        entry.component
-                    )
-                });
+            // 未知组件不再在此 panic（错误策略 v0.2）——instantiate_leaf
+            // 负责报 `UnknownComponent` 并回撤；G3 per-key 后此处无需查表。
             self.annotated_ctx(parent_ctx, entry)
         }
     }
 
     /// 叶子实例化：在注解 ctx 上注册组件；若父为 fiber（组内），在父 ctx
     /// 注册级联退役（Def 47 注册逆——父退役 → O-Retire 本 fiber）。
-    fn instantiate_leaf(&self, entry: &Entry, ctx: &Rc<Context>) -> Rc<Fiber> {
-        validate_config(
+    fn instantiate_leaf(
+        &self,
+        entry: &Entry,
+        ctx: &Rc<Context>,
+        map: &HashMap<String, LoadedEntry>,
+    ) -> Result<Rc<Fiber>, EntryError> {
+        if let Err(message) = validate_config(
             &self.config_casts.borrow(),
             entry.config.as_ref(),
             &entry.id,
-        );
-        let component = self
-            .components
-            .borrow()
-            .get(&entry.component)
-            .cloned()
-            .unwrap_or_else(|| {
-                panic!(
-                    "未注册的组件 `{}`（先 register_component）",
-                    entry.component
-                )
+        ) {
+            return Err(EntryError {
+                entry_id: entry.id.clone(),
+                kind: EntryErrorKind::ConfigValidation { message },
             });
+        }
+        let component = match self.components.borrow().get(&entry.component).cloned() {
+            Some(c) => c,
+            None => {
+                return Err(EntryError {
+                    entry_id: entry.id.clone(),
+                    kind: EntryErrorKind::UnknownComponent {
+                        component: entry.component.clone(),
+                    },
+                });
+            }
+        };
         let fiber = ctx
             .use_component(component, Rc::clone(&entry.config))
-            .unwrap_or_else(|err| panic!("条目 `{}` 实例化失败：{err:?}（配置错误）", entry.id));
+            .map_err(|err| self.registration_error(entry, ctx, err, map))?;
         // 级联：父 fiber 退役 → 子代 O-Retire（Def 47；经父 ctx 累加器）。
         // 注（REVIEW-24bfab5 nit5）：`register` 的 retire 逆落在**派生 ctx**
         //（annotated_ctx）的累加器上——孤儿（从不执行）；此处的**显式父
@@ -796,24 +922,34 @@ impl Loader {
                 })))
             }));
         }
-        fiber
+        Ok(fiber)
     }
 
     /// 组持有者实例化：无注入/供给的空组件（组的角色 = 子条目的父 fiber，
     /// Def 47 注册）。
-    fn instantiate_group(&self, entry: &Entry, parent_ctx: &Rc<Context>) -> Rc<Fiber> {
-        validate_config(
+    fn instantiate_group(
+        &self,
+        entry: &Entry,
+        parent_ctx: &Rc<Context>,
+        map: &HashMap<String, LoadedEntry>,
+    ) -> Result<Rc<Fiber>, EntryError> {
+        if let Err(message) = validate_config(
             &self.config_casts.borrow(),
             entry.config.as_ref(),
             &entry.id,
-        );
+        ) {
+            return Err(EntryError {
+                entry_id: entry.id.clone(),
+                kind: EntryErrorKind::ConfigValidation { message },
+            });
+        }
         // 组拦截/注入/isolate 注解经 annotated_ctx 应用（G3：per-key
         // isolate 重定向组 ctx——子条目经 derive 拷贝继承；REVIEW-24bfab5
         // nit4：复用而非手工复刻）。
         let ctx = self.annotated_ctx(parent_ctx, entry);
         let holder = ctx
             .use_component(Rc::new(GroupHolder), Rc::clone(&entry.config))
-            .unwrap_or_else(|err| panic!("组条目 `{}` 实例化失败：{err:?}（配置错误）", entry.id));
+            .map_err(|err| self.registration_error(entry, &ctx, err, map))?;
         // 组持有者也注册级联（组在组内时）。
         if ctx.fiber().is_some() {
             drop(ctx.effect(|| -> Box<dyn EffectIter> {
@@ -823,7 +959,7 @@ impl Loader {
                 })))
             }));
         }
-        holder
+        Ok(holder)
     }
 
     /// 注解 ctx：派生（隔离父上下文）→ isolate（派生）→ intercept
@@ -1384,12 +1520,103 @@ mod tests {
         );
     }
 
+    /// 错误策略 v0.2（验收 #5）：未知组件 → `Failed(UnknownComponent)` 报告、
+    /// apply 继续（迁移原 panic 断言）。
     #[test]
-    #[should_panic(expected = "未注册的组件")]
-    fn unknown_component_panics() {
+    fn unknown_component_reports_not_panic() {
         let (loader, _runtime) = loader();
-        loader.apply(&[entry("x", "ghost", "cfg", 1, false)]);
+        loader.apply(&[
+            entry("ok", "provider", "pg", 1, false),
+            entry("x", "ghost", "cfg", 1, false),
+        ]);
+        // apply 不 panic；report 含 UnknownComponent。
+        let report = loader.report().expect("最近一次 apply 报告");
+        assert!(
+            report.failed().any(|o| matches!(
+                o,
+                EntryOutcome::Failed(EntryError {
+                    entry_id,
+                    kind: EntryErrorKind::UnknownComponent { component },
+                }) if entry_id == "x" && component == "ghost"
+            )),
+            "未知组件 → Failed(UnknownComponent)"
+        );
+        assert!(loader.fiber("x").is_none(), "未知组件 = 未挂载");
     }
+    /// 错误策略 v0.2（验收 #4）：ProvisionClash first-wins——先到者保持、
+    /// 后到者 `Failed(ProvisionClash{keys, owner})` 报告。
+    #[test]
+    fn provision_clash_first_wins_reports() {
+        let (loader, _runtime) = loader();
+        let report = loader.apply(&[
+            entry("a", "provider", "pa", 1, false),
+            entry("b", "provider", "pb", 1, false),
+        ]);
+        // 先到者 a 保持（提供 val）；后到者 b 未挂载。
+        assert!(loader.fiber("a").is_some(), "first-wins：先到者保持");
+        assert!(loader.fiber("b").is_none(), "first-wins：后到者未挂载");
+        assert!(
+            report.failed().any(|o| matches!(
+                o,
+                EntryOutcome::Failed(EntryError {
+                    entry_id,
+                    kind: EntryErrorKind::ProvisionClash { keys, owner },
+                }) if entry_id == "b" && !keys.is_empty() && owner == "a"
+            )),
+            "后到者 → Failed ProvisionClash 含 keys 且 owner 指向先到者条目"
+        );
+    }
+
+    /// 错误策略 v0.2（验收 #7）：同键替换（先卸载后实例化，两阶段）不产生
+    /// Clash 报告——卸载侧先释放供给名。
+    #[test]
+    fn same_key_replace_reports_no_clash() {
+        let (loader, _runtime) = loader();
+        loader.apply(&[entry("a", "provider", "pa", 1, false)]);
+        let report = loader.apply(&[entry("b", "provider", "pb", 1, false)]);
+        assert!(loader.fiber("b").is_some(), "替换后 b 挂载");
+        assert!(
+            !report.failed().any(|o| matches!(
+                o,
+                EntryOutcome::Failed(EntryError {
+                    kind: EntryErrorKind::ProvisionClash { .. },
+                    ..
+                })
+            )),
+            "同键替换不报 Clash（两阶段先释放供给名）"
+        );
+        assert!(
+            report
+                .outcomes
+                .iter()
+                .any(|o| matches!(o, EntryOutcome::Activated)),
+            "替换条目 Activated"
+        );
+    }
+
+    /// 错误策略 v0.2（验收 #2）：组条目 config 校验失败 → 整组未挂载、
+    /// 子条目不实例化、报告 `Failed(ConfigValidation)`。
+    #[test]
+    fn group_config_validation_failure_reports() {
+        let (loader, _runtime) = loader();
+        loader.register_config::<ValConfig>();
+        let mut g = Entry::group("g", vec![entry("c", "consumer", "ignored", 1, false)]);
+        g.config = Rc::new(ValConfig(String::new()));
+        let report = loader.apply(&[g]);
+        assert!(loader.fiber("g").is_none(), "组校验失败 = 整组未挂载");
+        assert!(loader.fiber("c").is_none(), "组失败 → 子条目不实例化");
+        assert!(
+            report.failed().any(|o| matches!(
+                o,
+                EntryOutcome::Failed(EntryError {
+                    entry_id,
+                    kind: EntryErrorKind::ConfigValidation { .. },
+                }) if entry_id == "g"
+            )),
+            "组 config 校验失败 → Failed(ConfigValidation)"
+        );
+    }
+
     // ── M2-PR3：intercept / isolate / group / include ─────────────────
 
     /// 拦截测试元数据（⊕：paths 取并、read_only 右偏）。
@@ -1749,16 +1976,36 @@ mod tests {
         );
     }
 
-    /// G7 校验失败 = 配置错误（panic；与 ProvisionClash 同型）。
+    /// 错误策略 v0.2（验收 #1/#9）：配置校验失败 → `Failed(ConfigValidation)`
+    /// 报告、该条目不挂载、其余条目继续、进程不崩（迁移原 panic 断言）。
     #[test]
-    #[should_panic(expected = "配置校验失败")]
-    fn config_validate_failure_panics() {
+    fn config_validate_failure_reports_not_panic() {
         let (loader, _runtime) = loader();
         loader.register_config::<ValConfig>();
-        loader.apply(&[
-            val_config("", 1),
-            entry("consumer", "consumer", "ignored", 1, false),
-        ]);
+        loader.register_component("ok", val_config_provider());
+        let report = loader.apply(&[entry("ok", "ok", "pg", 1, false), val_config("", 2)]);
+        // 校验失败条目：未挂载、报告 Failed(ConfigValidation)。
+        let failed: Vec<_> = report.failed().collect();
+        assert!(
+            failed.iter().any(|o| matches!(
+                o,
+                EntryOutcome::Failed(EntryError {
+                    entry_id,
+                    kind: EntryErrorKind::ConfigValidation { .. },
+                }) if entry_id == "p"
+            )),
+            "校验失败 → Failed(ConfigValidation)（条目 p）"
+        );
+        // 其余条目激活（进程不崩、apply 继续）。
+        assert!(
+            report
+                .outcomes
+                .iter()
+                .any(|o| matches!(o, EntryOutcome::Activated)),
+            "其余条目 Activated"
+        );
+        // 失败条目未挂载（校验失败无 fiber）。
+        assert!(loader.fiber("p").is_none(), "校验失败 = 未挂载");
     }
 
     /// G7 组条目 config 值级 diff（REVIEW-1c86b5f nit-6）：组 config

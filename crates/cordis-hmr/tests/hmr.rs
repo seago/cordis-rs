@@ -372,7 +372,7 @@ fn hmr_reload_noop_without_stashed() {
 /// 冲突 → `apply` panic → **先回滚再重抛**（panic = bug 纪律 + 永不半
 /// 重载）。
 #[test]
-fn hmr_reload_rolls_back_before_repanic_on_provision_clash() {
+fn hmr_reload_rolls_back_on_provision_clash() {
     let (loader, runtime) = setup("1");
     assert_eq!(sum_of(&runtime), "sum(1)");
 
@@ -400,12 +400,13 @@ fn hmr_reload_rolls_back_before_repanic_on_provision_clash() {
         Entry::new("c", "cons", Rc::new(()), 0, false),
     ];
 
-    // apply panic（ProvisionClash：新 db 提供 val+sum，与 c 的 sum 冲突）
-    // → 回滚后重抛。
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        hmr.reload(&["db".to_string()], &[], &graph, &desired)
-    }));
-    assert!(result.is_err(), "供给冲突 panic 传播（panic = bug）");
+    // 错误策略 v0.2：ProvisionClash 走 OrchestrationError（不 panic）——
+    // reload 经 report 检测 → 回滚 + 返回 Err。
+    let result = hmr.reload(&["db".to_string()], &[], &graph, &desired);
+    assert!(
+        result.is_err(),
+        "供给冲突（OrchestrationError）→ reload Err（触发回滚）"
+    );
 
     // 系统已回滚：旧版本生效、条目 c 状态保留、无半重载残留。
     assert_eq!(sum_of(&runtime), "sum(1)", "回滚到旧版本");

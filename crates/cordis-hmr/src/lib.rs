@@ -43,7 +43,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 use cordis_core::FiberState;
-use cordis_loader::{Entry, Loader};
+use cordis_loader::{Entry, EntryOutcome, Loader};
 
 /// 模块导入依赖图（`get_imports(url)`，§5.2.2）。
 pub trait ModuleGraph {
@@ -278,7 +278,22 @@ impl Hmr {
                     e
                 })
                 .collect();
-            self.loader.apply(&bumped);
+            let report = self.loader.apply(&bumped);
+            // 错误策略 v0.2：OrchestrationError（校验失败/供给冲突/未知
+            // 组件）经 report 表现——不 panic，bail 触发回滚。
+            // 只看 `Failed`（未挂载的 OrchestrationError：校验/供给/未知
+            // 组件）——`FailedFiber`（已挂载 Inactive）由下方 L-Raise 检查
+            // 处理（且带 stale 过滤，REVIEW-4c6e7fc nit3）。`Failed` 均为
+            // 本次 apply 新产生（未挂载条目不入树），重载引入任何失败 →
+            // 回滚（可能由 stale 组件跨条目供给变化引起，如 db 重载致 c
+            // Clash——失败条目 id 不必 ∈ stale）。
+            if report
+                .outcomes
+                .iter()
+                .any(|o| matches!(o, EntryOutcome::Failed(_)))
+            {
+                anyhow::bail!("条目加载失败（OrchestrationError，校验/供给/组件问题，触发回滚）");
+            }
             // 失败检测：**仅过期条目**的 fiber 失败态（L-Raise；非过期
             // 条目未重建、其既有失败 fiber 不得误判，REVIEW-4c6e7fc
             // nit3）。

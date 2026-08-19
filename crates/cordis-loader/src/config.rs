@@ -46,16 +46,19 @@ pub(crate) type ConfigCast = fn(&dyn Any) -> Option<&dyn Config>;
 /// **范围（REVIEW-1c86b5f nit-1）**：panic 中止**整个 apply**（协调期），
 /// 与 TS 的单 fiber 失败态（其余条目继续）不同——公开差异；运行时组件
 /// 失败仍走 L-Raise（fiber 级）。
+/// 校验配置；失败返回 `Err(message)`（错误策略 v0.2：不 panic，由调用方
+/// 报告 `ConfigValidation`、不挂载；每次 apply 重试）。
 pub(crate) fn validate_config(
     casts: &std::collections::HashMap<std::any::TypeId, ConfigCast>,
     config: &dyn Any,
-    id: &str,
-) {
+    _id: &str,
+) -> Result<(), String> {
     if let Some(c) = casts.get(&config.type_id()).and_then(|f| f(config))
         && let Err(msg) = c.validate()
     {
-        panic!("条目 `{id}` 配置校验失败：{msg}（配置错误 = bug）");
+        return Err(msg);
     }
+    Ok(())
 }
 
 /// 值级相等（G7）：双方类型均注册且 `same` 为真 → 免重建；未注册/
