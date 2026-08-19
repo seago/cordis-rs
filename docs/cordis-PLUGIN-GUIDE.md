@@ -84,5 +84,5 @@ async 层 `cordis-async`、事件层 `cordis-events` 与 loader 组合的既有�
 
 - `cargo run -p cordis-async --example async_combo`（sync 树 + async 层 +
   Remote 回路）。
-- 事件订阅 + async 监听器 + agent loop 模板见 `docs/cordis-PLUGIN-TEMPLATE-*.md`
-  与 P1.4 示例插件。
+- 事件订阅 + agent-loop + 卸载 flush 模板：`cargo run -p cordis-async
+  --example plugin_template`（REVIEW-dadc512 minor-1 引用修正）。
