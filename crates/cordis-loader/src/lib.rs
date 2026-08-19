@@ -54,7 +54,9 @@ mod config;
 mod patch;
 mod report;
 
-pub use report::{ApplyReport, EntryError, EntryErrorKind, EntryOutcome, EntryState};
+pub use report::{
+    ApplyReport, EntryError, EntryErrorKind, EntryFailedHook, EntryOutcome, EntryState,
+};
 
 pub use config::{Config, interpolate};
 use config::{configs_same, validate_config};
@@ -304,6 +306,8 @@ pub struct Loader {
     in_apply: Cell<bool>,
     /// 最近一次 apply 的逐条目报告（错误策略 v0.2；报告面）。
     report: RefCell<Option<ApplyReport>>,
+    /// 条目失败观察者（E2；events 衔接经此注入，loader 零依赖 events）。
+    entry_failed_hook: RefCell<Option<Rc<EntryFailedHook>>>,
 }
 
 impl Loader {
@@ -319,6 +323,7 @@ impl Loader {
             retire_pending: RefCell::new(Vec::new()),
             in_apply: Cell::new(false),
             report: RefCell::new(None),
+            entry_failed_hook: RefCell::new(None),
         }
     }
 
@@ -371,8 +376,21 @@ impl Loader {
         }
         // 逐条目报告（错误策略 v0.2）：存最近一次快照并返回当前次。
         let report = ApplyReport { outcomes };
+        for o in &report.outcomes {
+            if let EntryOutcome::Failed(e) = o
+                && let Some(hook) = &*self.entry_failed_hook.borrow()
+            {
+                hook(e);
+            }
+        }
         *self.report.borrow_mut() = Some(report.clone());
         report
+    }
+
+    /// 注册条目失败观察者（E2；events `loader/entry-failed` 衔接注入点——
+    /// loader 保持零依赖，事件发射由注入的 hook 完成）。
+    pub fn register_entry_failed_hook(&self, hook: Option<Rc<EntryFailedHook>>) {
+        *self.entry_failed_hook.borrow_mut() = hook;
     }
 
     /// 最近一次 apply 的逐条目报告（错误策略 v0.2 报告面）。
@@ -1627,6 +1645,83 @@ mod tests {
             )),
             "组 config 校验失败 → Failed(ConfigValidation)"
         );
+    }
+
+    /// 错误策略 v0.2（验收 #3）：失败条目不写回不挂载；desired 未变时下
+    /// 次 apply **重试并重报 Failed**（非 Unchanged）；修配置 + revision
+    /// bump → 复活 Activated。
+    #[test]
+    fn failed_entry_retries_each_apply_and_revives() {
+        let (loader, _runtime) = loader();
+        loader.register_config::<ValConfig>();
+        loader.register_component("provider", val_config_provider());
+
+        let bad = val_config("", 1);
+        let r1 = loader.apply(&[bad.clone()]);
+        assert!(
+            r1.failed().any(|o| matches!(
+                o,
+                EntryOutcome::Failed(EntryError {
+                    kind: EntryErrorKind::ConfigValidation { .. },
+                    ..
+                })
+            )),
+            "首次：校验失败报告"
+        );
+        assert!(loader.fiber("p").is_none(), "失败未挂载（无写回无 fiber）");
+
+        // desired 未变：下次 apply 重试并重报 Failed（非 Unchanged）。
+        let r2 = loader.apply(&[bad.clone()]);
+        assert!(
+            r2.failed().any(|o| matches!(
+                o,
+                EntryOutcome::Failed(EntryError {
+                    kind: EntryErrorKind::ConfigValidation { .. },
+                    ..
+                })
+            )),
+            "每次 apply 重试并重报 Failed"
+        );
+        assert!(
+            !r2.outcomes
+                .iter()
+                .any(|o| matches!(o, EntryOutcome::Unchanged)),
+            "失败未挂载条目不是 Unchanged"
+        );
+
+        // 修配置 + revision bump → 复活 Activated。
+        let good = val_config("gv", 2);
+        let r3 = loader.apply(&[good]);
+        assert!(
+            r3.outcomes
+                .iter()
+                .any(|o| matches!(o, EntryOutcome::Activated)),
+            "修配置后复活 Activated"
+        );
+        assert!(loader.fiber("p").is_some(), "复活后挂载");
+    }
+
+    /// 错误策略 v0.2（验收 #6）：ApplyReport Display 快照含条目 id + 组件
+    /// 名；整体可读。
+    #[test]
+    fn apply_report_display_snapshot() {
+        let r = ApplyReport {
+            outcomes: vec![
+                EntryOutcome::Failed(EntryError {
+                    entry_id: "x".into(),
+                    kind: EntryErrorKind::UnknownComponent {
+                        component: "y".into(),
+                    },
+                }),
+                EntryOutcome::Activated,
+            ],
+        };
+        let s = r.to_string();
+        assert!(
+            s.contains("条目 \"x\" 未知组件 \"y\""),
+            "Failed 行含 id + 组件名"
+        );
+        assert!(s.contains("已激活"));
     }
 
     // ── M2-PR3：intercept / isolate / group / include ─────────────────

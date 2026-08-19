@@ -127,6 +127,12 @@ impl fmt::Display for ApplyReport {
     }
 }
 
+/// 条目失败观察者（E2）：apply 后对每个 `EntryError`（OrchestrationError）
+/// 回调。loader 本身零依赖（不经 events）——由 app/测试把本 hook 接到
+/// cordis-events（发射 `loader/entry-failed`），保持 loader run 依赖只
+/// `cordis-core`（错误策略草案 §7 integration 点）。
+pub type EntryFailedHook = dyn Fn(&EntryError) + 'static;
+
 /// loader 条目状态查询（报告面）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EntryState {
