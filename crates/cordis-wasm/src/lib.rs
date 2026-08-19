@@ -175,6 +175,36 @@ impl HostInverse for Host {
     }
 }
 
+/// M1 wasm 桥（W1a）：`remote` 接口 stub——W1b 填充宿主驱动（注册表 +
+/// 注入 `Remote` 提交 + 句柄结果登记）。`todo!` 仅占位（W1a 不调用，
+/// 编译通过即可）。
+impl wit::cordis::core::remote::Host for Host {
+    // bindgen 生成签名（无 wasmtime::Result 包裹；错误经 take 的 err 通道）。
+    fn submit(
+        &mut self,
+        _name: String,
+        _params: Vec<wit::cordis::core::remote::Value>,
+    ) -> Resource<wit::cordis::core::remote::Handle> {
+        todo!("W1b：注册表 + 注入 Remote 提交 + 句柄登记")
+    }
+}
+
+impl wit::cordis::core::remote::HostHandle for Host {
+    fn take(
+        &mut self,
+        _handle: Resource<wit::cordis::core::remote::Handle>,
+    ) -> Option<Result<wit::cordis::core::remote::Value, String>> {
+        None // W1b：按句柄查结果
+    }
+    fn drop(
+        &mut self,
+        _handle: Resource<wit::cordis::core::remote::Handle>,
+    ) -> wasmtime::Result<()> {
+        // W1b：清理句柄表条目（guest 弃句柄 / 实例卸载）。
+        Ok(())
+    }
+}
+
 impl ContextHost for Host {
     fn get(&mut self, key: String) -> Option<Value> {
         self.bindings.get(&key).cloned()

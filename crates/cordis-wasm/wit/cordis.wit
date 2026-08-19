@@ -19,6 +19,17 @@ interface context {
     set: func(key: string, value: value) -> result<inverse, string>;
 }
 
+interface remote {
+    use context.{value};
+    resource handle {
+        /// 取结果（轮询）：未就绪 → none；就绪 → ok(value) / err(string)。
+        /// guest 在后续 step 调用；host 保证不 panic。
+        take: func() -> option<result<value, string>>;
+    }
+    /// 提交宿主已注册的远端操作（M1 wasm 桥 W-D2）：操作名 + 参数值。
+    submit: func(name: string, params: list<value>) -> handle;
+}
+
 interface plugin {
     use context.{inverse};
     resource task {
@@ -38,5 +49,6 @@ interface plugin {
 
 world cordis {
     import context;
+    import remote;
     export plugin;
 }
