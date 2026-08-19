@@ -7,7 +7,7 @@
 //! `remote_result` 断言"提交→worker→回填"真实链路；guest 的 take 契约为
 //! 接口面（编译/语义）。
 
-use cordis_async::{Remote, TokioRemote};
+use cordis_async::TokioRemote;
 use cordis_core::component::Component;
 use cordis_core::runtime::Runtime;
 use cordis_wasm::WasmComponent;
