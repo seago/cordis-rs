@@ -8,8 +8,8 @@ use cordis_async::TokioRemote;
 use cordis_core::component::Component;
 use cordis_core::runtime::Runtime;
 use cordis_core::symbol::Symbol;
-use cordis_wasm::wit::cordis::core::context::Value;
 use cordis_wasm::WasmComponent;
+use cordis_wasm::wit::cordis::core::context::Value;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -46,13 +46,16 @@ fn c1_note_back_injects_result_into_store() {
     let bytes = std::fs::read(guest_wasm_path()).expect("先构建 guest");
     let comp = WasmComponent::load(&engine, &bytes).expect("组件加载");
     comp.configure_remote(Some(Rc::new(TokioRemote::new(worker.handle().clone()))));
-    comp.register_remote("echo", Arc::new(|params: Vec<Value>| {
-        let n = match params.first() {
-            Some(Value::Count(c)) => *c,
-            _ => 0,
-        };
-        Value::Count(n * 2)
-    }));
+    comp.register_remote(
+        "echo",
+        Arc::new(|params: Vec<Value>| {
+            let n = match params.first() {
+                Some(Value::Count(c)) => *c,
+                _ => 0,
+            };
+            Value::Count(n * 2)
+        }),
+    );
 
     let runtime = Rc::new(Runtime::new());
     let root = runtime.context();
