@@ -411,7 +411,7 @@ impl Runtime {
     /// - **Active** → `unload` 逆转当前效应 → 目标未变 → 链式 `reload`
     ///   （fiber 身份保留；依赖者因绑定撤销/重装级联停用/恢复）；
     /// - **失败态**（`Inactive(Some(ζ))`）→ 清除 ζ 后 `refresh` 重算
-    ///   target（满足 → 链式 [`Self::reload`] = **复活**；TS `_error = undefined` +
+    ///   target（满足 → 链式 `reload` = **复活**；TS `_error = undefined` +
     ///   restart 同型）。
     ///
     /// 重跑失败 = L-Raise → `Inactive(ζ)`（与 `reload` 同路径）。
