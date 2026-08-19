@@ -102,10 +102,8 @@ impl cordis_core::Component for Dummy {
 }
 
 fn main() {
-    let worker = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .build()
-        .expect("worker runtime");
+    // 本模板聚焦事件订阅 + agent-loop（不涉及 Remote；Remote 回路见
+    // async_combo 示例——REVIEW-dadc512 nit-1）。
     let combo = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("组合 runtime");
@@ -181,5 +179,4 @@ fn main() {
             })
             .await;
     });
-    let _ = worker; // worker 在此 drop（非 async 上下文）✓
 }
