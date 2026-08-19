@@ -947,7 +947,10 @@ impl AsyncRuntime {
 ///（v1 = `TokioRemote`）在 worker 执行（O-6：不触碰组合线程）。
 ///
 /// 本类型保留为**协议接线注记**（占位，刻意无构造入口——REVIEW-42c1edc
-/// nit-1）：接入面即 wit `remote` import + 宿主 `configure_remote`。
+/// nit-1）：接入面即 wit `remote` import + 宿主 `configure_remote`；
+/// guest 的完整 take-await（等远端结果继续）经核心 `Step::Await` +
+/// `Runtime::advance`（B 计划 A1/A2a，`docs/cordis-core-AWAIT-PLAN.md`）
+/// 在 wasm 桥层落地。
 pub struct WasmRemote {
     // M1 专项：host 驱动协议句柄（guest 侧仅引用，无自发线程）。
     _private: (),

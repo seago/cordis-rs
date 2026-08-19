@@ -30,11 +30,11 @@
 - `cargo +1.97.0 test --workspace` ✅ 无回归（cordis-wasm lib 7 + 集成 14 含 remote_e2e 真回填——REVIEW-ERM-WASM-EXIT nit-1 计数修正 + go_guest/sandbox/dual_backend 等，共 21 条；loader/events/hmr/async 既绿）
 - 专项测试：guest 提交→worker→回填（worker tid ≠ 组合线程 O-6 实测）；未知操作/未配置→句柄 err；op panic→err 兜底（组合线程零 panic）；Host drop 清槽；sandbox 回归（guest 恶意输入不 panic 宿主）
 
-## 4. 时序边界（诚实记录）
+## 4. 时序边界（B 计划 A1/A2a 已解锁）
 
-- **core `execute` 为同步一口气循环**（无步间暂停）——guest 的 `handle.take()` 无法在**单次激活**内等到异步 worker 完成；`take` 回填的完整语义需**两次驱动**（M2 async 驱动 / 核心异步化解锁）。
-- W2 的真实回填断言走**宿主 `poll_remotes`**（组合线程检查点非阻塞驱动）+ `remote_result`（提交→worker→回填链路真实）；guest `take` 契约为接口面（wit/编译——W1a/W2 guest 编译即证）。
-- M2 解锁后，guest 可多步 take（轮询/等待）获得与 TokioRemote 同等的 join 等待语义。
+- **原边界**：core `execute` 为同步一口气循环——guest `take` 无法在单次激活内等到异步 worker；此前回填断言走宿主 `poll_remotes`/`remote_result`，`take` 仅为接口面。
+- **已解锁（B 计划，2026-08-20）**：core 新增 `Step::Await` + `Runtime::advance`（`docs/cordis-core-AWAIT-{PROPOSAL,PLAN}.md`）；wasm 桥 `WasmTaskIter` 在 guest 未完成 + 在途 join 时产 `Await`；端到端 `a2_e2e` 直证 **guest 完整 take-await**（submit→Await 挂起→回填→advance→自取→O-6 隔离 + 错误通道 err 达 guest）。
+- **剩余**：go guest（wasm-plugin-go）经 wit inverse→option 后的 ABI 收尾（A2b，go_guest 测试暂 ignore）。
 
 ## 5. 出口判定
 
