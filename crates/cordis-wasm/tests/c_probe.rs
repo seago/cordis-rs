@@ -68,7 +68,9 @@ fn c1_note_back_injects_result_into_store() {
     assert!(matches!(result, Value::Count(14)), "echo(7)→14");
 
     // 回注到核心 store（注入键 probe_in）——C2 阶段 2 guest 经 get 读回。
-    root.set_dyn(Symbol::intern("probe_in"), Box::new(result.clone()))
+    // Disposer 保留（保持回注绑定到测试作用域末——C2 阶段 2 读取期间不撤销）。
+    let _keep = root
+        .set_dyn(Symbol::intern("probe_in"), Box::new(result.clone()))
         .expect("回注绑定");
     assert!(
         runtime.store().contains(Symbol::intern("probe_in")),
