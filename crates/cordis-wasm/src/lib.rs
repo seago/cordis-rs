@@ -585,11 +585,11 @@ fn drive_poll_remote(
     results: &mut HashMap<u32, Option<Result<Value, String>>>,
 ) {
     let waker = std::task::Waker::noop();
-    let mut cx = std::task::Context::from_waker(&waker);
+    let mut cx = std::task::Context::from_waker(waker);
     let mut done = Vec::new();
     for (rep, join) in joins.iter_mut() {
         if let std::task::Poll::Ready(v) = join.as_mut().poll(&mut cx) {
-            results.insert(*rep, Some(value_from_remote(v).map_err(|e| e)));
+            results.insert(*rep, Some(value_from_remote(v)));
             done.push(*rep);
         }
     }
