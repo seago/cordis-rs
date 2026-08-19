@@ -21,18 +21,18 @@
 //! - 宿主 `Store<T>` 的 `T`（本 crate `Host`）实现 [`WasiView`]——
 //!   因 `WasiView: Send` 约束，`Host` 内**不持有** `Rc`；核心逆
 //!   （捕获 `Rc<Context>`，非 `Send`）存放在实例状态
-//!   [`InstanceState`]（`Rc<RefCell>`，单线程安全）而非 `Host` 中。
+//!   `InstanceState`（`Rc<RefCell>`，单线程安全）而非 `Host` 中。
 //!
 //! # 桥接（PR #11）
 //!
 //! [`WasmComponent`] 实现 [`cordis_core::Component`]：
 //!
 //! - `inject`/`provide` 经跨边界调用（`call_inject`/`call_provide`）；
-//! - `apply` 返回 [`WasmTaskIter`]：宿主驱动 `task.step()`；guest 在
+//! - `apply` 返回 `WasmTaskIter`：宿主驱动 `task.step()`；guest 在
 //!   step 内调用的 `context::set` 记录为 **pending**（宿主侧不直接
 //!   绑定），迭代器在 step 后把每个 pending 转发到核心
 //!   [`Context::set_dyn`]（ADR-0004 值语义：跨边界值装箱进核心
-//!   store），逆以 rep 存入 [`InstanceState::core_inverses`]；
+//!   store），逆以 rep 存入 `InstanceState::core_inverses`；
 //! - 迭代器每步产出的逆 = 经 rep 执行核心 Disposer（unbind +
 //!   notify）——进入核心累加器后与 `PushingIter` 共享 `StepGuard`
 //!   幂等（双路径安全，见 core 文档）。
@@ -40,7 +40,7 @@
 //! # 值类型与依赖方向（PR #13 审查 m2，REVIEW-1df64a1）
 //!
 //! 双后端共存（PR #13）要求原生组件与 wasm 组件**值类型统一**：双方
-//! 经 [`Context::set_dyn`]/[`get_dyn`] 使用 wit `Value` 装箱即可互通。
+//! 经 `Context::set_dyn` / `get_dyn` 使用 wit `Value` 装箱即可互通。
 //! 但 `Value` 类型定义在本 crate 的 wit 绑定中——**原生组件要与 wasm
 //! 组件互通须依赖本 crate（仅为一个值类型）**，依赖方向为
 //! "原生 → wasm"，与"wasm 依赖 core、core 无关后端"的既有分层不一致。
@@ -121,7 +121,7 @@ pub type RemoteOp = dyn Fn(Vec<Value>) -> Value + Send + Sync;
 /// 接口（get/set）与 `inverse` 资源（run/drop）。
 ///
 /// **rep 空间单调（审查 m3，REVIEW-2a7a686）**：`next_rep` 与
-/// [`InstanceState::core_inverses`] 槽位只增不减（drop 为 no-op）——
+/// `InstanceState::core_inverses` 槽位只增不减（drop 为 no-op）——
 /// 已知边界（与组件生命周期内 set 次数同阶；M2 提供回收）。
 pub struct Host {
     /// guest 在 step 期间累积的绑定请求（迭代器 step 后转发并清空）。
@@ -181,7 +181,7 @@ impl WasiView for Host {
 impl HostInverse for Host {
     /// 宿主侧逆执行入口——**协议上不被调用**（审查 m4，
     /// REVIEW-2a7a686）：核心逆（非 `Send`）存放在
-    /// [`InstanceState::core_inverses`]，由迭代器产出的逆闭包经 rep
+    /// `InstanceState::core_inverses`，由迭代器产出的逆闭包经 rep
     /// 执行（unbind + notify + 镜像清理）；撤销**只能由宿主驱动**
     /// （组件卸载路径），guest 调用 `inverse.run` 为协议违反——
     /// 以 panic 显式失败（panic = bug），不做静默 no-op。
@@ -191,7 +191,7 @@ impl HostInverse for Host {
         );
     }
     /// drop（m3，REVIEW-2a7a686）：防御性退化——核心逆在
-    /// [`InstanceState::core_inverses`]（`Host` 拿不到），槽位与
+    /// `InstanceState::core_inverses`（`Host` 拿不到），槽位与
     /// `next_rep` 空间**单调增长**属已知边界（每个组件的 rep 数量
     /// 与其生命周期内 set 次数同阶，M1 可接受；M2 提供回收）。
     fn drop(&mut self, _rep: Resource<Inverse>) -> wasmtime::Result<()> {
@@ -557,7 +557,13 @@ fn drive_pump_remote(
         match (ops.get(&p.name).cloned(), &remote) {
             (Some(op), Some(remote)) => {
                 let params = p.params;
-                let req = RemoteRequest::boxed(move || op(params));
+                // m-1（REVIEW-f883492）：op 在 worker 内执行——catch_unwind
+                // 把 op panic 转 Err（经结果通道回填 err），避免 worker panic
+                // 穿透到组合线程 step 边界的 await_remote_join expect。
+                let req = RemoteRequest::boxed(move || -> Result<Value, String> {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op(params)))
+                        .map_err(panic_payload_to_string)
+                });
                 joins.insert(key, remote.submit(req));
             }
             (None, _) => {
@@ -660,9 +666,26 @@ impl EffectIter for WasmTaskIter {
 /// （发送方向不需要显式适配：`boxed(move || op(params))` 直接装箱为
 /// `RemoteValue` 传输容器——W1b。）
 fn value_from_remote(v: RemoteValue) -> Result<Value, String> {
-    v.downcast::<Value>()
-        .map(|b| *b)
-        .map_err(|_| "远端结果不是 wit value".to_string())
+    match v.downcast::<Result<Value, String>>() {
+        Ok(b) => match *b {
+            Ok(value) => Ok(value),
+            Err(e) => Err(e),
+        },
+        Err(_) => {
+            Err("远端结果非协议形态（Result<Value, String>）——注入 Remote 违反适配契约".into())
+        }
+    }
+}
+
+/// op panic 载荷 → err 文本（m-1；op 违反「不得 panic」义务时的兜底诊断）。
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "远端操作 panic（op 违反「不得 panic」义务——宿主注册缺陷）".to_string()
+    }
 }
 
 #[cfg(test)]
@@ -764,11 +787,51 @@ mod remote_tests {
         );
     }
 
-    /// 适配器：非 Value 的 RemoteValue → err。
+    /// 适配器：非协议形态的 RemoteValue → err。
     #[test]
-    fn adapter_rejects_non_value() {
+    fn adapter_rejects_non_protocol_value() {
         let err = value_from_remote(Box::new(42u32)).unwrap_err();
-        assert!(err.contains("wit value"));
+        assert!(err.contains("非协议形态"));
+        let err2 = value_from_remote(Box::new(Value::Text("x".into()))).unwrap_err();
+        assert!(err2.contains("非协议形态"));
+    }
+
+    /// m-1：op panic 被 worker 内捕获 → err 回填（不穿透组合线程）。
+    #[test]
+    fn op_panic_backfills_err() {
+        let worker = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .expect("worker runtime");
+        let remote: Rc<dyn Remote> = Rc::new(TokioRemote::new(worker.handle().clone()));
+        let panic_op: Arc<RemoteOp> = Arc::new(|_| panic!("boom"));
+        let mut ops = std::collections::HashMap::new();
+        ops.insert("boom".to_string(), panic_op);
+        let mut joins = HashMap::new();
+        let mut results = HashMap::new();
+        drive_pump_remote(
+            vec![RemotePending {
+                rep: 0,
+                name: "boom".into(),
+                params: vec![],
+            }],
+            Some(remote),
+            &ops,
+            &mut joins,
+            &mut results,
+        );
+        for _ in 0..2000 {
+            drive_poll_remote(&mut joins, &mut results);
+            if results.contains_key(&0) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            matches!(results.get(&0), Some(Some(Err(e))) if e.contains("boom")),
+            "op panic → 句柄 err 回填（组合线程不 panic）：{:?}",
+            results
+        );
     }
 
     /// Host submit 入队 + rep 分配 + take 未就绪。
