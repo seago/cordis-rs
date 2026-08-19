@@ -1657,7 +1657,7 @@ mod tests {
         loader.register_component("provider", val_config_provider());
 
         let bad = val_config("", 1);
-        let r1 = loader.apply(&[bad.clone()]);
+        let r1 = loader.apply(std::slice::from_ref(&bad));
         assert!(
             r1.failed().any(|o| matches!(
                 o,
@@ -1671,7 +1671,7 @@ mod tests {
         assert!(loader.fiber("p").is_none(), "失败未挂载（无写回无 fiber）");
 
         // desired 未变：下次 apply 重试并重报 Failed（非 Unchanged）。
-        let r2 = loader.apply(&[bad.clone()]);
+        let r2 = loader.apply(std::slice::from_ref(&bad));
         assert!(
             r2.failed().any(|o| matches!(
                 o,
