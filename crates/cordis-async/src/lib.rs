@@ -201,6 +201,11 @@ impl RemoteRequest {
     }
 
     /// 构造 Send-future 形态请求（P1.3：异步计算提交 worker 池）。
+    ///
+    /// 分工（REVIEW-281c6ac nit-2）：future 形态适合**非阻塞异步**（IO /
+    /// 拉取式流）；闭包形态（[`Self::boxed`]/[`From`]）适合**阻塞 / CPU 密集**
+    /// （经 `spawn_blocking`）。两形态都遵守 O-6：worker 侧不触碰组合线程
+    /// 资源。
     pub fn from_future(fut: impl Future<Output = RemoteValue> + Send + 'static) -> Self {
         Self(RemoteRequestInner::Future(Box::pin(fut)))
     }
@@ -253,7 +258,7 @@ impl TokioRemote {
 
 impl Remote for TokioRemote {
     fn submit(&self, req: RemoteRequest) -> RemoteJoin<RemoteValue> {
-        use RemoteRequestInner as I;
+        use self::RemoteRequestInner as I;
         // 双形态调度（P1.3 R1）：闭包 → blocking 池；Send-future → multi_thread
         // 池。submit 签名不变（冻结保持），两路 join 回灌组合线程。
         match req.0 {
