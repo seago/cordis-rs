@@ -16,8 +16,9 @@
 
 ## 2. 单测（累计）
 
-- protocol 21 + spikes 3 = **24/24 全绿**；R1 新增 `send_future_submits_to_worker_pool_and_joins_back`（提交+join 回灌 42）与 `send_future_executes_on_worker_pool_not_combo_thread`（O-6 隔离）。
+- protocol 21（M0.2×4 + M0.3×3 + M0.4×3 + M0.5×5 + M0.6×5 + M0.7/m07×2 + P1.2 H1×1? 见 EXIT 走查构成明细——REVIEW-P1P3-EXIT nit-1）——**实际报告口径**：protocol.rs 21 条 + spikes.rs 3 条 = **24/24 全绿**；R1 新增 `send_future_submits_to_worker_pool_and_joins_back`（提交+join 回灌 42）与 `send_future_executes_on_worker_pool_not_combo_thread`（O-6 隔离）。
 - 闭包形态（m06 既有）回归不破坏。
+- 示例验收 = **运行即真**（`cargo run --example async_combo` 断言式打印通行——REVIEW-P1P3-EXIT nit-2 注记）。
 
 ## 3. 门禁与回归记录
 
