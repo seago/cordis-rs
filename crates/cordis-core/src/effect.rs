@@ -38,6 +38,12 @@ pub enum Step {
     Yielded(Disposer),
     /// 产出逆并终止迭代（`Nothing`）。
     Finished(Disposer),
+    /// 挂起等待外部就绪（B 计划 A1）：迭代器暂停在当前位置（已产逆保留
+    /// 在挂起累加器），由 [`crate::runtime::Runtime::advance`] 恢复。
+    /// 同步 [`execute`] 不接受本步（产之即 panic = 走错路径）；
+    /// 可恢复路径经 [`try_execute_with`]。**添加性**：既有迭代器不产
+    /// Await → 既有执行语义零变化。
+    Await,
 }
 
 /// Algorithm 1 的 execute 引擎。
@@ -57,6 +63,11 @@ pub fn execute(mut iter: Box<dyn EffectIter>, guard: impl Fn() -> bool) -> Dispo
                 acc.push(d);
                 break;
             }
+            Step::Await => {
+                panic!(
+                    "同步 execute 不接受 Await——迭代器应走 try_execute_with/advance 路径（调用方违反 B 计划 A1 约定）"
+                )
+            }
         }
     }
     Box::new(move || {
@@ -64,6 +75,39 @@ pub fn execute(mut iter: Box<dyn EffectIter>, guard: impl Fn() -> bool) -> Dispo
             d();
         }
     })
+}
+
+/// 可恢复执行的迭代步进（B 计划 A1）：与 [`execute`] 相同驱动，但遇
+/// [`Step::Await`] 返回挂起（迭代器 + 已累积逆），由调用方保存在
+/// fiber 挂起态并在外部就绪后以同一初始 acc 恢复。
+///
+/// `Ok(disposer)`：迭代终止（含 guard 中断）——acc（含传入 `init_acc`）
+/// 折叠为 LIFO disposer；`Err((iter, acc))`：遇 Await 挂起——`acc` 含
+/// 本次及历史累积逆（可与 `init_acc` 连续）。
+pub fn try_execute_with(
+    mut iter: Box<dyn EffectIter>,
+    guard: impl Fn() -> bool,
+    mut acc: Vec<Disposer>,
+) -> Result<Disposer, (Box<dyn EffectIter>, Vec<Disposer>)> {
+    loop {
+        if !guard() {
+            break;
+        }
+        match iter.next() {
+            Step::Yielded(d) => acc.push(d),
+            Step::Finished(d) => {
+                acc.push(d);
+                break;
+            }
+            Step::Await => return Err((iter, acc)),
+        }
+    }
+    let final_acc = acc;
+    Ok(Box::new(move || {
+        for d in final_acc.into_iter().rev() {
+            d();
+        }
+    }))
 }
 
 /// 把单个效应包装为一步迭代器（Def 8 的 `𝔈Γ` 是 Def 51 的退化情形）。
@@ -155,7 +199,52 @@ mod tests {
         match iter.next() {
             Step::Finished(_) => {}
             Step::Yielded(_) => panic!("once 应恰好一步并终止"),
+            Step::Await => unreachable!("once 迭代器不产 Await"),
         }
+    }
+
+    /// B 计划 A1：挂起/恢复路径（try_execute_with）——Await 处停下保留
+    /// 迭代器 + 已累积逆，恢复时以同 acc 继续，LIFO 折叠跨挂起保持。
+    #[test]
+    fn try_execute_with_suspends_on_await_and_resumes_lifo() {
+        struct AwaitSteps {
+            log: Rc<RefCell<Vec<String>>>,
+            n: u32,
+        }
+        impl EffectIter for AwaitSteps {
+            fn next(&mut self) -> Step {
+                self.n += 1;
+                let log = Rc::clone(&self.log);
+                match self.n {
+                    1 => Step::Yielded(Box::new(move || log.borrow_mut().push("a".into()))),
+                    2 => Step::Await,
+                    _ => Step::Finished(Box::new(move || log.borrow_mut().push("z".into()))),
+                }
+            }
+        }
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let iter: Box<dyn EffectIter> = Box::new(AwaitSteps {
+            log: Rc::clone(&log),
+            n: 0,
+        });
+        // 第一次：Yielded("a") 后遇 Await 挂起。
+        let (iter, acc) = match try_execute_with(iter, || true, Vec::new()) {
+            Err(suspended) => suspended,
+            Ok(_) => panic!("应遇 Await 挂起"),
+        };
+        assert_eq!(acc.len(), 1, "已累积逆含第一步");
+
+        // 恢复：Finished("z") → Ok 折叠。
+        let disposer = match try_execute_with(iter, || true, acc) {
+            Ok(d) => d,
+            Err(_) => panic!("恢复应完成"),
+        };
+        disposer();
+        assert_eq!(
+            *log.borrow(),
+            vec!["z".to_string(), "a".to_string()],
+            "LIFO 跨挂起恢复（最后产生逆先执行）"
+        );
     }
 
     #[test]

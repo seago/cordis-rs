@@ -728,6 +728,10 @@ impl EffectIter for PushingIter {
                 self.ctx.push_step(acc);
                 Step::Finished(exec)
             }
+            // B 计划 A1：挂起步透传（记录迭代器不做挂起处理——上层
+            // try_execute_with 遇 Await 挂起；添加性零变化：既有迭代器
+            // 不产 Await）。
+            Step::Await => Step::Await,
         }
     }
 }

@@ -24,7 +24,7 @@ use std::rc::Rc;
 
 use crate::component::Component;
 use crate::context::Context;
-use crate::effect::{Disposer, EffectIter, execute, once};
+use crate::effect::{Disposer, EffectIter, once, try_execute_with};
 use crate::fiber::{Fiber, FiberError, FiberId, FiberState, View};
 use crate::keyset::KeySet;
 use crate::store::{Store, StoreError};
@@ -235,6 +235,7 @@ impl Runtime {
             target: RefCell::new(None),
             committed: RefCell::new(None),
             dispose: RefCell::new(Vec::new()),
+            resumable: RefCell::new(None),
         });
         self.fibers.borrow_mut().insert(id, Rc::clone(&fiber));
 
@@ -299,6 +300,37 @@ impl Runtime {
     /// 前置 `from ∈ dom(σ)` ∧ `to ∉ dom(σ)`。
     pub fn move_binding(&self, from: Symbol, to: Symbol) -> Result<(), StoreError> {
         self.store.borrow_mut().move_binding(from, to)
+    }
+
+    /// 恢复一个挂起于 `Step::Await` 的 fiber（B 计划 A1）。
+    ///
+    /// 组合线程在外部就绪（如 wasm 远端回填落位）后调用：从挂起上下文
+    /// 继续驱动迭代器到下一 Await / Finished；恢复完成时把折叠逆推入
+    /// `fiber.dispose`（LIFO 保持）。仍遇 Await 则保持挂起（可再 advance）。
+    ///
+    /// **调用纪律**：未挂起（无可恢复上下文）的 fiber 调用 = 调用方违约
+    /// （panic = bug，同既有调用纪律）；`fid` 未知同样 panic = bug。
+    pub fn advance(&self, fid: FiberId) {
+        let fiber = self
+            .fiber(fid)
+            .unwrap_or_else(|| panic!("advance：未知 fiber {fid:?}（宿主 bug，defensive）"));
+        let Some((iter, acc)) = fiber.resumable.borrow_mut().take() else {
+            panic!("advance：fiber {fid:?} 未挂起于 Await（调用方违约；需先产生 Step::Await）");
+        };
+        let guard = {
+            let f = Rc::clone(&fiber);
+            move || f.target.borrow().is_some()
+        };
+        match try_execute_with(iter, guard, acc) {
+            Ok(disposer) => {
+                // 恢复完成：折叠逆入 dispose（LIFO 跨激活保持）。
+                fiber.dispose.borrow_mut().push(disposer);
+            }
+            Err((iter, acc)) => {
+                // 再次挂起（后续 advance 继续）。
+                *fiber.resumable.borrow_mut() = Some((iter, acc));
+            }
+        }
     }
 
     /// `realm` 处绑定的提供者 fiber（Algorithm 7 的 own 判定用）。
@@ -471,10 +503,12 @@ impl Runtime {
             move || fiber.target.borrow().as_ref() == Some(&guard_target)
         };
         let iter = (fiber.apply.borrow())();
-        let raised =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(iter, guard)));
-        let recover = match raised {
-            Ok(recover) => recover,
+        let raised = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            try_execute_with(iter, guard, Vec::new())
+        }));
+        let recovered_suspended = match raised {
+            Ok(Ok(recover)) => (Some(recover), None),
+            Ok(Err((iter, acc))) => (None, Some((iter, acc))),
             Err(payload) => {
                 // L-Raise：仅 FiberError 载荷 = 组件失败；其余 = 宿主 bug。
                 let err = match payload.downcast::<FiberError>() {
@@ -488,7 +522,19 @@ impl Runtime {
                 return;
             }
         };
-        fiber.dispose.borrow_mut().push(recover);
+        if let Some((iter, acc)) = recovered_suspended.1 {
+            // 挂起：保留迭代器 + 已累积逆；状态 Active（target 未变），
+            // 依赖者照常生效（副作用已发生、逆待 advance 收账）。
+            *fiber.resumable.borrow_mut() = Some((iter, acc));
+            *fiber.state.borrow_mut() = FiberState::Active { view: committed };
+            let provided = self.provided_of(fiber);
+            fiber.ctx.notify(&provided);
+            return;
+        }
+        fiber
+            .dispose
+            .borrow_mut()
+            .push(recovered_suspended.0.expect("非挂起则必有逆"));
 
         if fiber.target.borrow().as_ref() == Some(&target0) {
             *fiber.state.borrow_mut() = FiberState::Active { view: committed };
@@ -509,6 +555,13 @@ impl Runtime {
     /// 3. 收尾：target ⊥ → `Inactive`；否则链式 reload（惯性）。
     fn unload(&self, fiber: &Rc<Fiber>) {
         self.mark_unloading(fiber);
+
+        // B 计划 A1：挂起残留逆（advance 未完成的已累积逆）补入 dispose——
+        // append（执行序）后由下面 drain(..).rev() 以 LIFO 执行，与完整
+        // 执行折叠序一致。
+        if let Some((_, mut acc)) = fiber.resumable.borrow_mut().take() {
+            fiber.dispose.borrow_mut().append(&mut acc);
+        }
 
         // 1. 依赖者先撤（Thm 63 的 ordering half）。
         let provided = self.provided_of(fiber);
@@ -1024,5 +1077,96 @@ mod tests {
         a.retire();
         assert!(matches!(&*c.state(), FiberState::Inactive(_)));
         assert!(runtime.is_quiet());
+    }
+
+    // ── B 计划 A1：Await 挂起 / advance 恢复 ─────────────────────────
+
+    /// 组件：apply 返回产 `Step::Await` 的迭代器（挂起后由 advance 恢复）。
+    struct AwaitComp;
+    impl Component for AwaitComp {
+        fn inject(&self) -> KeySet {
+            KeySet::new()
+        }
+        fn provide(&self) -> KeySet {
+            spec(&["k1", "k2"])
+        }
+        fn apply(&self, ctx: Rc<Context>, _config: &dyn Any) -> Box<dyn EffectIter> {
+            Box::new(AwaitIter { ctx, n: 0 })
+        }
+    }
+    struct AwaitIter {
+        ctx: Rc<Context>,
+        n: u32,
+    }
+    impl EffectIter for AwaitIter {
+        fn next(&mut self) -> Step {
+            self.n += 1;
+            match self.n {
+                1 => Step::Yielded(self.ctx.set::<K1Key>(1).expect("k1")),
+                2 => Step::Await,
+                _ => Step::Finished(self.ctx.set::<K2Key>(2).expect("k2")),
+            }
+        }
+    }
+
+    #[test]
+    fn advance_resumes_suspended_fiber() {
+        let runtime = Rc::new(Runtime::new());
+        let ctx = runtime.context();
+        let fiber = ctx
+            .use_component(Rc::new(AwaitComp) as Rc<dyn Component>, Rc::new(()))
+            .expect("激活");
+
+        // 挂起：K1 副作用已发生（逆保留在挂起态），fiber Active、resumable 有值。
+        assert!(
+            runtime
+                .store()
+                .contains(crate::symbol::Symbol::intern("k1")),
+            "挂起时第一步副作用已发生"
+        );
+        assert!(
+            fiber.resumable.borrow().is_some(),
+            "Await 点挂起：保留可恢复上下文"
+        );
+        assert!(matches!(&*fiber.state(), FiberState::Active { .. }));
+
+        // advance → 恢复完成：K2 副作用发生、resumable 清空。
+        runtime.advance(fiber.id());
+        assert!(
+            runtime
+                .store()
+                .contains(crate::symbol::Symbol::intern("k2")),
+            "恢复后第二步副作用已发生"
+        );
+        assert!(
+            fiber.resumable.borrow().is_none(),
+            "恢复完成：挂起上下文已消费"
+        );
+
+        // 退役 → 逆 LIFO：K2 先解、K1 后（跨挂起保持 LIFO）。
+        fiber.retire();
+        assert!(
+            !runtime
+                .store()
+                .contains(crate::symbol::Symbol::intern("k2")),
+            "逆序 1：K2 先解"
+        );
+        assert!(
+            !runtime
+                .store()
+                .contains(crate::symbol::Symbol::intern("k1")),
+            "逆序 2：K1 后解"
+        );
+        assert!(runtime.is_quiet(), "退役后静止");
+    }
+
+    #[test]
+    #[should_panic(expected = "未挂起")]
+    fn advance_unresumed_panics() {
+        let runtime = Rc::new(Runtime::new());
+        let ctx = runtime.context();
+        let fiber = ctx.use_component(provider("pg"), Rc::new(())).unwrap();
+        // 普通组件（无 Await）一次性完成 = 未挂起 → advance 违约 panic。
+        runtime.advance(fiber.id());
     }
 }

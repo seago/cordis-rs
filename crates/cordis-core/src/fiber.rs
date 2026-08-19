@@ -132,7 +132,15 @@ pub struct Fiber {
     /// 各次激活的恢复组合（Algorithm 5 第 16 行的 `fiber.dispose ←
     /// recover ∘ fiber.dispose`；LIFO 跨激活）。
     pub(crate) dispose: RefCell<Vec<Disposer>>,
+    /// 挂起于 [`Step::Await`] 的可恢复上下文（B 计划 A1）：未完成迭代器 +
+    /// 已累积逆；`None` = 未挂起。恢复经 [`Runtime::advance`]；
+    /// 退役/卸载时残留逆补入 `dispose`（LIFO 保持）。
+    pub(crate) resumable: RefCell<Option<Resumable>>,
 }
+
+/// 挂起可恢复上下文（B 计划 A1）：未完成迭代器 + 已累积逆（执行序；
+/// 恢复以同 acc 继续，折叠后 LIFO）。
+pub(crate) type Resumable = (Box<dyn EffectIter>, Vec<Disposer>);
 
 impl Fiber {
     /// fiber 名。
