@@ -52,6 +52,9 @@
 
 mod config;
 mod patch;
+mod report;
+
+pub use report::{ApplyReport, EntryError, EntryErrorKind, EntryOutcome, EntryState};
 
 pub use config::{Config, interpolate};
 use config::{configs_same, validate_config};
