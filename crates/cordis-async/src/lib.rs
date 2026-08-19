@@ -948,6 +948,8 @@ impl AsyncRuntime {
 /// wasm 专项实现（`crates/cordis-wasm` 宿主驱动协议对接）。P1.3 不
 /// 提供 [`Remote`] 实现（接入 host 协议前实现无意义）——M1 专项在
 /// 接入后 `impl Remote for WasmRemote`（`submit` = 入队 + 宿主驱动）。
+/// pub 构造入口随 M1 接入一并落地（REVIEW-42c1edc nit-1：占位语义刻意无
+/// 构造——接入 host 协议前构造无意义）。
 pub struct WasmRemote {
     // M1 专项：host 驱动协议句柄（guest 侧仅引用，无自发线程）。
     _private: (),
