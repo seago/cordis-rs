@@ -27,7 +27,7 @@
 ## 3. 门禁与回归
 
 - `cargo +1.97.0 fmt --check` ✅ / `clippy --workspace --all-targets -- -D warnings` ✅ 0 告警 / `doc --workspace --no-deps` ✅ 0 告警（含 cordis-core/cordis-wasm 历史私链清零——纯文档文案，core 零语义改动）
-- `cargo +1.97.0 test --workspace` ✅ 无回归（cordis-wasm lib 7 + 集成 13 含 remote_e2e 真回填 + go_guest/sandbox/dual_backend；loader/events/hmr/async 既绿）
+- `cargo +1.97.0 test --workspace` ✅ 无回归（cordis-wasm lib 7 + 集成 14 含 remote_e2e 真回填——REVIEW-ERM-WASM-EXIT nit-1 计数修正 + go_guest/sandbox/dual_backend 等，共 21 条；loader/events/hmr/async 既绿）
 - 专项测试：guest 提交→worker→回填（worker tid ≠ 组合线程 O-6 实测）；未知操作/未配置→句柄 err；op panic→err 兜底（组合线程零 panic）；Host drop 清槽；sandbox 回归（guest 恶意输入不 panic 宿主）
 
 ## 4. 时序边界（诚实记录）
