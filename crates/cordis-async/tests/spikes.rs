@@ -275,7 +275,9 @@ fn spike_s2_tokio_service_sync_shell_via_spawn_remote() {
                         Rc::new(()) as Rc<dyn Any>,
                     )
                     .expect("挂载");
-                for _ in 0..64 {
+                // 轮询预算放宽（同 m06 先例 64→512；CI 并行负载下 worker
+                // 完成慢于 64 拍——REVIEW-dbc2384 m-2 落地）。
+                for _ in 0..512 {
                     tokio::task::yield_now().await;
                     if log.borrow().iter().any(|l| l.starts_with("llm:ok:")) {
                         break;
