@@ -279,6 +279,9 @@ fn spike_s2_tokio_service_sync_shell_via_spawn_remote() {
                 // 完成慢于 64 拍——REVIEW-dbc2384 m-2 落地）。
                 for _ in 0..512 {
                     tokio::task::yield_now().await;
+                    // 给 worker 真实执行时间（CI 负载下纯 yield 耗尽预算仍
+                    // 不等 worker——同 m06 1ms-sleep 模式）。
+                    std::thread::sleep(std::time::Duration::from_millis(1));
                     if log.borrow().iter().any(|l| l.starts_with("llm:ok:")) {
                         break;
                     }
