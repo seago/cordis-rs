@@ -1342,6 +1342,10 @@ mod m06 {
                     // 次 yield——既有调度 flaky 修复）。
                     for _ in 0..512 {
                         tokio::task::yield_now().await;
+                        // 给 worker 真实执行时间（纯 yield 在 0.06s 内耗尽、
+                        // CI 负载下 worker 来不及完成——同 send_future 先例
+                        // 的 1ms sleep 模式）。
+                        std::thread::sleep(std::time::Duration::from_millis(1));
                         if log.borrow().iter().any(|l| l == "joined") {
                             break;
                         }
