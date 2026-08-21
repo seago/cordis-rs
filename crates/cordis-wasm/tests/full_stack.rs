@@ -8,7 +8,7 @@
 
 use cordis_async::{
     AsyncBehavior, AsyncCx, AsyncDisposer, AsyncEffectIter, AsyncRuntime, AsyncStep,
-    LocalBoxFuture, RemoteRequest, RemoteValue, TokioRemote,
+    LocalBoxFuture, RemoteRequest, TokioRemote,
 };
 use cordis_core::{Component, Context, KeySet, Runtime};
 use cordis_events::{Event, EventBus, EventsKey, EventsProvider, subscribe};
@@ -71,7 +71,8 @@ impl AsyncEffectIter for LlmLoop {
                     log.write().unwrap().push("llm:exit@cancel".into());
                     break;
                 }
-                if let Some(msg) = input.write().unwrap().pop_front() {
+                let msg = input.write().unwrap().pop_front();
+                if let Some(msg) = msg {
                     let join =
                         cx.spawn_remote(RemoteRequest::boxed(move || format!("reply:{msg}")));
                     let reply = *join.await.downcast::<String>().expect("LLM 回复");
@@ -204,7 +205,7 @@ fn full_stack_events_async_wasm_remote_await() {
                         }
                         // 驱动 wasm 多轮（Await 回路）。
                         if injected {
-                            wcomp.poll_and_advance(&ctx.runtime());
+                            wcomp.poll_and_advance(ctx.runtime());
                         }
                         // wasm 多轮完成？
                         if let Some(WValue::Text(t)) = ctx
