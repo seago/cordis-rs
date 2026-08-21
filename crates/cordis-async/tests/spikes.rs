@@ -277,6 +277,8 @@ fn spike_s2_tokio_service_sync_shell_via_spawn_remote() {
                     .expect("挂载");
                 // 轮询预算放宽（同 m06 先例 64→512；CI 并行负载下 worker
                 // 完成慢于 64 拍——REVIEW-dbc2384 m-2 落地）。
+                // 1ms 必要性（REVIEW-CI-FIXES nit-1）：纯 yield 不消耗真实
+                // 时间，worker（spawn_blocking）需要毫秒级执行窗口。
                 for _ in 0..512 {
                     tokio::task::yield_now().await;
                     // 给 worker 真实执行时间（CI 负载下纯 yield 耗尽预算仍
