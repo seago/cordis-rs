@@ -302,6 +302,8 @@ impl InstanceState {
             .and_then(|slot| slot.take());
         if let Some((key, task)) = taken {
             task();
+            // n-2（REVIEW-f57faad）：task() panic 时 rep 不入池（保守留白——
+            // 核心逆不应 panic，违反即宿主 bug）。
             let mut store = self.store.borrow_mut();
             let host = store.data_mut();
             host.bindings.remove(&key);
