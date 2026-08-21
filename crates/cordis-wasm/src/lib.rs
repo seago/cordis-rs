@@ -548,19 +548,19 @@ impl WasmTaskIter {
             // P-2：值类型统一（`cordis_value::Value`）——wasm 或原生组件
             // 提供的值（统一类型装箱）均可同步镜像；非统一类型（旧/第三方
             // 装箱）仍不同步（保守）。
-            match self.ctx.get_dyn(*key) {
-                Some(value) => match value.downcast_ref::<Value>() {
+            if let Some(value) = self.ctx.get_dyn(*key) {
+                // 核心有值 → 同步（覆盖 preseed）；非统一类型 → 移除。
+                match value.downcast_ref::<Value>() {
                     Some(v) => {
                         mirror.insert(key.as_str().to_string(), v.clone());
                     }
                     None => {
                         mirror.remove(key.as_str());
                     }
-                },
-                None => {
-                    mirror.remove(key.as_str());
                 }
             }
+            // 核心无值 → **保留**宿主 preseed 的镜像输入（P-5 协作输入通道；
+            // 卸载时逆清理镜像，无残留）。
         }
     }
 

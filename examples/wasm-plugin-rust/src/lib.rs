@@ -42,6 +42,8 @@ impl GuestComponent for DbProvider {
         DbProvider
     }
     fn inject(&self) -> Vec<String> {
+        // 协作输入不声明为注入依赖（避免无提供者时 Inactive）——host 经
+        // preseed 镜像通道写入（P5-3 全栈串联），guest 经 get 读取。
         Vec::new()
     }
     fn provide(&self) -> Vec<String> {
@@ -81,7 +83,11 @@ impl GuestTask for DbTask {
                 let inverse = context::set("probe", &Value::Text(acc)).ok()?;
                 return Some(EffectStep::Done(inverse));
             }
-            let h = cordis::core::remote::submit("llm", &vec![Value::Count(self.round.get() as u64)]);
+            let param = match context::get("wasm/in") {
+                Some(Value::Text(t)) => Value::Text(t),
+                _ => Value::Count(self.round.get() as u64),
+            };
+            let h = cordis::core::remote::submit("llm", &vec![param]);
             self.handle.replace(Some(h));
             self.awaiting.set(true);
             if self.round.get() == 0 {

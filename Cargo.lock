@@ -280,6 +280,7 @@ dependencies = [
  "anyhow",
  "cordis-async",
  "cordis-core",
+ "cordis-events",
  "cordis-loader",
  "cordis-value",
  "tokio",

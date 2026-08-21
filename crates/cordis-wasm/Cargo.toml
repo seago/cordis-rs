@@ -20,5 +20,6 @@ wit-bindgen = "0.60.0"
 anyhow = "1"
 
 [dev-dependencies]
+cordis-events = { path = "../cordis-events" }
 cordis-loader = { path = "../cordis-loader" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
