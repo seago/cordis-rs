@@ -1,6 +1,6 @@
 # Phase 2 决策提案（cordis-rs 下一阶段定义）
 
-**状态**：**决策已拍板（2026-08-22）**——定位 C 组合；范围 P-1..P-7 全做；顺序 P-1 → P-2 → P-3 → P-4 → P-5 → P-7；P-6 待论文调研结论；**阶段命名：产品验证线（Product Validation Line，文档前缀 `cordis-*-PRODUCTVAL-*`）**。
+**状态**：**决策已拍板（2026-08-22）**——定位 C 组合；范围 P-1..P-7 全做；顺序 P-1 → P-2 → P-3 → P-4 → P-5 → P-7 → P-6（版本化依赖 + 小项②③）；**P-6 定为 §6.6 版本化依赖（含 Progress 定量上界补测 + loader 索引优化小项）**；**阶段命名：产品验证线（Product Validation Line，文档前缀 `cordis-*-PRODUCTVAL-*`）**。
 **背景**：Phase 1 及后续工作线已全部收官——M0–M3 主线、Phase 0、Phase 1.1–1.4（events / async 门面 / Remote / DX）、错误策略线、M1 wasm 桥（WasmRemote）、B 计划（core Await + wasm 完整 take-await + A2b go 双语言恢复）。`docs/PLAN.md` 的 M 系列里程碑全部完成，此后无既定下一阶段定义。
 
 ---
