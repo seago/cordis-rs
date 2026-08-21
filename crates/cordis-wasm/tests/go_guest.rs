@@ -89,7 +89,6 @@ fn derived_value(runtime: &Runtime) -> Value {
 }
 
 #[test]
-#[ignore = "A2b：go guest 经 wit inverse→option 后的 ABI 适配待收尾（A2a 已处理 rust 系；go_guest 待 A2b）"]
 fn go_consumer_reads_rust_provider_value() {
     let runtime = Rc::new(Runtime::new());
     let loader = Loader::new(Rc::clone(&runtime));
@@ -126,7 +125,6 @@ fn go_consumer_reads_rust_provider_value() {
 }
 
 #[test]
-#[ignore = "A2b：go guest 经 wit inverse→option 后的 ABI 适配待收尾（A2a 已处理 rust 系；go_guest 待 A2b）"]
 fn go_consumer_reads_native_provider_value() {
     let runtime = Rc::new(Runtime::new());
     let loader = Loader::new(Rc::clone(&runtime));

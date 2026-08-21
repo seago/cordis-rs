@@ -76,7 +76,7 @@ func (t *Task) Step() witTypes.Option[cordis_core_plugin.EffectStep] {
 	if res.IsErr() {
 		return witTypes.None[cordis_core_plugin.EffectStep]()
 	}
-	return witTypes.Some(cordis_core_plugin.EffectStep{Inverse: res.Ok(), Done: true})
+	return witTypes.Some(cordis_core_plugin.MakeEffectStepDone(res.Ok()))
 }
 
 // OnDrop 由生成代码在资源析构时调用。

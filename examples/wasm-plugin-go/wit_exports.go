@@ -10,6 +10,7 @@ import (
 	witTypes "go.bytecodealliance.org/pkg/wit/types"
 	"runtime"
 	"unsafe"
+	"wit_component/cordis_core_plugin"
 	"wit_component/export_cordis_core_plugin"
 )
 
@@ -29,14 +30,25 @@ func wasm_export_cordis_core_plugin_method_task_step(arg0 uintptr) uintptr {
 	case witTypes.OptionSome:
 		payload := result.Some()
 		*(*int8)(unsafe.Add(unsafe.Pointer(exportReturnArea), 0)) = int8(int32(1))
-		*(*int32)(unsafe.Add(unsafe.Pointer(exportReturnArea), 4)) = ((payload).Inverse).TakeHandle()
-		var result0 int32
-		if (payload).Done {
-			result0 = 1
-		} else {
-			result0 = 0
+
+		switch payload.Tag() {
+		case cordis_core_plugin.EffectStepStep:
+			payload := payload.Step()
+			*(*int8)(unsafe.Add(unsafe.Pointer(exportReturnArea), 4)) = int8(int32(0))
+			*(*int32)(unsafe.Add(unsafe.Pointer(exportReturnArea), 8)) = (payload).TakeHandle()
+
+		case cordis_core_plugin.EffectStepDone:
+			payload := payload.Done()
+			*(*int8)(unsafe.Add(unsafe.Pointer(exportReturnArea), 4)) = int8(int32(1))
+			*(*int32)(unsafe.Add(unsafe.Pointer(exportReturnArea), 8)) = (payload).TakeHandle()
+
+		case cordis_core_plugin.EffectStepWait:
+
+			*(*int8)(unsafe.Add(unsafe.Pointer(exportReturnArea), 4)) = int8(int32(2))
+
+		default:
+			panic("unreachable")
 		}
-		*(*int8)(unsafe.Add(unsafe.Pointer(exportReturnArea), 8)) = int8(result0)
 
 	default:
 		panic("unreachable")

@@ -11,7 +11,45 @@ import (
 
 type Inverse = cordis_core_context.Inverse
 
+const (
+	// 有逆的效应步（继续；逆由宿主经 pending 转发机制收账）。
+	EffectStepStep uint8 = 0
+	// 终止步（可带最后效应逆）。
+	EffectStepDone uint8 = 1
+	// 等待远端（无逆；宿主以 `Step::Await` 暂停，回填后 advance 恢复）。
+	EffectStepWait uint8 = 2
+)
+
+// 效应步（A2b 修法①：显式 variant，消除 option<resource> 编码坑——
+// `invalid option discriminant` 根因）。
 type EffectStep struct {
-	Inverse *cordis_core_context.Inverse
-	Done    bool
+	tag   uint8
+	value any
+}
+
+func (self EffectStep) Tag() uint8 {
+	return self.tag
+}
+
+func (self EffectStep) Step() *cordis_core_context.Inverse {
+	if self.tag != EffectStepStep {
+		panic("tag mismatch")
+	}
+	return self.value.(*cordis_core_context.Inverse)
+}
+func (self EffectStep) Done() *cordis_core_context.Inverse {
+	if self.tag != EffectStepDone {
+		panic("tag mismatch")
+	}
+	return self.value.(*cordis_core_context.Inverse)
+}
+
+func MakeEffectStepStep(value *cordis_core_context.Inverse) EffectStep {
+	return EffectStep{EffectStepStep, value}
+}
+func MakeEffectStepDone(value *cordis_core_context.Inverse) EffectStep {
+	return EffectStep{EffectStepDone, value}
+}
+func MakeEffectStepWait() EffectStep {
+	return EffectStep{EffectStepWait, nil}
 }
