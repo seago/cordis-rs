@@ -59,12 +59,12 @@ fn wasm_consumer_reads_injected_provider_value() {
             .get_value(Symbol::intern("derived"))
             .expect("核心 store 有 derived");
         derived
-            .downcast_ref::<cordis_wasm::wit::cordis::core::context::Value>()
+            .downcast_ref::<cordis_wasm::Value>()
             .expect("wasm 绑定值为 wit Value")
             .clone()
     };
     assert!(
-        matches!(derived, cordis_wasm::wit::cordis::core::context::Value::Text(ref v) if v == "derived(wasm-pg)"),
+        matches!(derived, cordis_wasm::Value::Text(ref v) if v == "derived(wasm-pg)"),
         "consumer 读注入值并派生：{derived:?}"
     );
 

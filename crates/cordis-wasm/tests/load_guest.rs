@@ -3,10 +3,10 @@
 
 use cordis_wasm::EffectStep;
 use cordis_wasm::Host;
+use cordis_wasm::Value;
 use cordis_wasm::wit;
 use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{Engine, Store};
-use wit::cordis::core::context::Value;
 
 /// 定位预编译 guest 组件（独立 crate 的 target 目录）。
 fn guest_wasm_path() -> std::path::PathBuf {

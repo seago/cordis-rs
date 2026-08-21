@@ -57,10 +57,7 @@ fn isolated_wasm_provider_binds_to_realm() {
         let value = store
             .get_value(Symbol::intern("realm-a"))
             .expect("realm-a 有绑定");
-        assert!(
-            value.is::<cordis_wasm::wit::cordis::core::context::Value>(),
-            "值为 wit Value 装箱"
-        );
+        assert!(value.is::<cordis_wasm::Value>(), "值为 wit Value 装箱");
     }
 
     // 退役 → 隔离 realm 绑定清除。

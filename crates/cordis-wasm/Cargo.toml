@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 cordis-core = { path = "../cordis-core" }
 cordis-async = { path = "../cordis-async" }
+cordis-value = { path = "../cordis-value" }
 wasmtime = "47.0.3"
 wasmtime-wasi = "47.0.3"
 wit-bindgen = "0.60.0"

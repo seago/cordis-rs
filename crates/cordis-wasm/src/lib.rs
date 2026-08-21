@@ -86,11 +86,38 @@ pub mod wit {
     });
 }
 
-pub use wit::cordis::core::context::{Host as ContextHost, HostInverse, Inverse, Value};
+/// 统一跨边界值（P-2 方案 C：`cordis-value` crate——公开面统一类型；
+/// 内部 wit 生成类型经桥接转换，见 `to_cv`/`from_cv`）。
+pub use cordis_value::Value;
+pub use wit::cordis::core::context::{Host as ContextHost, HostInverse, Inverse};
 
 /// 效应步（wit `effect-step` 的导出侧类型，A2b variant 形态）——外部
 /// （测试/宿主集成）匹配用。
 pub use wit::exports::cordis::core::plugin::EffectStep;
+
+/// wit 生成 `value` → 统一 `cordis_value::Value`（P-2 方案 C 桥接转换）。
+pub(crate) fn to_cv(v: wit::cordis::core::context::Value) -> Value {
+    use wit::cordis::core::context::Value as W;
+    match v {
+        W::Flag(b) => Value::Flag(b),
+        W::Count(n) => Value::Count(n),
+        W::Offset(n) => Value::Offset(n),
+        W::Text(s) => Value::Text(s),
+        W::Blob(b) => Value::Blob(b),
+    }
+}
+
+/// 统一 `cordis_value::Value` → wit 生成 `value`（桥接转换）。
+pub(crate) fn from_cv(v: Value) -> wit::cordis::core::context::Value {
+    use wit::cordis::core::context::Value as W;
+    match v {
+        Value::Flag(b) => W::Flag(b),
+        Value::Count(n) => W::Count(n),
+        Value::Offset(n) => W::Offset(n),
+        Value::Text(s) => W::Text(s),
+        Value::Blob(b) => W::Blob(b),
+    }
+}
 
 /// 核心逆（非 Send：捕获 `Rc<Context>`；仅单线程实例状态可执行）。
 type CoreInverse = (String, Box<dyn FnOnce()>);
@@ -218,6 +245,7 @@ impl wit::cordis::core::remote::Host for Host {
         name: String,
         params: Vec<wit::cordis::core::remote::Value>,
     ) -> Resource<wit::cordis::core::remote::Handle> {
+        let params = params.into_iter().map(to_cv).collect();
         let rep = self.next_remote_rep;
         self.next_remote_rep += 1;
         self.remote_pending
@@ -234,6 +262,7 @@ impl wit::cordis::core::remote::HostHandle for Host {
         self.remote_results
             .get(&handle.rep())
             .and_then(|o| o.clone())
+            .map(|r| r.map(from_cv))
     }
     fn drop(
         &mut self,
@@ -246,10 +275,16 @@ impl wit::cordis::core::remote::HostHandle for Host {
 }
 
 impl ContextHost for Host {
-    fn get(&mut self, key: String) -> Option<Value> {
-        self.bindings.get(&key).cloned()
+    // bindgen trait 签名固定为生成类型——边界处转换（P-2 方案 C）。
+    fn get(&mut self, key: String) -> Option<wit::cordis::core::context::Value> {
+        self.bindings.get(&key).cloned().map(from_cv)
     }
-    fn set(&mut self, key: String, value: Value) -> Result<Resource<Inverse>, String> {
+    fn set(
+        &mut self,
+        key: String,
+        value: wit::cordis::core::context::Value,
+    ) -> Result<Resource<Inverse>, String> {
+        let value = to_cv(value);
         // P-1：优先复用已执行逆释放的 rep（free list），空则单调递增。
         let rep = self.inverse_free.pop().unwrap_or_else(|| {
             let r = self.next_rep;
@@ -501,9 +536,9 @@ impl WasmTaskIter {
         let mirror = &mut store.data_mut().bindings;
         for key in &self.inject {
             // 审查 nit1（REVIEW-54a9b08）：单次 downcast 判型 + 取值。
-            // 值为另一 wasm 组件的 wit `Value` 装箱时同步；原生组件
-            // 提供的值（不同装箱类型）不同步——镜像无此键（get 返回
-            // none），跨类型值翻译 M1 不支持。
+            // P-2：值类型统一（`cordis_value::Value`）——wasm 或原生组件
+            // 提供的值（统一类型装箱）均可同步镜像；非统一类型（旧/第三方
+            // 装箱）仍不同步（保守）。
             match self.ctx.get_dyn(*key) {
                 Some(value) => match value.downcast_ref::<Value>() {
                     Some(v) => {
@@ -927,7 +962,8 @@ mod remote_tests {
             let handle = wit::cordis::core::remote::Host::submit(host, "nope".to_string(), vec![]);
             let _ = handle;
             // 用 context::set 分配逆 rep（submit 用 remote rep 空间）。
-            let inv = ContextHost::set(host, "k".to_string(), Value::Count(1)).expect("set");
+            let inv =
+                ContextHost::set(host, "k".to_string(), from_cv(Value::Count(1))).expect("set");
             inv.rep()
         };
         let first = set_once(&mut host);

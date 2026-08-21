@@ -10,8 +10,8 @@
 use cordis_async::TokioRemote;
 use cordis_core::component::Component;
 use cordis_core::runtime::Runtime;
+use cordis_wasm::Value;
 use cordis_wasm::WasmComponent;
-use cordis_wasm::wit::cordis::core::context::Value;
 use std::rc::Rc;
 use std::sync::Arc;
 

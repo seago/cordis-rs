@@ -1,17 +1,19 @@
 //! PR #13 双后端共存：同一 `Loader`/`Runtime` 同时加载**原生**与 **wasm**
 //! 组件（M1 门禁：同一 loader 加载原生与 wasm 组件）。
 //!
-//! 值类型统一（PR #13 决策）：原生组件经 `Context::set_dyn`/`get_dyn`
-//! 使用与 wasm 相同的 **wit `Value` 装箱**——跨类型值翻译的 M1 边界
-//! 由此收窄为"双方都走动态值 API 即可互通"（THEORY-MAP 记录）。
+//! 值类型统一（PR #13 决策 → P-2 下沉）：原生组件经
+//! `Context::set_dyn`/`get_dyn` 使用与 wasm 相同的统一类型
+//! **`cordis_value::Value`**（P-2 产品验证线：值类型下沉独立 crate，
+//! 依赖方向"原生→cordis-value"；跨类型值翻译边界已消除）——双方都走
+//! 动态值 API 即可互通（双向测试直证）。
 
 use cordis_core::effect::{EffectIter, once};
 use cordis_core::keyset::KeySet;
 use cordis_core::symbol::Symbol;
 use cordis_core::{Component, FiberState, Runtime};
 use cordis_loader::{Entry, Loader};
+use cordis_wasm::Value;
 use cordis_wasm::WasmComponent;
-use cordis_wasm::wit::cordis::core::context::Value;
 use std::rc::Rc;
 
 fn load_guest(example: &str) -> Rc<WasmComponent> {
@@ -125,7 +127,7 @@ fn loader_loads_native_and_wasm_together() {
             .get_value(Symbol::intern("derived"))
             .expect("derived 已绑定")
             .downcast_ref::<Value>()
-            .expect("wit Value")
+            .expect("cordis_value::Value")
             .clone()
     };
     assert!(
@@ -170,7 +172,7 @@ fn wasm_consumer_reads_native_provider_value() {
             .get_value(Symbol::intern("derived"))
             .expect("derived 已绑定")
             .downcast_ref::<Value>()
-            .expect("wit Value")
+            .expect("cordis_value::Value")
             .clone()
     };
     assert!(

@@ -259,6 +259,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cordis-value"
+version = "0.1.0"
+
+[[package]]
 name = "cordis-wasm"
 version = "0.1.0"
 dependencies = [
@@ -266,6 +270,7 @@ dependencies = [
  "cordis-async",
  "cordis-core",
  "cordis-loader",
+ "cordis-value",
  "tokio",
  "wasmtime",
  "wasmtime-wasi",

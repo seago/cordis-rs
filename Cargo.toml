@@ -8,6 +8,7 @@ members = [
     "crates/cordis-loader",
     "crates/cordis-macro",
     "crates/cordis-native",
+    "crates/cordis-value",
     "crates/cordis-wasm",
     "crates/cordis-async",
     "examples/hello-plugin",

@@ -17,8 +17,8 @@ use cordis_core::keyset::KeySet;
 use cordis_core::symbol::Symbol;
 use cordis_core::{Component, FiberState, Runtime};
 use cordis_loader::{Entry, Loader};
+use cordis_wasm::Value;
 use cordis_wasm::WasmComponent;
-use cordis_wasm::wit::cordis::core::context::Value;
 use std::rc::Rc;
 
 /// Go guest 是组件产物（core 模块已组件化），路径在示例根目录。

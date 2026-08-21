@@ -48,7 +48,7 @@ fn wasm_component_activates_in_core_runtime() {
     // 绑定镜像（Host 侧，guest 的 get 读取）同步可见。
     let mirror = comp.bindings();
     assert!(
-        matches!(mirror.get("db"), Some(cordis_wasm::wit::cordis::core::context::Value::Text(v)) if v == "wasm-pg"),
+        matches!(mirror.get("db"), Some(cordis_wasm::Value::Text(v)) if v == "wasm-pg"),
         "镜像值为 wasm-pg：{mirror:?}"
     );
 

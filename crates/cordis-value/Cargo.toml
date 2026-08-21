@@ -1,0 +1,13 @@
+[package]
+name = "cordis-value"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Cordis 统一跨边界值类型（产品验证线 P-2：原生与 wasm 组件互通的值语义载体）"
+
+[lints]
+workspace = true
+
+[dependencies]
