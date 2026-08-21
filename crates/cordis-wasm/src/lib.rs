@@ -124,9 +124,10 @@ pub type RemoteOp = dyn Fn(Vec<Value>) -> Value + Send + Sync;
 /// `Store<T>` 的 `T`（`Send`：`WasiView` 约束）。实现 `context`
 /// 接口（get/set）与 `inverse` 资源（run/drop）。
 ///
-/// **rep 空间单调（审查 m3，REVIEW-2a7a686）**：`next_rep` 与
-/// `InstanceState::core_inverses` 槽位只增不减（drop 为 no-op）——
-/// 已知边界（与组件生命周期内 set 次数同阶；M2 提供回收）。
+/// **rep 回收（P-1，产品验证线）**：`next_rep` 单调分配 + `inverse_free`
+/// 复用池——`run_inverse`（逆执行）后 rep 入池，长驻组件生命周期内
+/// 分配量有界（≈ 峰值并发逆数，非操作次数；REVIEW-2a7a686 m3 已知
+/// 边界 → 已回收）。`drop` 保持 no-op（句柄销毁 ≠ 逆执行）。
 pub struct Host {
     /// guest 在 step 期间累积的绑定请求（迭代器 step 后转发并清空）。
     pending: Vec<PendingSet>,
@@ -138,8 +139,12 @@ pub struct Host {
     next_remote_rep: u32,
     /// 绑定镜像（`get` 读取；由迭代器在转发后同步）。
     bindings: HashMap<String, Value>,
-    /// 逆句柄计数器（跨步骤单调，保证 rep 唯一）。
+    /// 逆句柄计数器（跨步骤单调，保证 rep 唯一；回收见 inverse_free）。
     next_rep: u32,
+    /// 可复用逆 rep 池（P-1：仅「逆已执行」入池——`run_inverse` 后
+    /// 槽位空、句柄已撤销，复用安全；`drop` 不入池（句柄销毁 ≠ 逆执行，
+    /// 绑定仍待撤销——REVIEW-2a7a686 m3 回收方案的语义边界））。
+    inverse_free: Vec<u32>,
     /// WASI preview2 上下文（wasip2 标准库依赖）。
     wasi: WasiCtx,
     /// WASI 资源表。
@@ -156,6 +161,7 @@ impl Host {
             next_remote_rep: 0,
             bindings: HashMap::new(),
             next_rep: 0,
+            inverse_free: Vec::new(),
             wasi: WasiCtxBuilder::new().build(),
             table: wasmtime::component::ResourceTable::new(),
         }
@@ -245,8 +251,12 @@ impl ContextHost for Host {
         self.bindings.get(&key).cloned()
     }
     fn set(&mut self, key: String, value: Value) -> Result<Resource<Inverse>, String> {
-        let rep = self.next_rep;
-        self.next_rep += 1;
+        // P-1：优先复用已执行逆释放的 rep（free list），空则单调递增。
+        let rep = self.inverse_free.pop().unwrap_or_else(|| {
+            let r = self.next_rep;
+            self.next_rep += 1;
+            r
+        });
         // 镜像先行：guest 的 get 在 step 内立即可读（核心绑定在迭代器
         // 转发后生效；逆执行时清理镜像）。
         self.bindings.insert(key.clone(), value.clone());
@@ -292,7 +302,11 @@ impl InstanceState {
             .and_then(|slot| slot.take());
         if let Some((key, task)) = taken {
             task();
-            self.store.borrow_mut().data_mut().bindings.remove(&key);
+            let mut store = self.store.borrow_mut();
+            let host = store.data_mut();
+            host.bindings.remove(&key);
+            // P-1：逆已执行（槽位空、句柄已撤销）→ rep 入 free list 复用。
+            host.inverse_free.push(rep);
         }
     }
 }
@@ -901,6 +915,29 @@ mod remote_tests {
             !host.remote_results.contains_key(&0),
             "drop 句柄 → 结果槽清除"
         );
+    }
+
+    /// P-1 有界性验收：长驻循环 set→逆执行（rep 释放）→ set，rep 复用 +
+    /// `next_rep` 有界恒定（REVIEW-2a7a686 m3 已知边界 → 已回收）。
+    #[test]
+    fn host_inverse_free_reuse_bounds_rep_allocation() {
+        let mut host = Host::new();
+        let set_once = |host: &mut Host| -> u32 {
+            let handle = wit::cordis::core::remote::Host::submit(host, "nope".to_string(), vec![]);
+            let _ = handle;
+            // 用 context::set 分配逆 rep（submit 用 remote rep 空间）。
+            let inv = ContextHost::set(host, "k".to_string(), Value::Count(1)).expect("set");
+            inv.rep()
+        };
+        let first = set_once(&mut host);
+        // 模拟逆执行释放（与 run_inverse 的入池等价）。
+        host.inverse_free.push(first);
+        for _ in 0..1000 {
+            let r = set_once(&mut host);
+            assert_eq!(r, first, "复用已执行逆释放的 rep");
+            host.inverse_free.push(r);
+        }
+        assert_eq!(host.next_rep, 1, "next_rep 有界恒定（非操作次数）");
     }
 
     /// Host submit 入队 + rep 分配 + take 未就绪。
