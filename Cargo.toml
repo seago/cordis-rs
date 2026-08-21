@@ -12,6 +12,7 @@ members = [
     "crates/cordis-wasm",
     "crates/cordis-async",
     "examples/hello-plugin",
+    "examples/agent-plugin",
     "examples/im-bot",
     "tools/componentize",
 ]

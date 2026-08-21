@@ -1,0 +1,18 @@
+[package]
+name = "agent-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "产品验证线 P-5：agent 插件产品 spike（events + async + Remote 全栈回路）"
+
+[lints]
+workspace = true
+
+[dependencies]
+cordis-async = { path = "../../crates/cordis-async" }
+cordis-core = { path = "../../crates/cordis-core" }
+cordis-events = { path = "../../crates/cordis-events" }
+cordis-loader = { path = "../../crates/cordis-loader" }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync"] }

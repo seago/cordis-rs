@@ -12,6 +12,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-plugin"
+version = "0.1.0"
+dependencies = [
+ "cordis-async",
+ "cordis-core",
+ "cordis-events",
+ "cordis-loader",
+ "tokio",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
