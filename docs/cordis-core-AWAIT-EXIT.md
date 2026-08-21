@@ -36,4 +36,4 @@
 
 ## 5. 出口判定
 
-**B 计划主体完成**（core Await 机制 + wasm guest 完整 take-await 端到端 + 错误通道 + 文档归位 + 门禁全绿 + 审查闭环，0 Major 未决）。**A2b（go ABI 收尾）为既定遗留**（wit 波及，具因/处置已记录，独立跟踪，不在本出口阻塞判定内——rust 侧 B 目标达成，go 为 M1 历史双语言门禁恢复项）。
+**B 计划全程闭环**（core Await 机制 + wasm guest 完整 take-await 端到端 + 错误通道 + 文档归位 + 门禁全绿 + 审查闭环，0 Major 未决）。**A2b（go ABI 收尾）已于 2026-08-22 闭环**（§4：variant 化消除 root cause + go_guest 恢复 + M1 双语言门禁恢复）——无未决遗留（REVIEW-A2B-EXIT 出口走查确认）。
