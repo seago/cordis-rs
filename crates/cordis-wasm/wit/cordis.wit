@@ -35,11 +35,15 @@ interface plugin {
     resource task {
         step: func() -> option<effect-step>;
     }
-    record effect-step {
-        /// 本步逆（B 计划 A2）：可选——`none` 代表等待/无副作用步
-        /// （await 远端回填时使用；宿主以 `Step::Await` 暂停）。
-        inverse: option<inverse>,
-        done: bool,
+    /// 效应步（A2b 修法①：显式 variant，消除 option<resource> 编码坑——
+    /// `invalid option discriminant` 根因）。
+    variant effect-step {
+        /// 有逆的效应步（继续；逆由宿主经 pending 转发机制收账）。
+        step(inverse),
+        /// 终止步（可带最后效应逆）。
+        done(inverse),
+        /// 等待远端（无逆；宿主以 `Step::Await` 暂停，回填后 advance 恢复）。
+        wait,
     }
     resource component {
         constructor();

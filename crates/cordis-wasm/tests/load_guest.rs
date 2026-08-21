@@ -1,6 +1,7 @@
 //! PR #10 端到端：加载 Rust guest 组件（examples/wasm-plugin-rust）→
 //! constructor/inject/provide/start/step → 宿主绑定 + 逆撤销。
 
+use cordis_wasm::EffectStep;
 use cordis_wasm::Host;
 use cordis_wasm::wit;
 use wasmtime::component::{Component, HasSelf, Linker};
@@ -55,7 +56,10 @@ fn guest_activates_and_binds_via_host_context() -> anyhow::Result<()> {
     // 提交远端后 done:false——等待步由宿主 Await/advance 驱动，见 a2_e2e；
     // 此处断言 step0 副作用与逆（Option）形态）。
     let step = step.expect("第一步应有产出");
-    assert!(step.inverse.is_some(), "step0 有逆（db 绑定）");
+    assert!(
+        matches!(step, EffectStep::Step(_)),
+        "step0 为有逆步（db 绑定，A2b variant）"
+    );
     let binding = store.data().bindings().get("db").cloned();
     assert!(
         matches!(binding, Some(Value::Text(ref v)) if v == "wasm-pg"),
@@ -66,12 +70,8 @@ fn guest_activates_and_binds_via_host_context() -> anyhow::Result<()> {
     // A2 Await 语义；完整收敛见 a2_e2e 测试）。
     let next = task.call_step(&mut store, task_any)?;
     assert!(
-        next.is_some(),
-        "A2 等待步持续产出（done:false + inverse None）"
-    );
-    assert!(
-        matches!(&next, Some(es) if es.inverse.is_none() && !es.done),
-        "等待步：none 逆 + 未完成"
+        matches!(&next, Some(EffectStep::Wait)),
+        "A2b 等待步（variant wait；完整收敛见 a2_e2e）"
     );
 
     // 逆撤销路径由 tests/bridge_core.rs 覆盖（WasmComponent 接入核心

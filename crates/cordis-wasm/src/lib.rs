@@ -88,6 +88,10 @@ pub mod wit {
 
 pub use wit::cordis::core::context::{Host as ContextHost, HostInverse, Inverse, Value};
 
+/// 效应步（wit `effect-step` 的导出侧类型，A2b variant 形态）——外部
+/// （测试/宿主集成）匹配用。
+pub use wit::exports::cordis::core::plugin::EffectStep;
+
 /// 核心逆（非 Send：捕获 `Rc<Context>`；仅单线程实例状态可执行）。
 type CoreInverse = (String, Box<dyn FnOnce()>);
 
@@ -694,18 +698,19 @@ impl EffectIter for WasmTaskIter {
                 state.run_inverse(rep);
             }
         }) as Box<dyn FnOnce()>;
-        // B 计划 A2：guest 未完成且存在在途远端 join → `Step::Await`
-        //（core 挂起，等 worker 回填后经 Runtime::advance 恢复——组合线程
-        // poll_remotes 后 advance；本步为 none 逆的等待步，逆不累计）。
-        let done = matches!(&step, Some(es) if es.done);
+        // A2b（variant 形态，docs/cordis-wasm-A2B-PLAN.md）：`wait` 步 +
+        // 在途远端 join → `Step::Await`（core 挂起，回填后 advance 恢复；
+        // 等待步无逆、不累计）。`step` = 有逆步继续；`done` = 终止。
+        use wit::exports::cordis::core::plugin::EffectStep;
         let awaiting = {
             let state = self.state.borrow();
-            !done && !state.remote_joins.borrow().is_empty()
+            matches!(&step, Some(EffectStep::Wait)) && !state.remote_joins.borrow().is_empty()
         };
         match step {
             _ if awaiting => Step::Await,
-            Some(effect_step) if !effect_step.done => Step::Yielded(step_inverse),
-            Some(_) => Step::Finished(step_inverse),
+            Some(EffectStep::Step(_)) => Step::Yielded(step_inverse),
+            Some(EffectStep::Done(_)) => Step::Finished(step_inverse),
+            Some(EffectStep::Wait) => Step::Yielded(step_inverse),
             None => Step::Finished(Box::new(|| {}) as Box<dyn FnOnce()>),
         }
     }

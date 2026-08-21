@@ -58,10 +58,7 @@ impl GuestTask for DbConsumerTask {
             };
             let derived = format!("derived({db})");
             let inverse = context::set("derived", &Value::Text(derived)).ok()?;
-            Some(EffectStep {
-                inverse: Some(inverse),
-                done: true,
-            })
+            Some(EffectStep::Done(inverse))
         } else {
             None
         }

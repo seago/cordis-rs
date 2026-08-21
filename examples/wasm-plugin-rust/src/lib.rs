@@ -72,10 +72,7 @@ impl GuestTask for DbTask {
                 let inverse = context::set("db", &Value::Text("wasm-pg".into())).ok()?;
                 let h = cordis::core::remote::submit("echo", &vec![Value::Count(7)]);
                 self.handle.replace(Some(h));
-                Some(EffectStep {
-                    inverse: Some(inverse),
-                    done: false,
-                })
+                Some(EffectStep::Step(inverse))
             }
             _ => {
                 // 轮询 take：就绪 → probe/probe_err + done；未就绪 → 等待步
@@ -87,10 +84,7 @@ impl GuestTask for DbTask {
                     match result {
                         Ok(v) => {
                             let inverse = context::set("probe", &v).ok()?;
-                            Some(EffectStep {
-                                inverse: Some(inverse),
-                                done: true,
-                            })
+                            Some(EffectStep::Done(inverse))
                         }
                         Err(e) => {
                             let inverse = context::set(
@@ -98,19 +92,13 @@ impl GuestTask for DbTask {
                                 &Value::Text(format!("err:{e}")),
                             )
                             .ok()?;
-                            Some(EffectStep {
-                                inverse: Some(inverse),
-                                done: true,
-                            })
+                            Some(EffectStep::Done(inverse))
                         }
                     }
                 } else {
                     // 等待步：无逆（none），宿主以 Await 暂停直至回填。
                     self.step.set(self.step.get() + 1);
-                    Some(EffectStep {
-                        inverse: None,
-                        done: false,
-                    })
+                    Some(EffectStep::Wait)
                 }
             }
         }
