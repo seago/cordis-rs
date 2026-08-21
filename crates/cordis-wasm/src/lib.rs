@@ -433,6 +433,15 @@ impl WasmComponent {
         );
     }
 
+    /// 统一驱动回路（P-3 产品验证线）：`poll_remotes`（回填落位）→
+    /// `Runtime::advance_suspended`（恢复满足判据的挂起 fiber）——agent
+    /// 插件（P-5）的 await 驱动底座。单 wasm 组件场景判据为"全部恢复"；
+    /// 多组件编排用 `advance_suspended` 的自带 judge。
+    pub fn poll_and_advance(&self, runtime: &Rc<cordis_core::runtime::Runtime>) {
+        self.poll_remotes();
+        runtime.advance_suspended(|_| true);
+    }
+
     /// 远端句柄结果复制（调试/断言用）。
     pub fn remote_results_debug(
         &self,

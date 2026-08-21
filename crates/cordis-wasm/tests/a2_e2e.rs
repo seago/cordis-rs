@@ -141,3 +141,46 @@ fn guest_take_receives_remote_err() {
 
     let _ = worker;
 }
+
+/// P-3 统一驱动回路：挂起 → `poll_and_advance` 循环（回填+恢复）→ 完成。
+#[test]
+fn poll_and_advance_drives_suspend_loop() {
+    let worker = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .build()
+        .expect("worker runtime");
+    let engine = wasmtime::Engine::default();
+    let bytes = std::fs::read(guest_wasm_path()).expect("guest（A2 多步 take）");
+    let comp = WasmComponent::load(&engine, &bytes).expect("组件加载");
+    comp.configure_remote(Some(Rc::new(TokioRemote::new(worker.handle().clone()))));
+    comp.register_remote(
+        "echo",
+        Arc::new(|_params: Vec<Value>| Value::Text(format!("{:?}", std::thread::current().id()))),
+    );
+
+    let runtime = Rc::new(Runtime::new());
+    let loader = Rc::new(Loader::new(Rc::clone(&runtime)));
+    loader.register_component("db", Rc::clone(&comp) as Rc<dyn Component>);
+    let report = loader.apply(&[Entry::new("p", "db", Rc::new(()), 0, false)]);
+    assert!(report.ok());
+
+    let fid = loader.fiber("p").expect("条目 p").id();
+    assert!(runtime.fiber(fid).expect("fiber").is_suspended(), "初挂起");
+
+    // 统一驱动回路：poll 回填 → advance 恢复（循环直至 guest 自取完成）。
+    for _ in 0..4000 {
+        comp.poll_and_advance(&runtime);
+        if !runtime.fiber(fid).expect("fiber").is_suspended() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(
+        !runtime.fiber(fid).expect("fiber").is_suspended(),
+        "回路驱动完成"
+    );
+    let probe = store_value(&runtime, "probe").expect("guest 自取结果落盘");
+    assert!(matches!(probe, Value::Text(_)), "回填值：{probe:?}");
+
+    let _ = worker;
+}

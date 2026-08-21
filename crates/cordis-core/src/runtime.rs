@@ -1285,6 +1285,42 @@ mod tests {
         assert!(rt2.is_quiet(), "退役后静止");
     }
 
+    /// P-3（REVIEW-8589ca2 m-2 复核）：挂起中 `update_fiber`——unload 先
+    /// 收账 resumable（挂起集撤销）→ 惯性 reload 新代（又产 Await → 重新
+    /// 登记）→ 无 panic、状态/挂起集一致。
+    #[test]
+    fn update_during_suspend_reclaims_and_restarts() {
+        let runtime = Rc::new(Runtime::new());
+        let ctx = runtime.context();
+        let fiber = ctx
+            .use_component(Rc::new(AwaitComp) as Rc<dyn Component>, Rc::new(()))
+            .expect("激活（挂起）");
+        assert!(fiber.is_suspended(), "初挂起");
+        assert!(runtime.suspended_fibers().contains(&fiber.id()));
+
+        fiber.update(Rc::new(()) as Rc<dyn Any>);
+        // 新代（同迭代器）又产 Await → 重新挂起登记；旧 acc 逆已收账。
+        assert!(
+            fiber.is_suspended(),
+            "新代挂起（update → unload 收账 → 惯性 reload 重跑）"
+        );
+        assert!(
+            runtime.suspended_fibers().contains(&fiber.id()),
+            "挂起集重新登记（无残留旧挂起）"
+        );
+        assert!(
+            runtime
+                .store()
+                .contains(crate::symbol::Symbol::intern("k1")),
+            "新代 step1 重新绑定"
+        );
+
+        runtime.advance(fiber.id());
+        assert!(!fiber.is_suspended(), "恢复完成");
+        fiber.retire();
+        assert!(runtime.is_quiet(), "退役后静止");
+    }
+
     #[test]
     #[should_panic(expected = "未挂起")]
     fn advance_unresumed_panics() {
