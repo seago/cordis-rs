@@ -30,6 +30,12 @@
 #    ../../../crates/cordis-wasm/wit cordis guest.wasm
 ```
 
+**wit 绑定自动同步（P-4 产品验证线，REVIEW-6a714ca M-1）**：`build.sh`
+第 0 步自动执行 `wit-bindgen go` 重生成全部 go 绑定（含 `wit_exports.go`
+的 variant 判别）——wit 结构变更后直接重跑 `./build.sh` 即可（并恢复被
+wit-bindgen 重写的 `go.mod` 的 vendored replace）；随后重跑
+`cargo test -p cordis-wasm --test go_guest` 验证 ABI 同步。
+
 要点（踩坑记录，PR #14）：
 
 1. **reactor 模式**：必须 `-buildmode=c-shared`——导出 `_initialize`
