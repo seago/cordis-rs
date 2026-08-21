@@ -65,11 +65,11 @@ cordis-wasm ── natives/原生组件（经 cordis-value 互通）
 
 全程约 4–6 天（含审查门禁）。
 
-## 4. 决策点（开工前确认）
+## 4. 决策点（执行结论，2026-08-22）
 
-1. **下沉位置**：独立 `crates/cordis-value`（推荐——零 core 改动、零第三方）vs core 内模块（破坏 core 零改动纪律）——确认独立 crate；
-2. **wit external 映射**：P2-0 spike 验证（若 wit-bindgen 0.60 不支持 external → 方案 B：wit 保持单 package，但 Rust 侧以 `type_value = "cordis_value::Value"` 类配置重映射生成——同样可达同一类型；spike 定稿）；
-3. **兼容重导出**：P2-3 是否保留 `cordis_wasm::Value` 重导出（过渡）——默认保留（doc 标注 deprecated 指向 cordis-value）。
+1. **下沉位置**：独立 `crates/cordis-value`（已采纳——零 core 改动、零第三方）。
+2. **映射机制（P2-0 spike 结论）**：wit-bindgen 0.60 与 wasmtime bindgen 的 external type 映射**均不可行**（wasmtime bindgen 无 `deps` 键；wit 单文件单 package；`with` 语法解析失败）→ **方案 C（转换层）为最终形态**：wit 不动、guest/go 无感、值语义零变化；trait 边界 `to_cv`/`from_cv` 桥接（REVIEW-3a3591c M-1 措辞对齐）。
+3. **兼容重导出**：`cordis_wasm::Value` = `cordis_value::Value` 统一公开面（不保留双类型——生成类型仅内部 wit 模块使用）。
 
 ## 5. 风险
 
