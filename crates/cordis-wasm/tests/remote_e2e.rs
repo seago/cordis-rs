@@ -32,10 +32,11 @@ fn guest_remote_submits_to_worker_and_backfills() {
         .expect("先构建 guest：cargo build -p wasm-plugin-rust --target wasm32-wasip2");
     let comp = WasmComponent::load(&engine, &bytes).expect("组件加载");
 
-    // 注入远端桥 + 注册操作（echo 返回 worker 线程 id → O-6 隔离断言）。
+    // 注入远端桥 + 注册操作（llm 返回 worker 线程 id → O-6 隔离断言）。
     comp.configure_remote(Some(Rc::new(TokioRemote::new(worker.handle().clone()))));
+    // P-5 多轮 guest：远端操作名 llm（round0 提交 rep0）。
     comp.register_remote(
-        "echo",
+        "llm",
         Arc::new(|_params: Vec<Value>| Value::Text(format!("{:?}", std::thread::current().id()))),
     );
 

@@ -46,16 +46,8 @@ fn c1_note_back_injects_result_into_store() {
     let bytes = std::fs::read(guest_wasm_path()).expect("先构建 guest");
     let comp = WasmComponent::load(&engine, &bytes).expect("组件加载");
     comp.configure_remote(Some(Rc::new(TokioRemote::new(worker.handle().clone()))));
-    comp.register_remote(
-        "echo",
-        Arc::new(|params: Vec<Value>| {
-            let n = match params.first() {
-                Some(Value::Count(c)) => *c,
-                _ => 0,
-            };
-            Value::Count(n * 2)
-        }),
-    );
+    // P-5 多轮 guest：远端操作名 llm（round0 提交 rep0）。
+    comp.register_remote("llm", Arc::new(|_params: Vec<Value>| Value::Count(14)));
 
     let runtime = Rc::new(Runtime::new());
     let root = runtime.context();
@@ -63,9 +55,9 @@ fn c1_note_back_injects_result_into_store() {
         .use_component(Rc::clone(&comp) as Rc<dyn Component>, Rc::new(()))
         .expect("激活");
 
-    // 回填（不断言 worker tid——此测试聚焦回注入，参数 7 → 14）。
+    // 回填（不断言 worker tid——此测试聚焦回注入；llm round0 → 14）。
     let result = await_remote_value(&comp, 0);
-    assert!(matches!(result, Value::Count(14)), "echo(7)→14");
+    assert!(matches!(result, Value::Count(14)), "llm(round0)→14");
 
     // 回注到核心 store（注入键 probe_in）——C2 阶段 2 guest 经 get 读回。
     // Disposer 保留（保持回注绑定到测试作用域末——C2 阶段 2 读取期间不撤销）。
