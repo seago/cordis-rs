@@ -200,10 +200,9 @@ impl HostInverse for Host {
             "inverse.run 由宿主驱动撤销（组件卸载路径）——guest 调用违反协议（Def 8 逆的撤销归宿主）"
         );
     }
-    /// drop（m3，REVIEW-2a7a686）：防御性退化——核心逆在
-    /// `InstanceState::core_inverses`（`Host` 拿不到），槽位与
-    /// `next_rep` 空间**单调增长**属已知边界（每个组件的 rep 数量
-    /// 与其生命周期内 set 次数同阶，M1 可接受；M2 提供回收）。
+    /// drop（m3，REVIEW-2a7a686 + P-1 更新）：句柄销毁 ≠ 逆执行——绑定仍
+    /// 待撤销，故本处保持 no-op 且**不入 free list**；rep 回收经
+    /// `run_inverse`（逆执行后入池，REVIEW-P1-EXIT Minor-1 落地）。
     fn drop(&mut self, _rep: Resource<Inverse>) -> wasmtime::Result<()> {
         Ok(())
     }
