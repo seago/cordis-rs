@@ -29,11 +29,10 @@
 - **wasm**：`a2_e2e` 2/2——guest submit→Await 挂起→poll 回填→advance→**guest 自取 take** 结果落盘（O-6 隔离：远端在 worker 池线程）+ op panic→err 回填→**guest take Err** 分支；wasm 全套绿（lib7 + 集成15，go 2 ignore）。
 - 门禁：fmt / clippy `-D warnings` / doc 0 告警 / workspace 无回归。
 
-## 4. 遗留（诚实记录）：A2b go ABI 收尾
+## 4. A2b（go ABI 收尾）——已闭环（2026-08-22）
 
-- **root cause（实测诊断）**：go_guest 临时诊断打印显示 fiber 失败消息 `wasm 组件 step 失败（trap）：invalid option discriminant`——host 解码 go 的 effect-step 时 option（inverse）判别非法。疑似 wit 绑 go 侧（wit-bindgen go 0.60 对 `option<resource>`）编码与 wasmtime 组件模型判别布局未对齐（go 绑定层问题，非 rust/core；A2b 实证确认）。
-- **现状**：rust 系 4 guest 全对齐；`go_guest` 2 测试暂 `#[ignore="A2b"]`（M1 双语言门禁恢复项）。
-- **处置建议**：A2b 独立排期——对齐 go 绑定对 `option<inverse>` 的编码（可选：wit 结构改显式 `variant effect-step { step(inverse), wait }` 绕开 option<resource> 边界），或 go 端手工 encode 修正 + 测试恢复。
+- **修法①落地**：wit `effect-step` 改显式 `variant { step(inverse), done(inverse), wait }`（消除 `option<resource>` 编码坑；G1 宿主三分支 + G2 rust 4 guest 适配 + G3 go 绑定重生成 + `go_guest` 2 测试恢复绿——**M1 双语言门禁恢复**，全套 wasm 0 ignore）。
+- **go ABI 维护记录（REVIEW-6a714ca M-1）**：`wit_exports.go` 的手写 ABI 判别（0/1/2）须随 wit 结构变化手动同步 + 重生成绑定 + 重跑 go_guest（build.sh 未自动化该同步）。
 
 ## 5. 出口判定
 

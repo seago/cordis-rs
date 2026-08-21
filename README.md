@@ -107,7 +107,7 @@ cargo run -p cordis-async --example plugin_template
 
 ## 已知边界与遗留
 
-- **A2b（go ABI 收尾）**：wit `effect-step.inverse→option` 后 Go guest 编码未对齐（host 解码 `invalid option discriminant`）——`go_guest` 2 测试暂 `#[ignore]`；修法建议：wit 改显式 `variant effect-step { step(inverse), wait }` 或 go 绑定编码修正。M1 双语言门禁恢复项（`cordis-core-AWAIT-EXIT.md` §4）。
+- **A2b（go ABI）已闭环**：wit `effect-step` 显式 `variant { step(inverse), done(inverse), wait }` 消除 `option<resource>` 编码坑，go 绑定重生成 + `go_guest` 恢复（M1 双语言门禁恢复）。**维护注意**：`examples/wasm-plugin-go/wit_exports.go` 手写 ABI 判别须随 wit 结构变化手动同步（`cordis-core-AWAIT-EXIT.md` §4）。
 - **C 探针定位**：两阶段 guest（preseed/rev-bump）为"一次性请求-消费"的轻量捷径；正式 take-await 走 B 计划（A2a 已打通，`a2_e2e` 直证）。
 - **wasm 逆表回收**：`core_inverses` 槽位单调（REVIEW-2a7a686 m3）——M2 级回收项。
 - **双后端值类型**：wit `Value` 与核心值类型的统一下沉（THEORY-MAP PR#13 边界）未做。
