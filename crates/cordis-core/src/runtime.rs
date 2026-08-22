@@ -314,7 +314,7 @@ impl Runtime {
         let fiber = self
             .fiber(fid)
             .unwrap_or_else(|| panic!("advance：未知 fiber {fid:?}（宿主 bug，defensive）"));
-        let Some((iter, acc)) = fiber.resumable.borrow_mut().take() else {
+        let Some((iter, acc, _judge)) = fiber.resumable.borrow_mut().take() else {
             panic!("advance：fiber {fid:?} 未挂起于 Await（调用方违约；需先产生 Step::Await）");
         };
         // m-2（REVIEW-8589ca2）：guard = `target.is_some()` 弱于激活期
@@ -333,10 +333,11 @@ impl Runtime {
                 let provided = self.provided_of(&fiber);
                 fiber.ctx.notify(&provided);
             }
-            Err((iter, acc)) => {
-                // 再次挂起（后续 advance 继续）——resumable 即挂起登记
-                //（`suspended_fibers` 派生自 `is_suspended`，单一事实来源）。
-                *fiber.resumable.borrow_mut() = Some((iter, acc));
+            Err((iter, acc, judge)) => {
+                // 再次挂起（后续 advance/poll_ready 继续）——resumable 即
+                // 挂起登记（`suspended_fibers` 派生自 `is_suspended`，单一
+                // 事实来源）；判据载荷随本次 Await 更新（backlog ②）。
+                *fiber.resumable.borrow_mut() = Some((iter, acc, judge));
             }
         }
     }
@@ -365,6 +366,32 @@ impl Runtime {
     pub fn advance_suspended(&self, judge: impl Fn(FiberId) -> bool) {
         for fid in self.suspended_fibers() {
             if judge(fid) {
+                self.advance(fid);
+            }
+        }
+    }
+
+    /// 判据 v2 统一评估（backlog ②）：对挂起集成员评估其**自报就绪判据**
+    /// （挂起时 `Step::Await` 的 `Some(judge)` 载荷携带）→ 满足则 `advance`。
+    ///
+    /// **"谁在何时 poll"的答案**：组合线程在显式驱动点调用本方法（一次
+    /// 集中评估所有挂起 fiber；无自主轮询/timer——ADR-0002 单线程 push
+    /// 保持）。未自报判据（`Await(None)`）的 fiber 不受本方法驱动（保持
+    /// 外部判据 + [`Self::advance_suspended`] 语义）。
+    ///
+    /// 判据纪律：纯就绪检查（不得调度）；**不得触碰本 fiber 的挂起上下文**
+    /// （`resumable` 评估期间持借——wasm 判据只读组件远端结果表，不触
+    /// fiber 内部）；借用在 `advance` 前释放。
+    pub fn poll_ready(&self) {
+        for fid in self.suspended_fibers() {
+            let ready = self.fiber(fid).is_some_and(|f| {
+                let r = f.resumable.borrow();
+                match &*r {
+                    Some((_, _, Some(judge))) => judge(),
+                    _ => false,
+                }
+            });
+            if ready {
                 self.advance(fid);
             }
         }
@@ -545,7 +572,7 @@ impl Runtime {
         }));
         let recovered_suspended = match raised {
             Ok(Ok(recover)) => (Some(recover), None),
-            Ok(Err((iter, acc))) => (None, Some((iter, acc))),
+            Ok(Err((iter, acc, judge))) => (None, Some((iter, acc, judge))),
             Err(payload) => {
                 // L-Raise：仅 FiberError 载荷 = 组件失败；其余 = 宿主 bug。
                 let err = match payload.downcast::<FiberError>() {
@@ -559,11 +586,12 @@ impl Runtime {
                 return;
             }
         };
-        if let Some((iter, acc)) = recovered_suspended.1 {
-            // 挂起：保留迭代器 + 已累积逆；状态 Active（target 未变），
-            // 依赖者照常生效（副作用已发生、逆待 advance 收账）。挂起登记
-            // = `resumable` 有值（`suspended_fibers` 派生自 `is_suspended`）。
-            *fiber.resumable.borrow_mut() = Some((iter, acc));
+        if let Some((iter, acc, judge)) = recovered_suspended.1 {
+            // 挂起：保留迭代器 + 已累积逆 + 自报判据；状态 Active（target
+            // 未变），依赖者照常生效（副作用已发生、逆待 advance 收账）。
+            // 挂起登记 = `resumable` 有值（`suspended_fibers` 派生自
+            // `is_suspended`）。
+            *fiber.resumable.borrow_mut() = Some((iter, acc, judge));
             *fiber.state.borrow_mut() = FiberState::Active { view: committed };
             let provided = self.provided_of(fiber);
             fiber.ctx.notify(&provided);
@@ -597,7 +625,7 @@ impl Runtime {
         // B 计划 A1：挂起残留逆（advance 未完成的已累积逆）补入 dispose——
         // append（执行序）后由下面 drain(..).rev() 以 LIFO 执行，与完整
         // 执行折叠序一致。
-        if let Some((_, mut acc)) = fiber.resumable.borrow_mut().take() {
+        if let Some((_, mut acc, _)) = fiber.resumable.borrow_mut().take() {
             fiber.dispose.borrow_mut().append(&mut acc);
         }
 
@@ -1262,7 +1290,7 @@ mod tests {
             self.n += 1;
             match self.n {
                 1 => Step::Yielded(self.ctx.set::<K3Key>(1).expect("k3")),
-                2 => Step::Await,
+                2 => Step::Await(None),
                 _ => Step::Finished(self.ctx.set::<K4Key>(2).expect("k4")),
             }
         }
@@ -1289,7 +1317,7 @@ mod tests {
             self.n += 1;
             match self.n {
                 1 => Step::Yielded(self.ctx.set::<K1Key>(1).expect("k1")),
-                2 => Step::Await,
+                2 => Step::Await(None),
                 _ => Step::Finished(self.ctx.set::<K2Key>(2).expect("k2")),
             }
         }
@@ -1427,6 +1455,124 @@ mod tests {
         assert!(!fiber.is_suspended(), "恢复完成");
         fiber.retire();
         assert!(runtime.is_quiet(), "退役后静止");
+    }
+
+    /// backlog ②（判据 v2）：`poll_ready` 统一评估挂起 fiber 的**自报判据**
+    /// ——满足才 advance；`Await(None)` 不受驱动；与外部判据
+    /// `advance_suspended` 并存互不干扰。
+    #[test]
+    fn poll_ready_advances_judge_satisfied_fibers() {
+        struct PollComp {
+            key: &'static str,
+            ready: Rc<Cell<bool>>,
+            with_judge: bool,
+            log: Rc<RefCell<Vec<&'static str>>>,
+        }
+        impl Component for PollComp {
+            fn inject(&self) -> KeySet {
+                KeySet::new()
+            }
+            fn provide(&self) -> KeySet {
+                spec(&[self.key])
+            }
+            fn apply(&self, ctx: Rc<Context>, _config: &dyn Any) -> Box<dyn EffectIter> {
+                Box::new(PollIter {
+                    ctx,
+                    key: self.key,
+                    ready: Rc::clone(&self.ready),
+                    with_judge: self.with_judge,
+                    log: Rc::clone(&self.log),
+                    n: 0,
+                })
+            }
+        }
+        struct PollIter {
+            ctx: Rc<Context>,
+            key: &'static str,
+            ready: Rc<Cell<bool>>,
+            with_judge: bool,
+            log: Rc<RefCell<Vec<&'static str>>>,
+            n: u32,
+        }
+        impl EffectIter for PollIter {
+            fn next(&mut self) -> Step {
+                self.n += 1;
+                match self.n {
+                    1 => {
+                        let key = crate::symbol::Symbol::intern(self.key);
+                        Step::Yielded(
+                            self.ctx
+                                .set_dyn(key, Box::new(1u32))
+                                .expect("本 fiber 声明键"),
+                        )
+                    }
+                    2 => {
+                        if self.with_judge {
+                            let ready = Rc::clone(&self.ready);
+                            Step::Await(Some(Box::new(move || ready.get())))
+                        } else {
+                            Step::Await(None)
+                        }
+                    }
+                    _ => {
+                        let log = Rc::clone(&self.log);
+                        Step::Finished(Box::new(move || log.borrow_mut().push("done")))
+                    }
+                }
+            }
+        }
+
+        let runtime = Rc::new(Runtime::new());
+        let ready_a = Rc::new(Cell::new(false));
+        let ready_b = Rc::new(Cell::new(false));
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mk = |key: &'static str, ready: Rc<Cell<bool>>, with_judge: bool| -> Rc<Fiber> {
+            runtime
+                .context()
+                .use_component(
+                    Rc::new(PollComp {
+                        key,
+                        ready,
+                        with_judge,
+                        log: Rc::clone(&log),
+                    }) as Rc<dyn Component>,
+                    Rc::new(()),
+                )
+                .expect("激活")
+        };
+        let a = mk("k1", Rc::clone(&ready_a), true);
+        let b = mk("k2", Rc::clone(&ready_b), true);
+        let c = mk("k3", Rc::new(Cell::new(false)), false); // 无自报判据
+        assert!(a.is_suspended() && b.is_suspended() && c.is_suspended());
+
+        // 判据均未满足 → poll_ready 不动任何 fiber。
+        runtime.poll_ready();
+        assert!(
+            a.is_suspended() && b.is_suspended() && c.is_suspended(),
+            "判据未满足不恢复"
+        );
+
+        // a 就绪 → 仅 a 恢复；b（判据假）与 c（无判据）保持挂起。
+        ready_a.set(true);
+        runtime.poll_ready();
+        assert!(!a.is_suspended(), "a 判据满足 → 恢复完成");
+        assert!(b.is_suspended() && c.is_suspended(), "b/c 不受驱动");
+
+        // b 就绪 → poll_ready 恢复 b；c 永不受 poll_ready 驱动。
+        ready_b.set(true);
+        runtime.poll_ready();
+        assert!(!b.is_suspended(), "b 判据满足 → 恢复完成");
+        assert!(c.is_suspended(), "c 无判据，poll_ready 不驱动");
+
+        // 外部判据（advance_suspended）仍可驱动无自报判据的 c——并存语义。
+        runtime.advance_suspended(|_| true);
+        assert!(runtime.suspended_fibers().is_empty(), "c 经外部判据恢复");
+        // 退役收账：执行各 fiber 的折叠逆（Finished 步的 done 标记在内）。
+        a.retire();
+        b.retire();
+        c.retire();
+        assert_eq!(log.borrow().len(), 3, "三 fiber 均完成（done×3）");
+        assert!(runtime.is_quiet(), "全静止");
     }
 
     #[test]

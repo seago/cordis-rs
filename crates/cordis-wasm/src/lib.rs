@@ -433,13 +433,14 @@ impl WasmComponent {
         );
     }
 
-    /// 统一驱动回路（P-3 产品验证线）：`poll_remotes`（回填落位）→
-    /// `Runtime::advance_suspended`（恢复满足判据的挂起 fiber）——agent
-    /// 插件（P-5）的 await 驱动底座。单 wasm 组件场景判据为"全部恢复"；
-    /// 多组件编排用 `advance_suspended` 的自带 judge。
+    /// 统一驱动回路（P-3 产品验证线 + backlog ② 判据 v2）：`poll_remotes`
+    ///（回填落位）→ `Runtime::poll_ready`（评估各挂起 fiber 的**自报判据**
+    /// ——本 fiber 在途远端全部落位才恢复；未就绪保持挂起，不空转）——
+    /// agent 插件（P-5）的 await 驱动底座。多组件编排中无自报判据的
+    /// fiber 仍由 `advance_suspended` 的外部 judge 驱动（并存语义）。
     pub fn poll_and_advance(&self, runtime: &Rc<cordis_core::runtime::Runtime>) {
         self.poll_remotes();
-        runtime.advance_suspended(|_| true);
+        runtime.poll_ready();
     }
 
     /// 远端句柄结果复制（调试/断言用）。
@@ -508,11 +509,14 @@ impl Component for WasmComponent {
         };
         // 注入键（step 前同步其值进镜像，PR #12）。
         let inject = self.inject().iter().collect();
+        // backlog ②：每 fiber 在途 rep 追踪（判据 v2 就绪判定）。
+        let inflight = Rc::new(RefCell::new(std::collections::HashSet::new()));
         Box::new(WasmTaskIter {
             state: Rc::clone(&self.state),
             task_any,
             ctx,
             inject,
+            inflight,
         })
     }
 }
@@ -535,6 +539,9 @@ struct WasmTaskIter {
     ctx: Rc<Context>,
     /// 本组件注入键（符号；step 前同步其值进镜像）。
     inject: Vec<Symbol>,
+    /// 本 fiber 在途远端 rep（backlog ② 判据 v2）：pump 时登记、判据
+    /// 评估时按落位剪枝；空 = 本 fiber 无未决远端（就绪判据）。
+    inflight: Rc<RefCell<std::collections::HashSet<u32>>>,
 }
 
 impl WasmTaskIter {
@@ -628,13 +635,15 @@ impl WasmTaskIter {
             std::mem::take(&mut state.store.borrow_mut().data_mut().remote_pending);
         let remote = state.remote.borrow().clone();
         let ops = &*state.remote_ops.borrow();
-        drive_pump_remote(
+        let submitted = drive_pump_remote(
             pending,
             remote,
             ops,
             &mut state.remote_joins.borrow_mut(),
             &mut state.store.borrow_mut().data_mut().remote_results,
         );
+        // backlog ②：本 fiber 在途 rep 登记（判据 v2 剪枝用——落位即淘汰）。
+        self.inflight.borrow_mut().extend(submitted);
     }
 
     /// step 边界 poll 在途远端 join（委托 [`drive_poll_remote`]）。
@@ -648,13 +657,16 @@ impl WasmTaskIter {
 }
 
 /// 提交驱动（纯函数，W1b 单测点）：pending 请求 → 注入 Remote（op 映射）。
+/// 返回**已提交**（进入 join 在途）的 rep 列表（backlog ②：判据 v2 的
+/// 每 fiber 在途追踪用——仅真实在途 join 记入，立即 err 的不在途）。
 fn drive_pump_remote(
     pending: Vec<RemotePending>,
     remote: Option<Rc<dyn Remote>>,
     ops: &std::collections::HashMap<String, Arc<RemoteOp>>,
     joins: &mut HashMap<u32, RemoteJoin<RemoteValue>>,
     results: &mut HashMap<u32, Option<Result<Value, String>>>,
-) {
+) -> Vec<u32> {
+    let mut submitted = Vec::new();
     for p in pending {
         let key = p.rep;
         match (ops.get(&p.name).cloned(), &remote) {
@@ -668,6 +680,7 @@ fn drive_pump_remote(
                         .map_err(panic_payload_to_string)
                 });
                 joins.insert(key, remote.submit(req));
+                submitted.push(key);
             }
             (None, _) => {
                 results.insert(
@@ -686,6 +699,7 @@ fn drive_pump_remote(
             }
         }
     }
+    submitted
 }
 
 /// 回填驱动（纯函数，W1b 单测点）：noop-waker poll 在途 join，Ready 回填结果。
@@ -766,7 +780,22 @@ impl EffectIter for WasmTaskIter {
             matches!(&step, Some(EffectStep::Wait)) && !state.remote_joins.borrow().is_empty()
         };
         match step {
-            _ if awaiting => Step::Await,
+            // backlog ②（判据 v2）：挂起时自报就绪判据——"本 fiber 在途
+            // 远端全部落位"（判据评估时惰性剪枝；`poll_and_advance` 经
+            // `Runtime::poll_ready` 统一评估，未就绪 fiber 保持挂起）。
+            _ if awaiting => {
+                let inflight = Rc::clone(&self.inflight);
+                let state = Rc::clone(&self.state);
+                let judge = Box::new(move || {
+                    let mut inflight = inflight.borrow_mut();
+                    let state = state.borrow();
+                    let store = state.store.borrow();
+                    let results = &store.data().remote_results;
+                    inflight.retain(|rep| !results.contains_key(rep));
+                    inflight.is_empty()
+                });
+                Step::Await(Some(judge))
+            }
             Some(EffectStep::Step(_)) => Step::Yielded(step_inverse),
             Some(EffectStep::Done(_)) => Step::Finished(step_inverse),
             Some(EffectStep::Wait) => Step::Yielded(step_inverse),

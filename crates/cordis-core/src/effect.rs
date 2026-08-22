@@ -43,7 +43,13 @@ pub enum Step {
     /// 同步 [`execute`] 不接受本步（产之即 panic = 走错路径）；
     /// 可恢复路径经 [`try_execute_with`]。**添加性**：既有迭代器不产
     /// Await → 既有执行语义零变化。
-    Await,
+    ///
+    /// **判据载荷（backlog ② 判据 v2）**：`Some(judge)` = 迭代器自报
+    /// 就绪判据（`judge()` 为真 → 可恢复），由 [`crate::runtime::Runtime::poll_ready`]
+    /// 在显式驱动点统一评估；`None` = 无自报判据（仍由宿主外部判据 +
+    /// `advance_suspended` 驱动，P-3 语义保持）。判据纪律：纯就绪检查
+    /// （可用内部可变性做惰性剪枝），**不得调度**；随挂起上下文存亡。
+    Await(Option<Box<dyn Fn() -> bool>>),
 }
 
 /// Algorithm 1 的 execute 引擎。
@@ -63,7 +69,7 @@ pub fn execute(mut iter: Box<dyn EffectIter>, guard: impl Fn() -> bool) -> Dispo
                 acc.push(d);
                 break;
             }
-            Step::Await => {
+            Step::Await(_) => {
                 panic!(
                     "同步 execute 不接受 Await——迭代器应走 try_execute_with/advance 路径（调用方违反 B 计划 A1 约定）"
                 )
@@ -78,17 +84,25 @@ pub fn execute(mut iter: Box<dyn EffectIter>, guard: impl Fn() -> bool) -> Dispo
 }
 
 /// 可恢复执行的迭代步进（B 计划 A1）：与 [`execute`] 相同驱动，但遇
-/// [`Step::Await`] 返回挂起（迭代器 + 已累积逆），由调用方保存在
-/// fiber 挂起态并在外部就绪后以同一初始 acc 恢复。
+/// [`Step::Await`] 返回挂起（迭代器 + 已累积逆 + 判据载荷），由调用方
+/// 保存在 fiber 挂起态并在外部就绪后以同一初始 acc 恢复。
 ///
 /// `Ok(disposer)`：迭代终止（含 guard 中断）——acc（含传入 `init_acc`）
-/// 折叠为 LIFO disposer；`Err((iter, acc))`：遇 Await 挂起——`acc` 含
-/// 本次及历史累积逆（可与 `init_acc` 连续）。
+/// 折叠为 LIFO disposer；`Err((iter, acc, judge))`：遇 Await 挂起——
+/// `acc` 含本次及历史累积逆（可与 `init_acc` 连续），`judge` 为本次
+/// 挂起自报的就绪判据（backlog ② 判据 v2；`None` = 外部判据驱动）。
 pub fn try_execute_with(
     mut iter: Box<dyn EffectIter>,
     guard: impl Fn() -> bool,
     mut acc: Vec<Disposer>,
-) -> Result<Disposer, (Box<dyn EffectIter>, Vec<Disposer>)> {
+) -> Result<
+    Disposer,
+    (
+        Box<dyn EffectIter>,
+        Vec<Disposer>,
+        Option<Box<dyn Fn() -> bool>>,
+    ),
+> {
     loop {
         if !guard() {
             break;
@@ -99,7 +113,7 @@ pub fn try_execute_with(
                 acc.push(d);
                 break;
             }
-            Step::Await => return Err((iter, acc)),
+            Step::Await(judge) => return Err((iter, acc, judge)),
         }
     }
     let final_acc = acc;
@@ -199,7 +213,7 @@ mod tests {
         match iter.next() {
             Step::Finished(_) => {}
             Step::Yielded(_) => panic!("once 应恰好一步并终止"),
-            Step::Await => unreachable!("once 迭代器不产 Await"),
+            Step::Await(_) => unreachable!("once 迭代器不产 Await"),
         }
     }
 
@@ -217,7 +231,7 @@ mod tests {
                 let log = Rc::clone(&self.log);
                 match self.n {
                     1 => Step::Yielded(Box::new(move || log.borrow_mut().push("a".into()))),
-                    2 => Step::Await,
+                    2 => Step::Await(None),
                     _ => Step::Finished(Box::new(move || log.borrow_mut().push("z".into()))),
                 }
             }
@@ -228,7 +242,7 @@ mod tests {
             n: 0,
         });
         // 第一次：Yielded("a") 后遇 Await 挂起。
-        let (iter, acc) = match try_execute_with(iter, || true, Vec::new()) {
+        let (iter, acc, _judge) = match try_execute_with(iter, || true, Vec::new()) {
             Err(suspended) => suspended,
             Ok(_) => panic!("应遇 Await 挂起"),
         };

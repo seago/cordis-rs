@@ -133,14 +133,21 @@ pub struct Fiber {
     /// recover ∘ fiber.dispose`；LIFO 跨激活）。
     pub(crate) dispose: RefCell<Vec<Disposer>>,
     /// 挂起于 [`Step::Await`] 的可恢复上下文（B 计划 A1）：未完成迭代器 +
-    /// 已累积逆；`None` = 未挂起。恢复经 [`Runtime::advance`]；
+    /// 已累积逆 + 自报就绪判据（backlog ②）；`None` = 未挂起。恢复经
+    /// [`Runtime::advance`]（外部）或 [`Runtime::poll_ready`]（判据评估）；
     /// 退役/卸载时残留逆补入 `dispose`（LIFO 保持）。
     pub(crate) resumable: RefCell<Option<Resumable>>,
 }
 
 /// 挂起可恢复上下文（B 计划 A1）：未完成迭代器 + 已累积逆（执行序；
-/// 恢复以同 acc 继续，折叠后 LIFO）。
-pub(crate) type Resumable = (Box<dyn EffectIter>, Vec<Disposer>);
+/// 恢复以同 acc 继续，折叠后 LIFO）+ 就绪判据（backlog ② 判据 v2：
+/// `Some(judge)` 由 [`Runtime::poll_ready`] 统一评估；`None` = 外部
+/// 判据驱动。判据随本上下文存亡——advance 完成/unload 收账即释放）。
+pub(crate) type Resumable = (
+    Box<dyn EffectIter>,
+    Vec<Disposer>,
+    Option<Box<dyn Fn() -> bool>>,
+);
 
 impl Fiber {
     /// fiber 名。
