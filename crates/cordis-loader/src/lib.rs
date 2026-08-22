@@ -1758,6 +1758,95 @@ mod tests {
         assert!(_runtime.is_quiet(), "失败后静止");
     }
 
+    /// P-6：版本化 provider（动态键 set_dyn——typed set 固定 SYMBOL 不适用）。
+    fn val_provider_v(key: &str) -> Rc<TestComponent> {
+        let key = Symbol::intern(key);
+        Rc::new(TestComponent {
+            inject: spec(&[]),
+            provide: {
+                let mut s = KeySet::new();
+                s.insert(key);
+                s
+            },
+            effects: Box::new(move |ctx, _config| {
+                Box::new(once(Box::new(move || {
+                    ctx.set_dyn(key, Box::new("v".to_string()))
+                        .expect("绑定版本键")
+                })))
+            }),
+        })
+    }
+
+    /// P-6：版本化消费者（注入版本键，无供给）。
+    fn consumer_v(key: &str) -> Rc<TestComponent> {
+        Rc::new(TestComponent {
+            inject: spec(&[key]),
+            provide: spec(&[]),
+            effects: Box::new(|_ctx, _config| {
+                Box::new(once(Box::new(|| Box::new(|| {}) as Disposer)))
+            }),
+        })
+    }
+
+    /// P-6 版本化键（§6.6 落地，v1 键内编码 `key@version`）：不同版本是
+    /// 不同键——版本隔离（v1/v2 共存不冲突）、升级（依赖迁移）、冲突
+    /// （同版本双提供 → ProvisionClash 报告）。
+    #[test]
+    fn versioned_keys_isolate_upgrade_and_conflict() {
+        let (loader, _runtime) = loader();
+        loader.register_component("p1", val_provider_v("db@1"));
+        loader.register_component("p2", val_provider_v("db@2"));
+        loader.register_component("c1", consumer_v("db@1"));
+        let report = loader.apply(&[
+            entry("p1", "p1", "pg", 1, false),
+            entry("p2", "p2", "pg", 1, false),
+            entry("c1", "c1", "ignored", 1, false),
+        ]);
+        assert!(report.ok(), "版本键共存：{report}");
+        // 版本隔离：db@1 与 db@2 各自绑定（不同键）。
+        assert!(
+            _runtime.store().contains(Symbol::intern("db@1")),
+            "db@1 绑定"
+        );
+        assert!(
+            _runtime.store().contains(Symbol::intern("db@2")),
+            "db@2 独立绑定（版本隔离）"
+        );
+        // 升级：c2 依赖 db@2 → 激活；c1（db@1）不受影响。
+        loader.register_component("c2", consumer_v("db@2"));
+        let report2 = loader.apply(&[
+            entry("p1", "p1", "pg", 1, false),
+            entry("p2", "p2", "pg", 1, false),
+            entry("c1", "c1", "ignored", 1, false),
+            entry("c2", "c2", "ignored", 1, false),
+        ]);
+        assert!(report2.ok());
+        assert!(
+            loader.fiber("c1").is_some() && loader.fiber("c2").is_some(),
+            "双版本消费共存"
+        );
+
+        // 冲突：同版本键双提供 → 后到者 Failed(ProvisionClash)。
+        loader.register_component("p3", val_provider_v("db@2"));
+        let report3 = loader.apply(&[
+            entry("p1", "p1", "pg", 1, false),
+            entry("p2", "p2", "pg", 1, false),
+            entry("p3", "p3", "pg", 1, false),
+            entry("c1", "c1", "ignored", 1, false),
+            entry("c2", "c2", "ignored", 1, false),
+        ]);
+        assert!(
+            report3.failed().any(|o| matches!(
+                o,
+                EntryOutcome::Failed(EntryError {
+                    kind: EntryErrorKind::ProvisionClash { .. },
+                    ..
+                })
+            )),
+            "同版本双提供 → Clash 报告：{report3}"
+        );
+    }
+
     // ── M2-PR3：intercept / isolate / group / include ─────────────────
 
     /// 拦截测试元数据（⊕：paths 取并、read_only 右偏）。

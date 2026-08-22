@@ -80,6 +80,13 @@ async 层 `cordis-async`、事件层 `cordis-events` 与 loader 组合的既有�
 - 安静判定：`AsyncRuntime::is_quiet()`（无尾巴 ∧ 无 Active async 组件，
   Failed 视为静止）+ shutdown 双真（C-7）。
 
+## 8bis. 版本化链接（§6.6 落地，P-6）
+
+- **键内编码 `key@version`**（v1 精确匹配）：提供者声明 `db@1`、消费者声明 `db@1`——不同版本是**不同键**（版本隔离：`db@1` 与 `db@2` 共存不冲突）；
+- **升级** = 消费者迁移到新版本键（依赖切换，旧版本提供者可卸载）；
+- **冲突**：同版本键双提供 → `ProvisionClash` 报告（first-wins，错误策略通道）；
+- **接口漂移防护**（论文 §6.6）：消费者声明版本键，提供者升级版本后旧声明不再满足（`Inactive`）——显式而非静默漂移；版本约束区间（`db@>=1`）留 v2。
+
 ## 9. 组合示例
 
 - `cargo run -p cordis-async --example async_combo`（sync 树 + async 层 +
