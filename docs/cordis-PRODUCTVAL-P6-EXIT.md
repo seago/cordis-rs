@@ -27,3 +27,13 @@
 ## 3. 出口判定
 
 **P-6 完成 + 产品验证线全线收官**：§6.6 版本化链接落地（drift 显式防护）+ Thm 66 定量缺口关闭 + loader O(N²)→O(N) + 门禁全绿。后续取向（其它工作线/论文进一步映射）按纪律由用户下达。
+
+## 4. 走查闭环（REVIEW-P6-EXIT）
+
+Gate B 独立走查 `docs/reviews/REVIEW-P6-EXIT.md`：**PASS（WITH MINORS）**——ΣB(n)=612 复核正确、last-wins 等值确认、`@` 不误伤无版本键、workspace 无回归。3 项 Minor 落地：
+
+- **M-1**（key namespacing 缺口）→ §8bis 补"范围注记"（collision 由 first-wins 报告兜底，命名空间化留后续）；
+- **M-2**（doc 1 告警：agent-plugin main.rs:36 `<Context>` 未闭合 rustdoc 标签，P-5 来源）→ 反引号化修复，doc 归 0；
+- **M-3**（升级直证覆盖粒度）→ 注记：直证为"双版本共存 + 新增消费者迁移"，单消费者条目级迁移留覆盖粒度说明（v1 语义等价，见 §8bis"升级 = 消费者迁移到新版本键"）。
+
+走查判定 + Minor 全部闭环，EXIT 成立。

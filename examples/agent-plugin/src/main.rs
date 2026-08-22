@@ -33,7 +33,7 @@ impl Event for BotReply {
 /// 会话日志（flush 断言用）。
 type Log = Arc<RwLock<Vec<String>>>;
 /// 入口消息队列（事件 listener 写，agent loop 读——listener 须 Send+Sync，
-/// 不能捕获 Rc<Context>；Arc 队列为合规通道）。
+/// 不能捕获 `Rc<Context>`；Arc 队列为合规通道）。
 type Inbox = Arc<RwLock<std::collections::VecDeque<String>>>;
 
 struct AgentBehavior {
