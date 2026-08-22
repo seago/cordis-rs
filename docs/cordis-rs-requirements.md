@@ -26,7 +26,7 @@
 | 组合内核（Key/realm 隔离/可逆效应/级联卸载） | ✅ 完成 | core 全模块 + oracle property 测试全绿（`engine_matches_oracle`、`thm73`…，core lib 61/61） |
 | 声明式加载 + 错误策略 | ✅ 完成 | `EntryError`/`ApplyReport`/first-wins/组校验失败/每次 apply 重试——测试直证（loader 60/60）；**版本化链接**（`key@version` 隔离/升级/冲突，§6.6）随产品验证线 P-6 落地 |
 | HMR 数据算法 | ✅ 完成 | cordis-hmr 三算法 + 事务回滚（10/10） |
-| async 层 | ✅ 完成 | Phase 0（11 测试 + 3 spike）+ B 计划 A1–A4（`Step::Await`/`advance`/`resumable`）+ P-3 挂起集生产化（`suspended_fibers`/`advance_suspended`/`poll_and_advance`）+ backlog ① 单一事实来源（`is_suspended` 生产化消费，THEORY-MAP 授权偏离标注齐备） |
+| async 层 | ✅ 完成 | Phase 0（11 测试 + 3 spike）+ B 计划 A1–A4（`Step::Await`/`advance`/`resumable`）+ P-3 挂起集生产化（`suspended_fibers`/`advance_suspended`/`poll_and_advance`）+ backlog ① 单一事实来源（`is_suspended` 生产化消费；core 内部重构、公开语义不变，无需 THEORY-MAP 授权行——THEORY-MAP P-3 行已注记跟进） |
 | 事件系统 | ✅ 完成 | cordis-events 按 v0.3.1 全量实现（四派发/Send+Sync 上界/跨模式载荷检查），验收 1–9 覆盖 + error_bridge/m15 |
 | wasm 插件边界 | ✅ 完成 | `context` + `remote`（submit/take）+ Await 挂起/恢复 + err 通道 + go ABI 同步自动化（P-4，`build.sh` 第 0 步 wit-bindgen 重生成）；a2_e2e 直证（3/3 绿，go_guest 已恢复无 ignore） |
 | 生命周期/错误通道配套 | ✅ 完成 | `Fiber::target_view()`（O-1）+ loader hook 弱引用修环 + P-7 错误策略 O-1/O-4（越界写升级 `ComponentFailure`；HMR 失败双通道：report 最新 apply 态 + `loader/entry-failed` 事件） |

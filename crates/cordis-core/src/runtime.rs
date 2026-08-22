@@ -345,6 +345,8 @@ impl Runtime {
     ///
     /// 派生自各 fiber 的 [`Fiber::is_suspended`]（`resumable` 为单一事实
     /// 来源——backlog ①：访问器生产化消费，消除并行集合双维护）。
+    /// 权衡：O(n) 全表扫描（n = fiber 数；组合内核规模小，枚举语义本就
+    /// 线性级——P-3 起即为快照语义，无挂起集常驻）。
     pub fn suspended_fibers(&self) -> Vec<FiberId> {
         self.fibers
             .borrow()
