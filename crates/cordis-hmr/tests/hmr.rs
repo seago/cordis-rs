@@ -488,8 +488,8 @@ fn hmr_reload_rebuilds_all_entries_sharing_url() {
 /// → 订阅收到）双通道并存。
 #[test]
 fn hmr_failure_reports_and_emits_entry_failed() {
-    use cordis_events::{Event, EventBus, EventsKey, EventsProvider, subscribe};
-    use cordis_loader::{EntryError, EntryOutcome};
+    use cordis_events::{Event, EventsKey, EventsProvider, subscribe};
+    use cordis_loader::EntryError;
 
     struct EntryFailed;
     impl Event for EntryFailed {
