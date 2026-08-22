@@ -188,7 +188,10 @@ fn full_stack_events_async_wasm_remote_await() {
                     // 触发：user/msg。
                     bus.emit::<UserMsg>(&"你好".to_string());
                     let mut injected = false;
-                    for _ in 0..1024 {
+                    // 驱动预算（REVIEW-CI-FIXES 同族加固）：wasm_agent 同款
+                    // 4000——判据 v2 精确驱动（实际 ~6 循环完成多轮），冗余
+                    // 预算留 CI 负载余量。
+                    for _ in 0..4096 {
                         tokio::task::yield_now().await;
                         std::thread::sleep(std::time::Duration::from_millis(1));
                         // 原生回复 → preseed 镜像注入 wasm/in → 延迟挂载 wasm agent

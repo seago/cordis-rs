@@ -786,12 +786,17 @@ impl EffectIter for WasmTaskIter {
             _ if awaiting => {
                 let inflight = Rc::clone(&self.inflight);
                 let state = Rc::clone(&self.state);
+                // 判据（v2 修复，REVIEW-CI-FIXES）：剪枝证据 = **join 在途表**
+                //（`remote_joins`）而非结果槽——回填即 join 移除（与结果槽
+                // 的消费时机解耦：take 成功、下一轮 submit 的 handle drop
+                // 会移除结果槽，若以结果槽为证据则"take 后未评估窗口"内
+                // 剪枝证据丢失 → 该 rep 永留 inflight → 判据永假（全栈
+                // 多轮偶发卡死，CI full_stack 复现）。join 证据无此窗口。
                 let judge = Box::new(move || {
                     let mut inflight = inflight.borrow_mut();
                     let state = state.borrow();
-                    let store = state.store.borrow();
-                    let results = &store.data().remote_results;
-                    inflight.retain(|rep| !results.contains_key(rep));
+                    let joins = &state.remote_joins.borrow();
+                    inflight.retain(|rep| joins.contains_key(rep));
                     inflight.is_empty()
                 });
                 Step::Await(Some(judge))
