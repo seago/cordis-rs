@@ -99,3 +99,13 @@ GitHub CI 步骤 **build wasm guest (Go)** 失败：`examples/wasm-plugin-go/bui
 **Minor（非阻塞，建议后续优化）**：`cargo install wit-bindgen-cli --version 0.60.0` 每次 CI 都从源码重编译（约 1-2 分钟/次）。`Swatinem/rust-cache@v2` 在 install **之后**运行且**不缓存 cargo install 的编译产物**（其编译在临时目录、产物落 `~/.cargo/bin`），故对 install 的编译时间几乎无益。可靠性可接受（多 1-2 分钟换确定性），但可优化：改用官方预编译二进制下载（x86_64-unknown-linux-gnu）或 `cargo-binstall`，或先触发 rust-cache 命中 registry 依赖减少下载。
 
 **Nit（可选）**：build.sh 的 PATH 检查仅验证 `wit-bindgen` 存在、未校验 `--version` 是否为 0.60.0——若环境混入其他版本 wit-bindgen（如全局装的更新版），第 0 步重生成代码版本会漂移（破坏 zero-diff 约定 / ABI）。CI 安装已 pin 0.60.0、本机亦为 0.60.0，当前无实际风险；可选加 `wit-bindgen --version` 校验以闭环。
+
+## CI-FIXES-4（2026-08-22）：full_stack 偶发卡死——backlog ② 判据 v2 回归修复（c299449）
+
+- **现象**：`full_stack_events_async_wasm_remote_await` 偶发失败（本地 20 次 7 败、CI 复现）——wasm 多轮永不完成（probe 未落盘）。
+- **归因（A/B 实测决策性）**：`advance_suspended(|_| true)` 旧语义 20/20 全绿 vs `poll_ready` 判据 7/20 败 → 实锤 ② 回归。
+- **根因**：判据剪枝证据 = `remote_results.contains_key(rep)`。guest 多轮中 take 成功与下一轮 submit 在**同一次 advance 内连续**发生；submit 时 `handle.replace` drop 旧 Handle → `HostHandle::drop` 移除结果槽 → 该 rep 的剪枝证据在被剪枝前已被消费 → rep 永留 inflight → 判据永假（现场：`results={1 已落位}`、fiber 挂起、4096 轮零进展）。任务量分析：2 次 submit=rep0/rep1 + 1 次 take、join 落位但判据不剪。
+- **修复**：剪枝证据改为 **join 在途表**（`state.remote_joins`）——落位即 join 移除（与结果槽消费时机解耦、无丢失窗口）；立即 err 场景不入 joins 也不入 inflight（drive_pump_remote 仅真实提交登记）；挂起判定（Wait && joins 非空）与判据（无在途 join）互补一致。
+- **验证**：修复后 full_stack 20/20 绿（0.9–2.1s）、workspace 全量 test/clippy/fmt/doc 0 告警、budget 同步 wasm_agent 4096（冗余防御）。
+- **边界记录**：guest 弃句柄且 join 在途（take 未就绪即 replace）→ 判据永假——当前 guest 协议不可达（take 未就绪时不 replace），留待后续协议扩展时注意。
+- **判定**：PASS（修复正确、完备、边界记录）。独立走查按用户指示跳过（直接推送）。
