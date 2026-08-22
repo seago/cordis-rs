@@ -32,6 +32,15 @@ pub trait EffectIter: 'static {
     fn next(&mut self) -> Step;
 }
 
+/// 就绪判据（backlog ② 判据 v2）：挂起时迭代器/翻译层自报的就绪谓词，
+/// 由 [`crate::runtime::Runtime::poll_ready`] 在显式驱动点统一评估。
+/// 纪律：纯就绪检查（不得调度）。
+pub type AwaitJudge = Box<dyn Fn() -> bool>;
+
+/// 挂起载荷（B 计划 A1 + backlog ②）：未完成迭代器 + 已累积逆（执行序；
+/// 恢复以同 acc 继续）+ 自报就绪判据（`None` = 外部判据驱动）。
+pub(crate) type Suspended = (Box<dyn EffectIter>, Vec<Disposer>, Option<AwaitJudge>);
+
 /// 迭代步（Def 51 的 `Γ → Γ × (Γ → Γ) × Maybe(ℑ)` 的宿主侧投影）。
 pub enum Step {
     /// 产出逆并继续迭代（`Just(ℑ)`）。
@@ -49,7 +58,7 @@ pub enum Step {
     /// 在显式驱动点统一评估；`None` = 无自报判据（仍由宿主外部判据 +
     /// `advance_suspended` 驱动，P-3 语义保持）。判据纪律：纯就绪检查
     /// （可用内部可变性做惰性剪枝），**不得调度**；随挂起上下文存亡。
-    Await(Option<Box<dyn Fn() -> bool>>),
+    Await(Option<AwaitJudge>),
 }
 
 /// Algorithm 1 的 execute 引擎。
@@ -95,14 +104,7 @@ pub fn try_execute_with(
     mut iter: Box<dyn EffectIter>,
     guard: impl Fn() -> bool,
     mut acc: Vec<Disposer>,
-) -> Result<
-    Disposer,
-    (
-        Box<dyn EffectIter>,
-        Vec<Disposer>,
-        Option<Box<dyn Fn() -> bool>>,
-    ),
-> {
+) -> Result<Disposer, Suspended> {
     loop {
         if !guard() {
             break;

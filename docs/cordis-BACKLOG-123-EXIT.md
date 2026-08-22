@@ -25,7 +25,7 @@
 ## 2. 门禁
 
 - Gate A：fmt 0 / clippy `-D warnings` 0 / `test --workspace` 全绿（core 62——新增 poll_ready 直证；a2_e2e 3/3、wasm_agent 2/2、go_guest 2/2 无 ignore）/ doc 0；
-- Gate B：①③ 走查 `docs/reviews/REVIEW-123-13.md` PASS（3 Minor 全部落地：O(n) 权衡注记、THEORY-MAP 断言修正、THEORY-MAP P-3/P-7 行表格断裂修复）；② 走查 `docs/reviews/REVIEW-123-2.md`。
+- Gate B：①③ 走查 `docs/reviews/REVIEW-123-13.md` PASS（3 Minor 全部落地：O(n) 权衡注记、THEORY-MAP 断言修正、THEORY-MAP P-3/P-7 行表格断裂修复）；② 走查 `docs/reviews/REVIEW-123-2.md`——首轮 **FAIL（Must-1：clippy type_complexity）**：`try_execute_with` 返回类型（Err 三元组含判据）超阈值 → 以类型别名修复（`AwaitJudge`/`Suspended`，与既有 `Resumable` 别名风格一致，不掩蔽）；修复后 clippy 0、全量复核绿 → **出口成立**。
 
 ## 3. 出口判定
 

@@ -143,11 +143,7 @@ pub struct Fiber {
 /// 恢复以同 acc 继续，折叠后 LIFO）+ 就绪判据（backlog ② 判据 v2：
 /// `Some(judge)` 由 [`Runtime::poll_ready`] 统一评估；`None` = 外部
 /// 判据驱动。判据随本上下文存亡——advance 完成/unload 收账即释放）。
-pub(crate) type Resumable = (
-    Box<dyn EffectIter>,
-    Vec<Disposer>,
-    Option<Box<dyn Fn() -> bool>>,
-);
+pub(crate) type Resumable = crate::effect::Suspended;
 
 impl Fiber {
     /// fiber 名。
