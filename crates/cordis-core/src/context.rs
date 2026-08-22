@@ -27,7 +27,7 @@ use std::rc::Rc;
 
 use crate::component::Component;
 use crate::effect::{Disposer, EffectIter, Step, StepGuard, execute, once};
-use crate::fiber::{Fiber, FiberId};
+use crate::fiber::{Fiber, FiberError, FiberId};
 use crate::key::Key;
 use crate::keyset::KeySet;
 use crate::runtime::{RegistryError, Runtime};
@@ -242,7 +242,10 @@ impl Context {
                 .get(&fid)
                 .is_some_and(|f| f.provide.contains(key));
             if !allowed {
-                panic!("组件 {fid:?} 越界写入未声明的键 {key}（Def 43/48 纪律）");
+                FiberError::new(format!(
+                    "组件 {fid:?} 越界写入未声明的键 {key}（Def 43/48 纪律）"
+                ))
+                .raise();
             }
         }
         // 前置检查（快速失败）：单线程 + 无重入路径下，检查与绑定之间无
@@ -303,7 +306,10 @@ impl Context {
                 .get(&fid)
                 .is_some_and(|f| f.provide.contains(key));
             if !allowed {
-                panic!("组件 {fid:?} 越界写入未声明的键 {key}（Def 43/48 纪律）");
+                FiberError::new(format!(
+                    "组件 {fid:?} 越界写入未声明的键 {key}（Def 43/48 纪律）"
+                ))
+                .raise();
             }
         }
         // 前置：绑定存在且安装者 = 本 fiber（TS "cannot set property in
@@ -344,7 +350,10 @@ impl Context {
                 .get(&fid)
                 .is_some_and(|f| f.provide.contains(key));
             if !allowed {
-                panic!("组件 {fid:?} 越界写入未声明的键 {key}（Def 43/48 纪律）");
+                FiberError::new(format!(
+                    "组件 {fid:?} 越界写入未声明的键 {key}（Def 43/48 纪律）"
+                ))
+                .raise();
             }
         }
         if self.runtime.store.borrow().contains(realm) {
@@ -398,7 +407,10 @@ impl Context {
                 .get(&fid)
                 .is_some_and(|f| f.provide.contains(key));
             if !allowed {
-                panic!("组件 {fid:?} 越界写入未声明的键 {key}（Def 43/48 纪律）");
+                FiberError::new(format!(
+                    "组件 {fid:?} 越界写入未声明的键 {key}（Def 43/48 纪律）"
+                ))
+                .raise();
             }
         }
         if self.runtime.store.borrow().contains(realm) {

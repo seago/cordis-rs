@@ -1724,12 +1724,12 @@ mod tests {
         assert!(s.contains("已激活"));
     }
 
-    /// 错误策略 v0.2（验收 #8）：核心供给纪律越界写**仍 panic**——错误
-    /// 分类未误转（作者义务/程序错误保持 panic=bug）。组件声明提供 a 却
-    /// write 未声明键（ValKey）→ 越界 panic。
+    /// 错误策略 v0.2 验收 #8 → P-7 O-1 升级：核心供给纪律越界写从 panic
+    /// 升级为 **ComponentFailure**（FiberError::raise → Inactive(ζ)，与
+    /// wasm 对齐）——组件失败可诊断可复活，宿主不崩。组件声明提供 a 却
+    /// 写未声明键（ValKey）→ 组件失败态。
     #[test]
-    #[should_panic(expected = "越界")]
-    fn supply_discipline_panic_kept() {
+    fn supply_discipline_oob_fails_component() {
         struct Bad;
         impl Component for Bad {
             fn inject(&self) -> KeySet {
@@ -1748,6 +1748,14 @@ mod tests {
         let (loader, _runtime) = loader();
         loader.register_component("bad", Rc::new(Bad));
         loader.apply(&[entry("bad", "bad", "cfg", 1, false)]);
+        // 越界写 → 组件失败态（Inactive(ζ)），宿主不崩。
+        let fiber = loader.fiber("bad").expect("条目已挂载");
+        assert!(
+            matches!(*fiber.state(), FiberState::Inactive(Some(_))),
+            "越界写 → 组件失败（Inactive(ζ)）：{:?}",
+            *fiber.state()
+        );
+        assert!(_runtime.is_quiet(), "失败后静止");
     }
 
     // ── M2-PR3：intercept / isolate / group / include ─────────────────

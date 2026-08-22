@@ -1037,9 +1037,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "越界写入")]
-    fn set_outside_provision_panics() {
-        // Def 43/48 纪律执行期检查：组件写入未声明的供给 → panic（bug）。
+    fn set_outside_provision_fails_component() {
+        // P-7 O-1 升级：Def 43/48 越界写从 panic=bug 升级为 ComponentFailure
+        //（FiberError::raise → Inactive(ζ)，与 wasm 对齐；可复活）。
         let runtime = Rc::new(Runtime::new());
         let root = runtime.context();
         let comp = Rc::new(TestComponent {
@@ -1051,7 +1051,13 @@ mod tests {
                 })))
             }),
         });
-        let _ = root.use_component(comp, Rc::new(()));
+        let fiber = root.use_component(comp, Rc::new(())).expect("挂载");
+        assert!(
+            matches!(&*fiber.state(), FiberState::Inactive(Some(_))),
+            "越界写 → 组件失败（Inactive(ζ)）：{:?}",
+            *fiber.state()
+        );
+        assert!(runtime.is_quiet(), "失败后静止");
     }
 
     #[test]
