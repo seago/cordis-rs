@@ -598,9 +598,13 @@ impl Loader {
         outcomes: &mut Vec<EntryOutcome>,
     ) {
         // 阶段 1（卸载侧）：先释放供给名，为阶段 2 的同供给替换腾位。
+        // P-6 索引化（bench 已知边界①）：desired 预建 last-wins 索引（同 id
+        // 多次出现取最后者——与 rev().find() 等值），查表 O(1)（原逆扫 O(N²)）。
+        let index: std::collections::HashMap<&str, &Entry> =
+            desired.iter().map(|e| (e.id.as_str(), e)).collect();
         let current: Vec<String> = loaded.keys().cloned().collect();
         for id in current {
-            let Some(entry) = desired.iter().rev().find(|e| e.id == id) else {
+            let Some(entry) = index.get(id.as_str()).copied() else {
                 self.unload_from(&id, loaded);
                 continue;
             };
@@ -1786,6 +1790,21 @@ mod tests {
                 Box::new(once(Box::new(|| Box::new(|| {}) as Disposer)))
             }),
         })
+    }
+
+    /// P-6（索引化回归护栏）：desired 同 id 多次出现 → last-wins（索引
+    /// 与 rev().find() 等值）。
+    #[test]
+    fn desired_duplicate_id_last_wins() {
+        let (loader, _runtime) = loader();
+        loader.register_component("p", val_provider());
+        let report = loader.apply(&[
+            entry("x", "p", "first", 1, false),
+            entry("x", "p", "second", 1, false),
+        ]);
+        assert!(report.ok(), "last-wins 不报冲突");
+        // 最后者 config 生效（fiber 绑定值 = second 派生）。
+        assert!(loader.fiber("x").is_some(), "条目挂载（仅最后者）");
     }
 
     /// P-6 版本化键（§6.6 落地，v1 键内编码 `key@version`）：不同版本是
