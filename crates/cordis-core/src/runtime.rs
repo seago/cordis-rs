@@ -1124,6 +1124,109 @@ mod tests {
         assert!(runtime.is_quiet());
     }
 
+    // ── P-6 小项②：Thm 66 Progress 定量上界补测 ─────────────────────
+
+    /// P-6：Progress 定量上界（Thm 66，THEORY-MAP 46 行缺口补测）——
+    /// ≺ 无环链（A≺B≺C，深 2）、每组件迭代长度 ≤ K=2：驱动到静止后
+    /// 总步数 ≤ ΣB(n)（B(n)=(K+4)(2+Σ_{m≺n}B(m))：B(C)=12, B(B)=84,
+    /// B(A)=516 → Σ=612）且 ≥ 结构最小步（3×2=6）。
+    #[test]
+    fn progress_quantitative_upper_bound() {
+        const K: u32 = 2;
+        // 计数组件：apply 返回 K 步迭代器（第 1 步绑定提供键，K 步收尾）。
+        fn counting_component(
+            count: Rc<Cell<u32>>,
+            inject: &[&str],
+            provide: &[&str],
+        ) -> Rc<dyn Component> {
+            struct Comp {
+                set_key: Option<Symbol>,
+                count: Rc<Cell<u32>>,
+                inject: KeySet,
+                provide: KeySet,
+            }
+            struct Iter {
+                set_key: Option<Symbol>,
+                count: Rc<Cell<u32>>,
+                steps: Cell<u32>,
+                ctx: Rc<Context>,
+            }
+            impl EffectIter for Iter {
+                fn next(&mut self) -> Step {
+                    self.count.set(self.count.get() + 1);
+                    self.steps.set(self.steps.get() + 1);
+                    if self.steps.get() == 1
+                        && let Some(k) = self.set_key
+                    {
+                        // 第 1 步绑定提供键（依赖满足）；逆 = set 的撤销。
+                        return Step::Yielded(self.ctx.set_dyn(k, Box::new(1u64)).expect("绑定"));
+                    }
+                    if self.steps.get() == K {
+                        Step::Finished(Box::new(|| {}))
+                    } else {
+                        Step::Yielded(Box::new(|| {}))
+                    }
+                }
+            }
+            impl Component for Comp {
+                fn inject(&self) -> KeySet {
+                    self.inject.clone()
+                }
+                fn provide(&self) -> KeySet {
+                    self.provide.clone()
+                }
+                fn apply(&self, ctx: Rc<Context>, _c: &dyn Any) -> Box<dyn EffectIter> {
+                    Box::new(Iter {
+                        set_key: self.set_key,
+                        count: Rc::clone(&self.count),
+                        steps: Cell::new(0),
+                        ctx,
+                    })
+                }
+            }
+            let provide_set: KeySet = provide
+                .iter()
+                .map(|s| crate::symbol::Symbol::intern(s))
+                .collect();
+            let set_key = provide_set.iter().next();
+            Rc::new(Comp {
+                set_key,
+                count,
+                inject: inject
+                    .iter()
+                    .map(|s| crate::symbol::Symbol::intern(s))
+                    .collect(),
+                provide: provide_set,
+            }) as Rc<dyn Component>
+        }
+
+        let count_a = Rc::new(Cell::new(0u32));
+        let count_b = Rc::new(Cell::new(0u32));
+        let count_c = Rc::new(Cell::new(0u32));
+        let a = counting_component(Rc::clone(&count_a), &[], &["k1"]);
+        let b = counting_component(Rc::clone(&count_b), &["k1"], &["k2"]);
+        let c = counting_component(Rc::clone(&count_c), &["k2"], &[]);
+
+        let runtime = Rc::new(Runtime::new());
+        let root = runtime.context();
+        let fa = root.use_component(a, Rc::new(())).expect("A 挂载");
+        let fb = root
+            .use_component(b, Rc::new(()))
+            .expect("B 挂载（依赖 A）");
+        let fc = root
+            .use_component(c, Rc::new(()))
+            .expect("C 挂载（依赖 B）");
+        let _ = (&fa, &fb, &fc);
+        assert!(runtime.is_quiet(), "静止（进度）");
+
+        let total = count_a.get() + count_b.get() + count_c.get();
+        assert!(total >= 6, "结构最小步（3 组件 × K=2）：{total}");
+        assert!(
+            total <= 612,
+            "Thm 66 上界（K=2 链深 2：ΣB(n)=12+84+516=612）：{total}"
+        );
+    }
+
     // ── B 计划 A1：Await 挂起 / advance 恢复 ─────────────────────────
 
     /// 组件：apply 返回产 `Step::Await` 的迭代器（挂起后由 advance 恢复）。
