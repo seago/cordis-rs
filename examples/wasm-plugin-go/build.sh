@@ -5,10 +5,19 @@
 #       → 预览1 适配器组件化（tools/componentize）→ guest.wasm
 #
 # 前置：go（>= 1.24，go:wasmexport / wasmimport 括号语法）、
-#       cargo（workspace 内 tools/componentize）。
+#       cargo（workspace 内 tools/componentize）、
+#       wit-bindgen-cli 0.60.0（第 0 步重生成 go 绑定，与生成代码版本一致）。
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(cd ../.. && pwd)"
+
+# wit-bindgen PATH 检查（REVIEW-P4 nit 落地）：缺失时给可操作错误——
+# 否则 "command not found" 无上下文（CI 曾因此失败：build wasm guest (Go)）。
+if ! command -v wit-bindgen >/dev/null 2>&1; then
+    echo "错误：wit-bindgen 未安装（build.sh 第 0 步重生成 go 绑定需要）" >&2
+    echo "安装（pin 0.60.0）：cargo install wit-bindgen-cli --version 0.60.0" >&2
+    exit 127
+fi
 
 export GOFLAGS=-buildvcs=false
 export GOCACHE="${GOCACHE:-$ROOT/target/gocache}"

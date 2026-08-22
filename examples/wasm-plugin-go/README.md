@@ -21,6 +21,10 @@
 
 ## 构建
 
+前置：`go`（>= 1.24）、`wit-bindgen-cli 0.60.0`（`cargo install
+wit-bindgen-cli --version 0.60.0`——build.sh 第 0 步重生成 go 绑定需要；
+缺失时 build.sh 报错并给出安装命令）。
+
 ```sh
 ./build.sh
 # 等价手写：

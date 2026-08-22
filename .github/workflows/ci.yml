@@ -31,6 +31,12 @@ jobs:
         with:
           go-version: "1.26.x"
 
+      # wit-bindgen-cli（build.sh 第 0 步重生成 go 绑定）：pin 0.60.0——
+      # 与仓库内生成代码的版本一致（ci.yml 缺装导致
+      # "wit-bindgen: command not found" 的修复，REVIEW-CI-FIXES）。
+      - name: Install wit-bindgen-cli
+        run: cargo install wit-bindgen-cli --version 0.60.0
+
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
