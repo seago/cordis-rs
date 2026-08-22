@@ -36,10 +36,9 @@
 | 项 | 类型 | 状态 |
 |---|---|---|
 | 冻结协议中的开放问题（O-items） | 待场景 | 见各协议文档 §7/§10——**有真实消费者才落**，不预先实现 |
-| 判据 v2（Await 挂起时自报判据 + 显式 `poll_ready`） | 进行中 | backlog 清理线②（本线后置项，完成即更新本账本） |
 | `docs/cordis-rs-requirements.md` 基线同步 | 随线维护 | 本账本随里程碑/清理线审计更新 |
 
-**既有遗留清零**：A2b（go ABI）已闭环（`6a714ca` + P-4 `951709d` 自动化，go_guest 恢复绿）；产品验证线 P-1..P-7 全线收官（各线 EXIT 独立走查 PASS）；backlog ①（`is_suspended` 生产化）已闭环（本账本同步审计）。
+**既有遗留清零**：A2b（go ABI）已闭环（`6a714ca` + P-4 `951709d` 自动化，go_guest 恢复绿）；产品验证线 P-1..P-7 全线收官（各线 EXIT 独立走查 PASS）；backlog ①（`is_suspended` 生产化）已闭环；backlog ②（判据 v2：`Step::Await(Some(判据))` + `Runtime::poll_ready` 显式评估，wasm 桥精确驱动）已闭环（2026-08-22，`docs/cordis-BACKLOG-123-EXIT.md`）。
 
 框架侧**无其他已知待办**：审计结论「符合 dsh 类应用基础框架条件」成立。
 
