@@ -41,6 +41,14 @@
 - **`settle()`**：FIFO 排空尾巴队列（I-3 序免费来自 sync 级联）；`Failed`
   恒可 settle；drain 自再生 64 轮守卫（死锁诊断）。
 
+## 3bis. HMR 失败呈现（P-7 O-4 定案）
+
+- **双通道分工**（2026-08-22 定案）：**报告面 = 最近一次 apply 状态**
+  （`Loader::report()`——回滚场景下失败尝试报告被回滚后的成功 apply 覆盖）；
+  **失败通知 = 事件通道**（`loader/entry-failed`，经 `register_entry_failed_hook`
+  → `cordis-events` 发射）——HMR reload 失败（回滚）时以事件通道为失败
+  呈现（直证：`hmr_failure_reports_and_emits_entry_failed`）。
+
 ## 4. 速查
 
 | 情形 | 行为 |

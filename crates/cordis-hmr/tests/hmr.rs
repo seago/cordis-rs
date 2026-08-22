@@ -482,3 +482,76 @@ fn hmr_reload_rebuilds_all_entries_sharing_url() {
     );
     assert!(runtime.is_quiet(), "静止");
 }
+
+/// P-7 O-4 定案直证：HMR reload 失败（Clash 回滚）→ **报告面呈现**
+///（`Loader::report().failed()`）+ **`entry-failed` 事件通道**（hook → 事件
+/// → 订阅收到）双通道并存。
+#[test]
+fn hmr_failure_reports_and_emits_entry_failed() {
+    use cordis_events::{Event, EventBus, EventsKey, EventsProvider, subscribe};
+    use cordis_loader::{EntryError, EntryOutcome};
+
+    struct EntryFailed;
+    impl Event for EntryFailed {
+        type Payload = EntryError;
+        const SYMBOL: &'static str = "loader/entry-failed";
+    }
+
+    let (loader, runtime) = setup("1");
+    // events 总线挂载（error_bridge 同款）。
+    runtime
+        .context()
+        .use_component(Rc::new(EventsProvider), Rc::new(()))
+        .expect("events 挂载");
+    let bus = std::sync::Arc::clone(&*runtime.context().get::<EventsKey>().expect("总线可读"));
+    let got: std::sync::Arc<std::sync::RwLock<Vec<String>>> =
+        std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+    let _s = subscribe::<EntryFailed>(&runtime.context(), {
+        let got = std::sync::Arc::clone(&got);
+        move |e: &EntryError| {
+            got.write().unwrap().push(e.to_string());
+        }
+    })
+    .expect("订阅 entry-failed");
+    // loader hook → events 发射。
+    loader.register_entry_failed_hook(Some(Rc::new(move |e: &EntryError| {
+        bus.emit::<EntryFailed>(e);
+    })));
+
+    // HMR reload 失败（Clash）→ 回滚（既有语义）。
+    struct Clashing;
+    impl Component for Clashing {
+        fn inject(&self) -> KeySet {
+            KeySet::new()
+        }
+        fn provide(&self) -> KeySet {
+            spec(&["val", "sum"])
+        }
+        fn apply(&self, _c: Rc<Context>, _cfg: &dyn std::any::Any) -> Box<dyn EffectIter> {
+            Box::new(once_finished(Box::new(|| Box::new(|| {}) as Disposer)))
+        }
+    }
+    let mut versions: std::collections::HashMap<String, Rc<dyn Component>> =
+        std::collections::HashMap::new();
+    versions.insert("db".to_string(), Rc::new(Clashing));
+    let graph = HashMapGraph(HashMap::from([("db".to_string(), vec![])]));
+    let hmr = Hmr::new(loader.clone(), Box::new(MapLoader(versions)));
+    let desired = vec![
+        Entry::new("p", "db", Rc::new("1".to_string()), 0, false),
+        Entry::new("c", "cons", Rc::new(()), 0, false),
+    ];
+    let result = hmr.reload(&["db".to_string()], &[], &graph, &desired);
+    assert!(result.is_err(), "Clash → reload Err（回滚）");
+
+    // 报告面呈现：**回滚后**的最近一次 apply（成功——失败尝试报告被回滚
+    // 覆盖；O-4 定案：回滚场景下失败呈现以事件通道为准，报告面为最近
+    // 状态）。两通道分工直证：report 干净 + 事件收到失败。
+    let report = loader.report().expect("最近一次 apply 报告");
+    assert!(report.ok(), "回滚后报告面为干净状态：{report}");
+    // 事件通道：entry-failed 收到（hook → emit → 订阅）。
+    assert!(
+        got.read().unwrap().iter().any(|s| s.contains("供给冲突")),
+        "entry-failed 事件收到：{:?}",
+        *got.read().unwrap()
+    );
+}

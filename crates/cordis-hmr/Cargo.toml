@@ -14,3 +14,6 @@ workspace = true
 anyhow = "1"
 cordis-core = { path = "../cordis-core" }
 cordis-loader = { path = "../cordis-loader" }
+
+[dev-dependencies]
+cordis-events = { path = "../cordis-events" }

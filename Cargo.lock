@@ -243,6 +243,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cordis-core",
+ "cordis-events",
  "cordis-loader",
 ]
 
