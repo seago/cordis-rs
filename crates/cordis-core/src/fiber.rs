@@ -155,6 +155,9 @@ impl Fiber {
 
     /// 是否挂起于 `Step::Await`（B 计划 A1）：`true` = 有可恢复上下文，
     /// 待外部就绪后 `Runtime::advance` 恢复。
+    ///
+    /// 生产消费：`Runtime::suspended_fibers` 派生自本访问器（`resumable`
+    /// 为挂起语义单一事实来源，backlog ①）。
     pub fn is_suspended(&self) -> bool {
         self.resumable.borrow().is_some()
     }

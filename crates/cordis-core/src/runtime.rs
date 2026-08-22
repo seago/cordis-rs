@@ -19,7 +19,7 @@
 
 use std::any::Any;
 use std::cell::{Cell, Ref, RefCell};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
 use crate::component::Component;
@@ -81,10 +81,6 @@ pub struct Runtime {
     /// [`Fiber::retire`] 触发，loader 注册以写回条目 `disabled`。
     /// `pub(crate)`：`Fiber::retire`（fiber.rs）同步触发。
     pub(crate) retire_hook: RefCell<Option<Rc<RetireHook>>>,
-    /// 挂起于 `Step::Await` 的 fiber 集合（P-3 产品验证线：宿主可枚举/
-    /// 上报/批量恢复；与 `fiber.resumable` 一致——登记/撤销见 advance、
-    /// 激活挂起分支与 unload 收账）。
-    suspended: RefCell<HashSet<FiberId>>,
 }
 
 impl Default for Runtime {
@@ -103,7 +99,6 @@ impl Runtime {
             next: Cell::new(0),
             update_hook: RefCell::new(None),
             retire_hook: RefCell::new(None),
-            suspended: RefCell::new(HashSet::new()),
         };
         runtime
             .reactors
@@ -322,8 +317,6 @@ impl Runtime {
         let Some((iter, acc)) = fiber.resumable.borrow_mut().take() else {
             panic!("advance：fiber {fid:?} 未挂起于 Await（调用方违约；需先产生 Step::Await）");
         };
-        // P-3：取走即从挂起集撤（再挂起时重登记）。
-        self.suspended.borrow_mut().remove(&fid);
         // m-2（REVIEW-8589ca2）：guard = `target.is_some()` 弱于激活期
         // `== guard_target`——当前安全（更新路径经 unload 先收账 resumable），
         // 与未来更新路径交互留 A3 复核。
@@ -341,17 +334,24 @@ impl Runtime {
                 fiber.ctx.notify(&provided);
             }
             Err((iter, acc)) => {
-                // 再次挂起（后续 advance 继续）——登记挂起集。
+                // 再次挂起（后续 advance 继续）——resumable 即挂起登记
+                //（`suspended_fibers` 派生自 `is_suspended`，单一事实来源）。
                 *fiber.resumable.borrow_mut() = Some((iter, acc));
-                self.suspended.borrow_mut().insert(fid);
             }
         }
     }
 
-    /// 挂起于 `Step::Await` 的 fiber 快照（P-3：宿主轮询/上报/批量恢复用；
-    /// 与各 fiber 的 `is_suspended()` 一致）。
+    /// 挂起于 `Step::Await` 的 fiber 快照（P-3：宿主轮询/上报/批量恢复用）。
+    ///
+    /// 派生自各 fiber 的 [`Fiber::is_suspended`]（`resumable` 为单一事实
+    /// 来源——backlog ①：访问器生产化消费，消除并行集合双维护）。
     pub fn suspended_fibers(&self) -> Vec<FiberId> {
-        self.suspended.borrow().iter().copied().collect()
+        self.fibers
+            .borrow()
+            .values()
+            .filter(|f| f.is_suspended())
+            .map(|f| f.id())
+            .collect()
     }
 
     /// 批量恢复（P-3）：对挂起集成员按宿主判据检查 → 满足则 `advance`。
@@ -559,10 +559,9 @@ impl Runtime {
         };
         if let Some((iter, acc)) = recovered_suspended.1 {
             // 挂起：保留迭代器 + 已累积逆；状态 Active（target 未变），
-            // 依赖者照常生效（副作用已发生、逆待 advance 收账）。登记挂起集
-            //（P-3：宿主可枚举/批量恢复）。
+            // 依赖者照常生效（副作用已发生、逆待 advance 收账）。挂起登记
+            // = `resumable` 有值（`suspended_fibers` 派生自 `is_suspended`）。
             *fiber.resumable.borrow_mut() = Some((iter, acc));
-            self.suspended.borrow_mut().insert(fiber.id());
             *fiber.state.borrow_mut() = FiberState::Active { view: committed };
             let provided = self.provided_of(fiber);
             fiber.ctx.notify(&provided);
@@ -599,8 +598,6 @@ impl Runtime {
         if let Some((_, mut acc)) = fiber.resumable.borrow_mut().take() {
             fiber.dispose.borrow_mut().append(&mut acc);
         }
-        // P-3：挂起集撤销（unload 收账后该 fiber 不再挂起）。
-        self.suspended.borrow_mut().remove(&fiber.id());
 
         // 1. 依赖者先撤（Thm 63 的 ordering half）。
         let provided = self.provided_of(fiber);
